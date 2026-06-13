@@ -23,7 +23,7 @@ where:
 - `A` is the active virtual subsystem, represented by the dense vector
   `alpha`.
 - `D` is the dormant subsystem, always in zeros.
-- `E_A(s)` is the symbolic Pauli frame on active qubits.
+- `E_A(s)` is the symbolic Pauli frame on all qubits.
 
 Stim qubits are parsed as 0-based qubits. Julia arrays are still 1-based, so
 code that indexes arrays by qubit uses `q + 1` explicitly.
