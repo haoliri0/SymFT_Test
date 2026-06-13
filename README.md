@@ -69,6 +69,12 @@ Pauli operator to `alpha` as an intermediate state.
 
 ## Workflow
 
+0. Initialise the package:
+
+```bash
+julia --project=. -e "using Pkg; Pkg.instantiate()"
+```
+
 In Julia, load the package first:
 
 ```julia
