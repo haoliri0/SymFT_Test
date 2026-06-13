@@ -1,0 +1,11 @@
+include("test_helpers.jl")
+
+include("test_pauli_string.jl")
+include("test_clifford_frame.jl")
+include("test_symbolic_state.jl")
+include("test_frame_factored_state.jl")
+include("test_pending_processing.jl")
+include("test_extended_stim_max_k.jl")
+include("test_factored_single_shot_sampler.jl")
+include("test_factored_batch_sampler.jl")
+include("test_active_state.jl")
