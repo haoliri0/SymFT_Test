@@ -14,7 +14,7 @@ factored update plan.
 The simulator maintains the state up to shot-global phase in factored form:
 
 ```text
-|psi> ~= C ( E_A(s) |alpha>_A tensor |x(s)>_D )
+|psi> ~= C ( E_A(s) |alpha>_A tensor |0>_D )
 ```
 
 where:
@@ -22,9 +22,8 @@ where:
 - `C` is the concrete Clifford frame.
 - `A` is the active virtual subsystem, represented by the dense vector
   `alpha`.
-- `D` is the dormant subsystem, represented by symbolic stabilizer signs.
+- `D` is the dormant subsystem, always in zeros.
 - `E_A(s)` is the symbolic Pauli frame on active qubits.
-- `x(s)` stores symbolic dormant basis bits.
 
 Stim qubits are parsed as 0-based qubits. Julia arrays are still 1-based, so
 code that indexes arrays by qubit uses `q + 1` explicitly.
