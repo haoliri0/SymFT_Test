@@ -200,6 +200,24 @@ Run the test suite:
 julia --project=. test/runtests.jl
 ```
 
+Build and test the C++ port:
+
+```bash
+cmake -S . -B build/cpp -DSYMFT_CPP_BUILD_TESTS=ON
+cmake --build build/cpp -j
+ctest --test-dir build/cpp --output-on-failure
+```
+
+Run the C++ CLI on a Stim fixture:
+
+```bash
+./build/cpp/cpp/symft_cli d3.stim 1000
+```
+
+The C++ build compiles scalar kernels by default and, when the compiler
+supports the flags, target-specific AVX2 and AVX512 translation units. Runtime
+dispatch selects only SIMD instruction sets reported by the current CPU.
+
 Benchmark the standard batch sampler:
 
 ```bash
