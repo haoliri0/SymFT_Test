@@ -225,6 +225,12 @@ The C++ batch active layout stores real and imaginary arrays as
 `active[basis][shot]`, so shots are contiguous in memory for each active basis
 column.
 
+Benchmark the C++ batch sampler:
+
+```bash
+./build/cpp/cpp/symft_batch_bench 10000 auto 1
+```
+
 The C++ build compiles scalar kernels by default and, when the compiler
 supports the flags, target-specific AVX2 and AVX512 translation units. Runtime
 dispatch selects only SIMD instruction sets reported by the current CPU.
