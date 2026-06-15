@@ -7,9 +7,16 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
+#include <variant>
 #include <vector>
+
+#if (defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86))
+#include <immintrin.h>
+#endif
 
 namespace {
 
@@ -55,11 +62,133 @@ int parse_nonnegative_int(const char* raw, const char* name) {
     return static_cast<int>(value);
 }
 
+bool parse_bool_flag(const char* raw, const char* name) {
+    const std::string value(raw);
+    if (value == "1" || value == "true" || value == "yes" || value == "on" || value == "postselect") {
+        return true;
+    }
+    if (value == "0" || value == "false" || value == "no" || value == "off" || value == "none") {
+        return false;
+    }
+    throw std::runtime_error(std::string("invalid ") + name + ": " + raw);
+}
+
 int parse_block_shots(const char* raw) {
     if (std::string(raw) == "auto") {
         return 0;
     }
     return parse_positive_int(raw, "block_shots");
+}
+
+struct Options {
+    std::string path = "d3.stim";
+    std::uint64_t shots = 100000000ULL;
+    int block_shots = 0;
+    int repeats = 1;
+    int observable = 0;
+    bool postselect_detectors = false;
+};
+
+void print_usage(const char* argv0) {
+    std::cerr
+        << "usage: " << argv0 << " [circuit.stim] [shots] [batch_size] [repeats] [observable] [postselect_detectors]\n"
+        << "       " << argv0 << " --circuit d5.stim --shots 1000000 --batch-size 64 --postselect-detectors\n"
+        << "\n"
+        << "options:\n"
+        << "  --circuit PATH, --file PATH        Stim circuit path\n"
+        << "  --shots N                         Number of shots\n"
+        << "  --batch-size N|auto               Batch size; --block-shots is accepted as an alias\n"
+        << "  --repeats N                       Number of repeats\n"
+        << "  --observable N                    Observable index\n"
+        << "  --postselect-detectors            Abort and compact shots after fired detectors\n"
+        << "  --no-postselect-detectors         Disable detector postselection abort\n";
+}
+
+std::string require_option_value(
+    const std::string& option,
+    const std::string& inline_value,
+    int& idx,
+    int argc,
+    char** argv) {
+    if (!inline_value.empty()) {
+        return inline_value;
+    }
+    if (idx + 1 >= argc) {
+        throw std::runtime_error(option + " requires a value");
+    }
+    return argv[++idx];
+}
+
+void apply_positional_option(Options& options, int position, const char* value) {
+    switch (position) {
+    case 0:
+        options.path = value;
+        break;
+    case 1:
+        options.shots = parse_u64(value, "shots");
+        break;
+    case 2:
+        options.block_shots = parse_block_shots(value);
+        break;
+    case 3:
+        options.repeats = parse_positive_int(value, "repeats");
+        break;
+    case 4:
+        options.observable = parse_nonnegative_int(value, "observable");
+        break;
+    case 5:
+        options.postselect_detectors = parse_bool_flag(value, "postselect_detectors");
+        break;
+    default:
+        throw std::runtime_error("too many positional arguments");
+    }
+}
+
+Options parse_options(int argc, char** argv) {
+    Options options;
+    int positional = 0;
+    for (int idx = 1; idx < argc; ++idx) {
+        std::string arg(argv[idx]);
+        if (arg == "-h" || arg == "--help") {
+            print_usage(argv[0]);
+            std::exit(0);
+        }
+        if (arg.rfind("--", 0) != 0) {
+            apply_positional_option(options, positional++, argv[idx]);
+            continue;
+        }
+
+        std::string name = arg;
+        std::string value;
+        const std::size_t eq = arg.find('=');
+        if (eq != std::string::npos) {
+            name = arg.substr(0, eq);
+            value = arg.substr(eq + 1);
+        }
+
+        if (name == "--circuit" || name == "--file") {
+            options.path = require_option_value(name, value, idx, argc, argv);
+        } else if (name == "--shots") {
+            const std::string raw = require_option_value(name, value, idx, argc, argv);
+            options.shots = parse_u64(raw.c_str(), "shots");
+        } else if (name == "--batch-size" || name == "--block-shots") {
+            const std::string raw = require_option_value(name, value, idx, argc, argv);
+            options.block_shots = parse_block_shots(raw.c_str());
+        } else if (name == "--repeats") {
+            const std::string raw = require_option_value(name, value, idx, argc, argv);
+            options.repeats = parse_positive_int(raw.c_str(), "repeats");
+        } else if (name == "--observable") {
+            const std::string raw = require_option_value(name, value, idx, argc, argv);
+            options.observable = parse_nonnegative_int(raw.c_str(), "observable");
+        } else if (name == "--postselect-detectors" || name == "--detector-postselection") {
+            options.postselect_detectors = value.empty() ? true : parse_bool_flag(value.c_str(), "postselect_detectors");
+        } else if (name == "--no-postselect-detectors") {
+            options.postselect_detectors = false;
+        } else {
+            throw std::runtime_error("unknown option: " + name);
+        }
+    }
+    return options;
 }
 
 int popcount64(std::uint64_t value) {
@@ -152,20 +281,323 @@ void accumulate_block_counts(
     }
 }
 
+std::optional<int> instruction_record(const symft::FactoredInstruction& instruction) {
+    return std::visit(
+        [](const auto& inst) -> std::optional<int> {
+            using T = std::decay_t<decltype(inst)>;
+            if constexpr (
+                std::is_same_v<T, symft::RecordMeasurement> ||
+                std::is_same_v<T, symft::MeasureActiveLastZ> ||
+                std::is_same_v<T, symft::MeasurePrecomputedActivePauli> ||
+                std::is_same_v<T, symft::IntroduceDormantMeasurementBranch>) {
+                return inst.record;
+            } else {
+                return std::nullopt;
+            }
+        },
+        instruction);
+}
+
+std::vector<std::vector<std::vector<int>>> detectors_by_max_record(
+    const std::vector<symft::StimDetector>& detectors,
+    int nrecords) {
+    std::vector<std::vector<std::vector<int>>> out(static_cast<std::size_t>(nrecords + 1));
+    for (const auto& detector : detectors) {
+        if (detector.records.empty()) {
+            continue;
+        }
+        int max_record = 0;
+        for (int record : detector.records) {
+            if (record <= 0 || record > nrecords) {
+                throw std::runtime_error("detector references an out-of-range measurement record");
+            }
+            max_record = std::max(max_record, record);
+        }
+        out[static_cast<std::size_t>(max_record)].push_back(detector.records);
+    }
+    return out;
+}
+
+bool packed_batch_bit(const std::vector<std::uint64_t>& words, int shot) {
+    return (words[static_cast<std::size_t>(shot >> 6)] & (std::uint64_t{1} << (shot & 63))) != 0;
+}
+
+void set_packed_batch_bit(std::vector<std::uint64_t>& words, int shot) {
+    words[static_cast<std::size_t>(shot >> 6)] |= std::uint64_t{1} << (shot & 63);
+}
+
+int count_live_bits(const std::vector<std::uint64_t>& bits, int shots) {
+    int count = 0;
+    const std::size_t nwords = batch_word_count(shots);
+    for (std::size_t word = 0; word < nwords; ++word) {
+        count += popcount64(bits[word] & live_word_mask(shots, word));
+    }
+    return count;
+}
+
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386))
+__attribute__((target("bmi2")))
+std::uint64_t compress_bits_bmi2(std::uint64_t bits, std::uint64_t keep_mask) {
+    return _pext_u64(bits, keep_mask);
+}
+#endif
+
+std::uint64_t compress_bits_portable(std::uint64_t bits, std::uint64_t keep_mask) {
+    std::uint64_t out = 0;
+    std::uint64_t dest = 1;
+    while (keep_mask != 0) {
+        const std::uint64_t bit = keep_mask & (~keep_mask + 1);
+        if ((bits & bit) != 0) {
+            out |= dest;
+        }
+        keep_mask &= keep_mask - 1;
+        dest <<= 1;
+    }
+    return out;
+}
+
+std::uint64_t compress_bits(std::uint64_t bits, std::uint64_t keep_mask) {
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386))
+    static const bool has_bmi2 = __builtin_cpu_supports("bmi2");
+    if (has_bmi2) {
+        return compress_bits_bmi2(bits, keep_mask);
+    }
+#endif
+    return compress_bits_portable(bits, keep_mask);
+}
+
+void compact_packed_columns(
+    std::vector<std::uint64_t>& columns,
+    int column_count,
+    std::size_t stride_words,
+    int old_shots,
+    int survivor_count,
+    const std::vector<std::uint64_t>& keep_bits,
+    std::vector<std::uint64_t>& scratch) {
+    if (column_count <= 0 || stride_words == 0) {
+        return;
+    }
+    if (old_shots <= 64) {
+        const std::uint64_t keep_mask = keep_bits.empty() ? 0 : keep_bits[0] & live_word_mask(old_shots, 0);
+        for (int column = 0; column < column_count; ++column) {
+            const std::size_t base = static_cast<std::size_t>(column) * stride_words;
+            columns[base] = compress_bits(columns[base], keep_mask);
+            for (std::size_t word = 1; word < stride_words; ++word) {
+                columns[base + word] = 0;
+            }
+        }
+        return;
+    }
+    if (scratch.size() < stride_words) {
+        scratch.resize(stride_words, 0);
+    }
+    for (int column = 0; column < column_count; ++column) {
+        std::fill(scratch.begin(), scratch.begin() + static_cast<std::ptrdiff_t>(stride_words), 0);
+        const std::size_t base = static_cast<std::size_t>(column) * stride_words;
+        int dest = 0;
+        for (int src = 0; src < old_shots; ++src) {
+            if (!packed_batch_bit(keep_bits, src)) {
+                continue;
+            }
+            if ((columns[base + static_cast<std::size_t>(src >> 6)] & (std::uint64_t{1} << (src & 63))) != 0) {
+                set_packed_batch_bit(scratch, dest);
+            }
+            ++dest;
+        }
+        if (dest != survivor_count) {
+            throw std::runtime_error("internal survivor compaction count mismatch");
+        }
+        std::copy_n(scratch.data(), stride_words, columns.data() + base);
+    }
+}
+
+void compact_active_columns(
+    symft::BatchFactoredExecutorState& runtime,
+    int old_shots,
+    int survivor_count,
+    const std::vector<std::uint64_t>& keep_bits) {
+    const std::size_t dim = std::size_t{1} << runtime.k;
+    for (std::size_t basis = 0; basis < dim; ++basis) {
+        const std::size_t base = basis * static_cast<std::size_t>(runtime.batches);
+        int dest = 0;
+        for (int src = 0; src < old_shots; ++src) {
+            if (!packed_batch_bit(keep_bits, src)) {
+                continue;
+            }
+            if (dest != src) {
+                runtime.active_re[base + static_cast<std::size_t>(dest)] =
+                    runtime.active_re[base + static_cast<std::size_t>(src)];
+                runtime.active_im[base + static_cast<std::size_t>(dest)] =
+                    runtime.active_im[base + static_cast<std::size_t>(src)];
+            }
+            ++dest;
+        }
+        if (dest != survivor_count) {
+            throw std::runtime_error("internal active compaction count mismatch");
+        }
+    }
+}
+
+void compact_surviving_shots(
+    symft::BatchFactoredExecutorState& runtime,
+    const std::vector<std::uint64_t>& keep_bits,
+    std::vector<std::uint64_t>& scratch) {
+    const int old_shots = runtime.active_shots;
+    const int survivor_count = count_live_bits(keep_bits, old_shots);
+    if (survivor_count == old_shots) {
+        return;
+    }
+    compact_active_columns(runtime, old_shots, survivor_count, keep_bits);
+    compact_packed_columns(
+        runtime.value_words,
+        runtime.nsymbols,
+        runtime.batch_words,
+        old_shots,
+        survivor_count,
+        keep_bits,
+        scratch);
+    compact_packed_columns(
+        runtime.measurement_words,
+        runtime.nrecords,
+        runtime.batch_words,
+        old_shots,
+        survivor_count,
+        keep_bits,
+        scratch);
+    runtime.active_shots = survivor_count;
+}
+
+void compact_dead_shots_if_needed(
+    symft::BatchFactoredExecutorState& runtime,
+    std::vector<std::uint64_t>& dead_bits,
+    std::vector<std::uint64_t>& keep_bits,
+    std::vector<std::uint64_t>& compact_scratch,
+    bool force) {
+    if (runtime.active_shots == 0) {
+        return;
+    }
+    const int dead_count = count_live_bits(dead_bits, runtime.active_shots);
+    if (dead_count == 0) {
+        return;
+    }
+    if (!force && dead_count != runtime.active_shots && dead_count * 4 < runtime.active_shots) {
+        return;
+    }
+    const std::size_t nwords = batch_word_count(runtime.active_shots);
+    for (std::size_t word = 0; word < nwords; ++word) {
+        keep_bits[word] = (~dead_bits[word]) & live_word_mask(runtime.active_shots, word);
+    }
+    std::fill(keep_bits.begin() + static_cast<std::ptrdiff_t>(nwords), keep_bits.end(), 0);
+    compact_surviving_shots(runtime, keep_bits, compact_scratch);
+    std::fill(dead_bits.begin(), dead_bits.end(), 0);
+}
+
+void apply_postselection_checks_for_record(
+    RateCounts& counts,
+    symft::BatchFactoredExecutorState& runtime,
+    const std::vector<std::vector<int>>& detectors,
+    std::vector<std::uint64_t>& detector_bits,
+    std::vector<std::uint64_t>& dead_bits,
+    std::vector<std::uint64_t>& keep_bits,
+    std::vector<std::uint64_t>& scratch,
+    std::vector<std::uint64_t>& compact_scratch) {
+    if (detectors.empty() || runtime.active_shots == 0) {
+        return;
+    }
+    const std::size_t nwords = batch_word_count(runtime.active_shots);
+    std::fill(detector_bits.begin(), detector_bits.begin() + static_cast<std::ptrdiff_t>(nwords), 0);
+    for (const auto& records : detectors) {
+        xor_records_into(scratch, runtime.measurement_words, runtime.batch_words, nwords, records);
+        for (std::size_t word = 0; word < nwords; ++word) {
+            detector_bits[word] |= scratch[word] & live_word_mask(runtime.active_shots, word);
+        }
+    }
+    int discarded_now = 0;
+    for (std::size_t word = 0; word < nwords; ++word) {
+        const std::uint64_t live = live_word_mask(runtime.active_shots, word);
+        const std::uint64_t newly_dead = detector_bits[word] & ~dead_bits[word] & live;
+        discarded_now += popcount64(newly_dead);
+        dead_bits[word] |= detector_bits[word] & live;
+    }
+    if (discarded_now == 0) {
+        return;
+    }
+    counts.discarded += static_cast<std::uint64_t>(discarded_now);
+    compact_dead_shots_if_needed(runtime, dead_bits, keep_bits, compact_scratch, false);
+}
+
+void accumulate_logical_counts_for_survivors(
+    RateCounts& counts,
+    const symft::BatchFactoredExecutorState& runtime,
+    const std::vector<std::vector<int>>& logical_records,
+    std::vector<std::uint64_t>& logical_bits,
+    std::vector<std::uint64_t>& scratch) {
+    counts.accepted += static_cast<std::uint64_t>(runtime.active_shots);
+    if (runtime.active_shots == 0) {
+        return;
+    }
+    const std::size_t nwords = batch_word_count(runtime.active_shots);
+    std::fill(logical_bits.begin(), logical_bits.begin() + static_cast<std::ptrdiff_t>(nwords), 0);
+    for (const auto& records : logical_records) {
+        xor_records_into(scratch, runtime.measurement_words, runtime.batch_words, nwords, records);
+        for (std::size_t word = 0; word < nwords; ++word) {
+            logical_bits[word] ^= scratch[word] & live_word_mask(runtime.active_shots, word);
+        }
+    }
+    for (std::size_t word = 0; word < nwords; ++word) {
+        counts.logical_errors += static_cast<std::uint64_t>(
+            popcount64(logical_bits[word] & live_word_mask(runtime.active_shots, word)));
+    }
+}
+
+void execute_postselected_block(
+    RateCounts& counts,
+    symft::BatchFactoredExecutorState& runtime,
+    const symft::FactoredInstructionProgram& program,
+    const symft::PresampledExogenous& samples,
+    const std::vector<std::vector<std::vector<int>>>& detectors_by_record,
+    const std::vector<std::vector<int>>& logical_records,
+    std::vector<std::uint64_t>& detector_bits,
+    std::vector<std::uint64_t>& dead_bits,
+    std::vector<std::uint64_t>& keep_bits,
+    std::vector<std::uint64_t>& scratch,
+    std::vector<std::uint64_t>& compact_scratch) {
+    std::fill(dead_bits.begin(), dead_bits.end(), 0);
+    symft::assign_presampled_exogenous_batch_in_place(runtime, samples);
+    for (const auto& instruction : program.instructions) {
+        if (runtime.active_shots == 0) {
+            break;
+        }
+        symft::execute_batch_instruction_in_place(runtime, instruction);
+        const auto record = instruction_record(instruction);
+        if (!record || *record <= 0 || *record >= static_cast<int>(detectors_by_record.size())) {
+            continue;
+        }
+        apply_postselection_checks_for_record(
+            counts,
+            runtime,
+            detectors_by_record[static_cast<std::size_t>(*record)],
+            detector_bits,
+            dead_bits,
+            keep_bits,
+            scratch,
+            compact_scratch);
+    }
+    compact_dead_shots_if_needed(runtime, dead_bits, keep_bits, compact_scratch, true);
+    accumulate_logical_counts_for_survivors(counts, runtime, logical_records, keep_bits, scratch);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc > 6 || (argc >= 2 && (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help"))) {
-        std::cerr << "usage: symft_rate_bench [circuit.stim=d3.stim] [shots=100000000] [block_shots=auto] [repeats=1] [observable=0]\n";
-        return argc > 6 ? 2 : 0;
-    }
-
     try {
-        const std::string path = argc >= 2 ? argv[1] : "d3.stim";
-        const std::uint64_t shots = argc >= 3 ? parse_u64(argv[2], "shots") : 100000000ULL;
-        const int requested_block_shots = argc >= 4 ? parse_block_shots(argv[3]) : 0;
-        const int repeats = argc >= 5 ? parse_positive_int(argv[4], "repeats") : 1;
-        const int observable = argc >= 6 ? parse_nonnegative_int(argv[5], "observable") : 0;
+        const Options options = parse_options(argc, argv);
+        const std::string& path = options.path;
+        const std::uint64_t shots = options.shots;
+        const int requested_block_shots = options.block_shots;
+        const int repeats = options.repeats;
+        const int observable = options.observable;
+        const bool postselect_detectors = options.postselect_detectors;
 
         double parse_total = 0.0;
         double plan_total = 0.0;
@@ -203,6 +635,8 @@ int main(int argc, char** argv) {
                     logical_records.push_back(include.records);
                 }
             }
+            const auto postselection_detectors_by_record =
+                detectors_by_max_record(parsed.detectors, program.nrecords);
 
             RateCounts counts;
             counts.shots = shots;
@@ -211,8 +645,10 @@ int main(int argc, char** argv) {
                 block_shots,
                 0x5eed1234ULL + static_cast<std::uint64_t>(repeat));
             std::vector<std::uint64_t> discard_bits(runtime.batch_words, 0);
+            std::vector<std::uint64_t> dead_bits(runtime.batch_words, 0);
             std::vector<std::uint64_t> logical_bits(runtime.batch_words, 0);
             std::vector<std::uint64_t> scratch(runtime.batch_words, 0);
+            std::vector<std::uint64_t> compact_scratch(runtime.batch_words, 0);
             std::uint64_t exogenous_seed = 0x7eed0000ULL + static_cast<std::uint64_t>(repeat);
             std::uint64_t offset = 0;
             while (offset < shots) {
@@ -226,17 +662,34 @@ int main(int argc, char** argv) {
                 exogenous_seed = samples.next_rng_state;
 
                 symft::reset_batch_executor(runtime, program, block);
-                symft::execute_batch_in_place(runtime, program, samples);
+                if (postselect_detectors) {
+                    execute_postselected_block(
+                        counts,
+                        runtime,
+                        program,
+                        samples,
+                        postselection_detectors_by_record,
+                        logical_records,
+                        discard_bits,
+                        dead_bits,
+                        logical_bits,
+                        scratch,
+                        compact_scratch);
+                } else {
+                    symft::execute_batch_in_place(runtime, program, samples);
+                }
                 const auto execute_stop = Clock::now();
-                accumulate_block_counts(
-                    counts,
-                    runtime,
-                    block,
-                    parsed.detectors,
-                    logical_records,
-                    discard_bits,
-                    logical_bits,
-                    scratch);
+                if (!postselect_detectors) {
+                    accumulate_block_counts(
+                        counts,
+                        runtime,
+                        block,
+                        parsed.detectors,
+                        logical_records,
+                        discard_bits,
+                        logical_bits,
+                        scratch);
+                }
                 const auto accumulate_stop = Clock::now();
 
                 presample_total += seconds_between(presample_start, presample_stop);
@@ -276,9 +729,11 @@ int main(int argc, char** argv) {
         std::cout << "simd_backend " << symft::active_simd_backend() << "\n";
         std::cout << "shots " << shots << "\n";
         std::cout << "sampled_shots " << total_counts.shots << "\n";
+        std::cout << "batch_size " << block_shots << "\n";
         std::cout << "block_shots " << block_shots << "\n";
         std::cout << "repeats " << repeats << "\n";
-        std::cout << "sampler batch\n";
+        std::cout << "sampler " << (postselect_detectors ? "batch_postselected" : "batch") << "\n";
+        std::cout << "detector_postselection " << (postselect_detectors ? "enabled" : "disabled") << "\n";
         std::cout << "exogenous_mode presampled_streaming\n";
         std::cout << "rng_streams split_exogenous_branch\n";
         std::cout << "parse_s_avg " << parse_s << "\n";

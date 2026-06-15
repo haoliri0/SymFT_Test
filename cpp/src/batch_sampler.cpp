@@ -1110,6 +1110,18 @@ const char* active_batch_backend() {
     return batch_simd::scalar_table().name;
 }
 
+void assign_presampled_exogenous_batch_in_place(
+    BatchFactoredExecutorState& runtime,
+    const PresampledExogenous& samples) {
+    assign_presampled_exogenous_batch(runtime, samples);
+}
+
+void execute_batch_instruction_in_place(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstruction& instruction) {
+    execute_batch_instruction(runtime, instruction);
+}
+
 BatchFactoredExecutorState::BatchFactoredExecutorState(
     const FactoredInstructionProgram& program,
     int batches_,
