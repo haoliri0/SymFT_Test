@@ -5,6 +5,14 @@
 namespace symft::simd {
 namespace {
 
+#if defined(__clang__)
+#define SYMFT_SIMD_LOOP _Pragma("clang loop vectorize(enable) interleave(enable)")
+#elif defined(__GNUC__)
+#define SYMFT_SIMD_LOOP _Pragma("GCC ivdep")
+#else
+#define SYMFT_SIMD_LOOP
+#endif
+
 void avx2_mul_assign(Complex* alpha, const Complex* coeff, double c, std::size_t n) {
     const auto* cr = reinterpret_cast<const double*>(coeff);
     auto* ar = reinterpret_cast<double*>(alpha);
@@ -27,9 +35,14 @@ void avx2_mul_assign(Complex* alpha, const Complex* coeff, double c, std::size_t
 }
 
 double avx2_norm_sum(const Complex* alpha, const std::size_t* indices, std::size_t n) {
+    const auto* raw = reinterpret_cast<const double*>(alpha);
     double out = 0.0;
+    SYMFT_SIMD_LOOP
     for (std::size_t i = 0; i < n; ++i) {
-        out += std::norm(alpha[indices[i]]);
+        const std::size_t src = 2 * indices[i];
+        const double r = raw[src];
+        const double im = raw[src + 1];
+        out += r * r + im * im;
     }
     return out;
 }
@@ -44,6 +57,7 @@ void avx2_rotate_uniform_imag_pairs(
     auto* raw = reinterpret_cast<double*>(alpha);
     const __m256d vc = _mm256_set1_pd(c);
     const __m256d vq = _mm256_setr_pd(-q, q, -q, q);
+    SYMFT_SIMD_LOOP
     for (std::size_t idx = 0; idx < npairs; ++idx) {
         double* a0 = raw + 2 * left_indices[idx];
         double* a1 = raw + 2 * right_indices[idx];
@@ -67,6 +81,7 @@ void avx2_rotate_real_pair_flip(
     std::uint64_t zmask) {
     auto* raw = reinterpret_cast<double*>(alpha);
     const __m256d vc = _mm256_set1_pd(c);
+    SYMFT_SIMD_LOOP
     for (std::size_t idx = 0; idx < npairs; ++idx) {
         const std::size_t i0 = left_indices[idx];
         const std::size_t i1 = right_indices[idx];

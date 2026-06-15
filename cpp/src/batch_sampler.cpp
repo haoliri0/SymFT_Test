@@ -11,6 +11,7 @@ namespace {
 constexpr int kDefaultBatchShots = 2048;
 constexpr std::size_t kDefaultBatchActiveAmplitudes = std::size_t{1} << 16;
 constexpr std::size_t kXmaskRotationPairThreshold = 64;
+constexpr std::size_t kBatchScalarSymbolicEvalThreshold = 32;
 
 #if defined(__clang__)
 #define SYMFT_BATCH_SIMD_LOOP _Pragma("clang loop vectorize(enable) interleave(enable)")
@@ -348,27 +349,69 @@ void eval_symbolic_bool_batch(
     if (plan.conditions.empty()) {
         return;
     }
-    if (!plan.word_indices.empty()) {
-        const std::size_t max_word = static_cast<std::size_t>(plan.word_indices.back());
-        if (max_word >= runtime.assigned_words.size()) {
-            fail("symbolic condition expression has no concrete batch value");
+    const std::size_t nwords = runtime_batch_word_count(runtime);
+    if (plan.word_indices.empty() || plan.conditions.size() <= kBatchScalarSymbolicEvalThreshold) {
+        if (nwords == 1) {
+            std::uint64_t out0 = out[0];
+            if (runtime.batch_words == 1) {
+                for (int condition : plan.conditions) {
+                    if (!batch_symbol_assigned(runtime, condition)) {
+                        fail("symbolic condition expression has no concrete batch value");
+                    }
+                    out0 ^= runtime.value_words[static_cast<std::size_t>(condition - 1)];
+                }
+            } else {
+                for (int condition : plan.conditions) {
+                    if (!batch_symbol_assigned(runtime, condition)) {
+                        fail("symbolic condition expression has no concrete batch value");
+                    }
+                    out0 ^= runtime.value_words[batch_condition_offset(runtime, condition, 0)];
+                }
+            }
+            out[0] = out0;
+            mask_batch_bits(out, runtime);
+            return;
         }
-        std::uint64_t missing = 0;
-        for (std::size_t i = 0; i < plan.word_indices.size(); ++i) {
-            const std::size_t word = static_cast<std::size_t>(plan.word_indices[i]);
-            missing |= plan.word_masks[i] & ~runtime.assigned_words[word];
+        if (nwords == 2) {
+            std::uint64_t out0 = out[0];
+            std::uint64_t out1 = out[1];
+            for (int condition : plan.conditions) {
+                if (!batch_symbol_assigned(runtime, condition)) {
+                    fail("symbolic condition expression has no concrete batch value");
+                }
+                const std::size_t base = batch_condition_offset(runtime, condition, 0);
+                out0 ^= runtime.value_words[base];
+                out1 ^= runtime.value_words[base + 1];
+            }
+            out[0] = out0;
+            out[1] = out1;
+            mask_batch_bits(out, runtime);
+            return;
         }
-        if (missing != 0) {
-            fail("symbolic condition expression has no concrete batch value");
-        }
-    } else {
         for (int condition : plan.conditions) {
             if (!batch_symbol_assigned(runtime, condition)) {
                 fail("symbolic condition expression has no concrete batch value");
             }
+            const std::size_t base = batch_condition_offset(runtime, condition, 0);
+            for (std::size_t word = 0; word < nwords; ++word) {
+                out[word] ^= runtime.value_words[base + word];
+            }
         }
+        mask_batch_bits(out, runtime);
+        return;
     }
-    const std::size_t nwords = runtime_batch_word_count(runtime);
+    const std::size_t max_word = static_cast<std::size_t>(plan.word_indices.back());
+    if (max_word >= runtime.assigned_words.size()) {
+        fail("symbolic condition expression has no concrete batch value");
+    }
+    std::uint64_t missing = 0;
+    for (std::size_t i = 0; i < plan.word_indices.size(); ++i) {
+        const std::size_t word = static_cast<std::size_t>(plan.word_indices[i]);
+        missing |= plan.word_masks[i] & ~runtime.assigned_words[word];
+    }
+    if (missing != 0) {
+        fail("symbolic condition expression has no concrete batch value");
+    }
     if (nwords == 1) {
         std::uint64_t out0 = out[0];
         if (runtime.batch_words == 1) {

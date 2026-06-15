@@ -20,7 +20,15 @@ constexpr int kWordBits = 64;
 constexpr double kPi = 3.141592653589793238462643383279502884;
 constexpr std::size_t kNoSource = std::numeric_limits<std::size_t>::max();
 constexpr double kLowProbabilitySampleThreshold = 0.02;
-constexpr std::size_t kSimdPairRotationThreshold = 16;
+constexpr std::size_t kSimdPairRotationThreshold = 4096;
+
+#if defined(__clang__)
+#define SYMFT_SINGLE_SIMD_LOOP _Pragma("clang loop vectorize(enable) interleave(enable)")
+#elif defined(__GNUC__)
+#define SYMFT_SINGLE_SIMD_LOOP _Pragma("GCC ivdep")
+#else
+#define SYMFT_SINGLE_SIMD_LOOP
+#endif
 
 [[noreturn]] void fail(const std::string& message) {
     throw Error(message);
@@ -190,6 +198,7 @@ inline void rotate_uniform_imag_pairs_scalar(
     double c,
     double q) {
     auto* raw = reinterpret_cast<double*>(alpha);
+    SYMFT_SINGLE_SIMD_LOOP
     for (std::size_t idx = 0; idx < npairs; ++idx) {
         double* a0 = raw + 2 * left_indices[idx];
         double* a1 = raw + 2 * right_indices[idx];
@@ -213,6 +222,7 @@ inline void rotate_real_pair_flip_scalar(
     double base_coeff,
     std::uint64_t zmask) {
     auto* raw = reinterpret_cast<double*>(alpha);
+    SYMFT_SINGLE_SIMD_LOOP
     for (std::size_t idx = 0; idx < npairs; ++idx) {
         const std::size_t i0 = left_indices[idx];
         const std::size_t i1 = right_indices[idx];
@@ -2480,11 +2490,46 @@ bool eval_symbolic_bool_packed(const SymbolicBoolEvaluationPlan& plan, const Fac
     return plan.constant != is_odd_popcount(parity_bits);
 }
 
-bool eval_symbolic_bool(const SymbolicBoolEvaluationPlan& plan, const FactoredExecutorState& runtime) {
+bool eval_symbolic_bool_packed_unchecked(const SymbolicBoolEvaluationPlan& plan, const FactoredExecutorState& runtime) {
+    const auto* word_indices = plan.word_indices.data();
+    const auto* word_masks = plan.word_masks.data();
+    const auto* value_words = runtime.value_words.data();
+    std::uint64_t parity_bits = 0;
+    for (std::size_t i = 0; i < plan.word_indices.size(); ++i) {
+        const std::size_t word = static_cast<std::size_t>(word_indices[i]);
+        parity_bits ^= value_words[word] & word_masks[i];
+    }
+    return plan.constant != is_odd_popcount(parity_bits);
+}
+
+bool eval_symbolic_bool_scalar(const SymbolicBoolEvaluationPlan& plan, const FactoredExecutorState& runtime) {
+    bool out = plan.constant;
+    for (int condition : plan.conditions) {
+        check_symbol_slot(runtime, condition);
+        const std::size_t word = symbol_word_index(condition);
+        const std::uint64_t mask = symbol_bit_mask(condition);
+        if ((runtime.assigned_words[word] & mask) == 0) {
+            fail("symbolic condition expression has no concrete value");
+        }
+        out = out != ((runtime.value_words[word] & mask) != 0);
+    }
+    return out;
+}
+
+[[maybe_unused]] bool eval_symbolic_bool(const SymbolicBoolEvaluationPlan& plan, const FactoredExecutorState& runtime) {
+    if (plan.word_indices.empty()) {
+        return eval_symbolic_bool_scalar(plan, runtime);
+    }
+    return eval_symbolic_bool_packed(plan, runtime);
+}
+
+bool eval_symbolic_bool_unchecked(const SymbolicBoolEvaluationPlan& plan, const FactoredExecutorState& runtime) {
+    // Hot planned execution relies on the planner's assignment-before-use invariant.
+    // Keep eval_symbolic_bool above as the checked counterpart for validation/debugging.
     if (plan.word_indices.empty()) {
         return plan.constant;
     }
-    return eval_symbolic_bool_packed(plan, runtime);
+    return eval_symbolic_bool_packed_unchecked(plan, runtime);
 }
 
 void write_measurement_record(
@@ -2995,7 +3040,7 @@ void project_active_pauli_measurement(
 }
 
 void execute_instruction(FactoredExecutorState& runtime, const ApplyPrecomputedActivePauliRotation& instruction) {
-    const bool sign = eval_symbolic_bool(instruction.sign_plan, runtime);
+    const bool sign = eval_symbolic_bool_unchecked(instruction.sign_plan, runtime);
     rotate_pauli(runtime.active, instruction.rotation_kernel, sign);
 }
 
@@ -3004,12 +3049,12 @@ void execute_instruction(FactoredExecutorState& runtime, const ApplyActiveBasisC
 }
 
 void execute_instruction(FactoredExecutorState& runtime, const PromoteDormantRotation& instruction) {
-    const bool sign = eval_symbolic_bool(instruction.sign_plan, runtime);
+    const bool sign = eval_symbolic_bool_unchecked(instruction.sign_plan, runtime);
     promote_first_dormant_rotation(runtime, sign ? -instruction.theta : instruction.theta);
 }
 
 void execute_instruction(FactoredExecutorState& runtime, const RecordMeasurement& instruction) {
-    const bool outcome = eval_symbolic_bool(instruction.outcome_plan, runtime);
+    const bool outcome = eval_symbolic_bool_unchecked(instruction.outcome_plan, runtime);
     write_measurement_record(runtime, instruction.record, outcome, instruction.record_condition);
 }
 
@@ -3020,7 +3065,7 @@ void execute_instruction(FactoredExecutorState& runtime, const MeasureActiveLast
     project_active_last_z(runtime.active, branch, prob1);
     runtime.k = runtime.active.k;
     ++runtime.ndormant;
-    const bool outcome = eval_symbolic_bool(instruction.outcome_plan, runtime);
+    const bool outcome = eval_symbolic_bool_unchecked(instruction.outcome_plan, runtime);
     write_measurement_record(runtime, instruction.record, outcome, instruction.record_condition);
 }
 
@@ -3043,14 +3088,14 @@ void execute_instruction(FactoredExecutorState& runtime, const MeasurePrecompute
     }
     runtime.k = runtime.active.k;
     ++runtime.ndormant;
-    const bool outcome = eval_symbolic_bool(instruction.outcome_plan, runtime);
+    const bool outcome = eval_symbolic_bool_unchecked(instruction.outcome_plan, runtime);
     write_measurement_record(runtime, instruction.record, outcome, instruction.record_condition);
 }
 
 void execute_instruction(FactoredExecutorState& runtime, const IntroduceDormantMeasurementBranch& instruction) {
     const bool branch = sample_bernoulli(runtime.rng_state, 0.5);
     assign_symbol(runtime, instruction.branch, branch);
-    const bool outcome = eval_symbolic_bool(instruction.outcome_plan, runtime);
+    const bool outcome = eval_symbolic_bool_unchecked(instruction.outcome_plan, runtime);
     write_measurement_record(runtime, instruction.record, outcome, instruction.record_condition);
 }
 
