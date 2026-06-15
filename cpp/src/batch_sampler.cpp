@@ -82,6 +82,30 @@ bool sample_bernoulli(std::uint64_t& rng_state, double probability) {
     return rand_float(rng_state) < p;
 }
 
+double sample_geometric_gap(std::uint64_t& rng_state, double probability) {
+    if (!(probability > 0.0 && probability < 1.0)) {
+        fail("geometric gap probability must be in (0, 1)");
+    }
+    const double u = std::max(rand_float(rng_state), std::numeric_limits<double>::min());
+    const double gap = std::floor(std::log(u) / std::log1p(-probability));
+    if (!std::isfinite(gap) || gap >= static_cast<double>(std::numeric_limits<std::int64_t>::max())) {
+        return static_cast<double>(std::numeric_limits<std::int64_t>::max());
+    }
+    return gap;
+}
+
+int sample_categorical_row(std::uint64_t& rng_state, const std::vector<double>& probabilities) {
+    const double r = rand_float(rng_state);
+    double cumulative = 0.0;
+    for (std::size_t i = 0; i < probabilities.size(); ++i) {
+        cumulative += probabilities[i];
+        if (r <= cumulative) {
+            return static_cast<int>(i);
+        }
+    }
+    return static_cast<int>(probabilities.size() - 1);
+}
+
 std::size_t batch_word_count(int shots) {
     if (shots <= 0) {
         return 0;
@@ -170,6 +194,52 @@ bool batch_symbol_assigned(const BatchFactoredExecutorState& runtime, int condit
 
 void mark_batch_symbol_assigned_unchecked(BatchFactoredExecutorState& runtime, int condition) {
     runtime.assigned_words[symbol_word_index(condition)] |= symbol_bit_mask(condition);
+}
+
+void set_batch_symbol_false_unchecked(BatchFactoredExecutorState& runtime, int condition) {
+    check_batch_symbol_slot(runtime, condition);
+    mark_batch_symbol_assigned_unchecked(runtime, condition);
+}
+
+void set_batch_symbol_true_unchecked(BatchFactoredExecutorState& runtime, int condition, int shot) {
+    check_batch_symbol_slot(runtime, condition);
+    runtime.value_words[batch_condition_offset(runtime, condition, batch_shot_word(shot))] |= batch_shot_mask(shot);
+}
+
+void set_batch_symbol_true_all_unchecked(BatchFactoredExecutorState& runtime, int condition) {
+    check_batch_symbol_slot(runtime, condition);
+    mark_batch_symbol_assigned_unchecked(runtime, condition);
+    const std::size_t nwords = runtime_batch_word_count(runtime);
+    for (std::size_t word = 0; word < runtime.batch_words; ++word) {
+        runtime.value_words[batch_condition_offset(runtime, condition, word)] =
+            word < nwords ? batch_live_word_mask(runtime, word) : 0;
+    }
+}
+
+void assign_batch_conditions_false(BatchFactoredExecutorState& runtime, const std::vector<int>& conditions) {
+    for (int condition : conditions) {
+        set_batch_symbol_false_unchecked(runtime, condition);
+    }
+}
+
+bool any_batch_assigned(BatchFactoredExecutorState& runtime, const std::vector<int>& conditions) {
+    for (int condition : conditions) {
+        if (batch_symbol_assigned(runtime, condition)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool any_batch_categorical_group_assigned(
+    BatchFactoredExecutorState& runtime,
+    const std::vector<std::vector<int>>& condition_sets) {
+    for (const auto& conditions : condition_sets) {
+        if (any_batch_assigned(runtime, conditions)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool batch_symbol_matches_bits(
@@ -328,10 +398,168 @@ void assign_presampled_exogenous_batch(
     }
 }
 
+void sample_categorical_distribution_batch(
+    BatchFactoredExecutorState& runtime,
+    const std::vector<int>& conditions,
+    int nbits,
+    const std::vector<std::vector<std::uint64_t>>& assignments,
+    const std::vector<double>& probabilities) {
+    if (static_cast<int>(conditions.size()) != nbits) {
+        fail("categorical condition count does not match assignment bit count");
+    }
+    bool all_assigned = true;
+    bool any_assigned = false;
+    for (int condition : conditions) {
+        const bool assigned = batch_symbol_assigned(runtime, condition);
+        all_assigned = all_assigned && assigned;
+        any_assigned = any_assigned || assigned;
+    }
+    if (all_assigned) {
+        return;
+    }
+    if (any_assigned) {
+        fail("categorical symbolic distribution was only partially preassigned");
+    }
+
+    assign_batch_conditions_false(runtime, conditions);
+    for (int shot = 0; shot < runtime.active_shots; ++shot) {
+        const int row = sample_categorical_row(runtime.rng_state, probabilities);
+        const auto& assignment = assignments[static_cast<std::size_t>(row)];
+        for (std::size_t bit_idx = 0; bit_idx < conditions.size(); ++bit_idx) {
+            if (packed_bit(assignment, static_cast<int>(bit_idx))) {
+                set_batch_symbol_true_unchecked(runtime, conditions[bit_idx], shot);
+            }
+        }
+    }
+}
+
+void sample_categorical_distribution_batch(
+    BatchFactoredExecutorState& runtime,
+    const SymbolicCategoricalDistribution& distribution) {
+    sample_categorical_distribution_batch(
+        runtime,
+        distribution.conditions,
+        distribution.nbits,
+        distribution.assignments,
+        distribution.probabilities);
+}
+
+void assign_batch_categorical_group_false(
+    BatchFactoredExecutorState& runtime,
+    const std::vector<std::vector<int>>& condition_sets) {
+    for (const auto& conditions : condition_sets) {
+        assign_batch_conditions_false(runtime, conditions);
+    }
+}
+
+void sample_rare_categorical_group_batch(
+    BatchFactoredExecutorState& runtime,
+    const RareCategoricalSampleGroup& group) {
+    if (any_batch_categorical_group_assigned(runtime, group.conditions)) {
+        for (const auto& conditions : group.conditions) {
+            sample_categorical_distribution_batch(runtime, conditions, group.nbits, group.assignments, group.probabilities);
+        }
+        return;
+    }
+
+    assign_batch_categorical_group_false(runtime, group.conditions);
+    const int nsets = static_cast<int>(group.conditions.size());
+    if (group.event_probability <= 0.0 || nsets == 0) {
+        return;
+    }
+    const std::int64_t total_draws =
+        static_cast<std::int64_t>(runtime.active_shots) * static_cast<std::int64_t>(nsets);
+    std::int64_t draw = 0;
+    while (true) {
+        const auto gap = static_cast<std::int64_t>(sample_geometric_gap(runtime.rng_state, group.event_probability));
+        if (gap >= total_draws - draw) {
+            return;
+        }
+        draw += gap;
+        const int shot = static_cast<int>(draw / nsets);
+        const int set_idx = static_cast<int>(draw % nsets);
+        const int row =
+            group.event_rows[static_cast<std::size_t>(sample_categorical_row(runtime.rng_state, group.event_probabilities))];
+        const auto& conditions = group.conditions[static_cast<std::size_t>(set_idx)];
+        const auto& assignment = group.assignments[static_cast<std::size_t>(row)];
+        for (std::size_t bit_idx = 0; bit_idx < conditions.size(); ++bit_idx) {
+            if (packed_bit(assignment, static_cast<int>(bit_idx))) {
+                set_batch_symbol_true_unchecked(runtime, conditions[bit_idx], shot);
+            }
+        }
+        ++draw;
+    }
+}
+
+void sample_bernoulli_condition_batch(BatchFactoredExecutorState& runtime, int condition, double probability) {
+    if (batch_symbol_assigned(runtime, condition)) {
+        return;
+    }
+    const double p = std::clamp(probability, 0.0, 1.0);
+    if (p <= 0.0) {
+        set_batch_symbol_false_unchecked(runtime, condition);
+        return;
+    }
+    if (p >= 1.0) {
+        set_batch_symbol_true_all_unchecked(runtime, condition);
+        return;
+    }
+
+    set_batch_symbol_false_unchecked(runtime, condition);
+    for (int shot = 0; shot < runtime.active_shots; ++shot) {
+        if (sample_bernoulli(runtime.rng_state, p)) {
+            set_batch_symbol_true_unchecked(runtime, condition, shot);
+        }
+    }
+}
+
+void sample_low_probability_bernoulli_group_batch(
+    BatchFactoredExecutorState& runtime,
+    const BernoulliSampleGroup& group) {
+    if (any_batch_assigned(runtime, group.conditions)) {
+        for (int condition : group.conditions) {
+            sample_bernoulli_condition_batch(runtime, condition, group.probability);
+        }
+        return;
+    }
+
+    assign_batch_conditions_false(runtime, group.conditions);
+    const int nconditions = static_cast<int>(group.conditions.size());
+    if (group.probability <= 0.0 || nconditions == 0) {
+        return;
+    }
+    const std::int64_t total_draws =
+        static_cast<std::int64_t>(runtime.active_shots) * static_cast<std::int64_t>(nconditions);
+    std::int64_t draw = 0;
+    while (true) {
+        const auto gap = static_cast<std::int64_t>(sample_geometric_gap(runtime.rng_state, group.probability));
+        if (gap >= total_draws - draw) {
+            return;
+        }
+        draw += gap;
+        const int shot = static_cast<int>(draw / nconditions);
+        const int condition_idx = static_cast<int>(draw % nconditions);
+        set_batch_symbol_true_unchecked(runtime, group.conditions[static_cast<std::size_t>(condition_idx)], shot);
+        ++draw;
+    }
+}
+
 void sample_exogenous_symbols_batch(BatchFactoredExecutorState& runtime, const FactoredInstructionProgram& program) {
-    const auto samples = presample_exogenous(program, runtime.active_shots, runtime.rng_state);
-    runtime.rng_state = samples.next_rng_state;
-    assign_presampled_exogenous_batch(runtime, samples);
+    for (const auto& distribution : program.sampled_categorical_distributions) {
+        sample_categorical_distribution_batch(runtime, distribution);
+    }
+    for (const auto& group : program.sampled_rare_categorical_groups) {
+        sample_rare_categorical_group_batch(runtime, group);
+    }
+    for (std::size_t i = 0; i < program.sampled_bernoulli_conditions.size(); ++i) {
+        sample_bernoulli_condition_batch(
+            runtime,
+            program.sampled_bernoulli_conditions[i],
+            program.sampled_bernoulli_probabilities[i]);
+    }
+    for (const auto& group : program.sampled_low_probability_bernoulli_groups) {
+        sample_low_probability_bernoulli_group_batch(runtime, group);
+    }
 }
 
 const std::vector<double>& fill_rotation_coefficients(
