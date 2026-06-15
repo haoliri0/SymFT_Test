@@ -193,6 +193,14 @@ void mask_batch_bits(std::vector<std::uint64_t>& bits, const BatchFactoredExecut
     }
 }
 
+void invert_batch_bits(std::vector<std::uint64_t>& bits, const BatchFactoredExecutorState& runtime) {
+    const std::size_t nwords = runtime_batch_word_count(runtime);
+    for (std::size_t word = 0; word < nwords; ++word) {
+        bits[word] = ~bits[word] & batch_live_word_mask(runtime, word);
+    }
+    std::fill(bits.begin() + static_cast<std::ptrdiff_t>(nwords), bits.end(), 0);
+}
+
 void fill_batch_random_half_bits(std::vector<std::uint64_t>& bits, BatchFactoredExecutorState& runtime) {
     const std::size_t nwords = runtime_batch_word_count(runtime);
     if (bits.size() < runtime.batch_words) {
@@ -1022,6 +1030,14 @@ void execute_batch_instruction(BatchFactoredExecutorState& runtime, const Introd
     fill_batch_random_half_bits(runtime.eval_scratch, runtime);
     const auto& branch_bits = runtime.eval_scratch;
     assign_batch_symbol(runtime, instruction.branch, branch_bits);
+    if (instruction.outcome_plan.conditions.size() == 1 &&
+        instruction.outcome_plan.conditions.front() == instruction.branch) {
+        if (instruction.outcome_plan.constant) {
+            invert_batch_bits(runtime.eval_scratch, runtime);
+        }
+        write_batch_measurement_record(runtime, instruction.record, runtime.eval_scratch, instruction.record_condition);
+        return;
+    }
     eval_symbolic_bool_batch(runtime.eval_scratch, instruction.outcome_plan, runtime);
     write_batch_measurement_record(runtime, instruction.record, runtime.eval_scratch, instruction.record_condition);
 }
