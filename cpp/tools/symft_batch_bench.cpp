@@ -185,6 +185,7 @@ void print_header(int shots, int batch_size, int warmup_blocks) {
               << " batch_size=" << (batch_size > 0 ? std::to_string(batch_size) : std::string("auto"))
               << " warmup_blocks=" << warmup_blocks
               << " active_layout=julia_column_major_soa"
+              << " batch_backend=" << symft::active_batch_simd_backend()
               << " batch_simd=" << symft::active_batch_simd_backend()
               << "\n";
     std::cout << std::left << std::setw(12) << "fixture"
