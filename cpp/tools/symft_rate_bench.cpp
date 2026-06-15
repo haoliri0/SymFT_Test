@@ -279,7 +279,6 @@ int main(int argc, char** argv) {
         std::cout << "block_shots " << block_shots << "\n";
         std::cout << "repeats " << repeats << "\n";
         std::cout << "sampler batch\n";
-        std::cout << "active_layout basis_major_shots_contiguous\n";
         std::cout << "exogenous_mode presampled_streaming\n";
         std::cout << "rng_streams split_exogenous_branch\n";
         std::cout << "parse_s_avg " << parse_s << "\n";

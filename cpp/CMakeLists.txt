@@ -12,12 +12,10 @@ option(SYMFT_CPP_BUILD_TESTS "Build C++ SymFT tests" ON)
 option(SYMFT_CPP_ENABLE_AVX2 "Build AVX2 active kernels when the compiler supports them" ON)
 option(SYMFT_CPP_ENABLE_AVX512 "Build AVX512 active kernels when the compiler supports them" ON)
 option(SYMFT_CPP_NATIVE "Build host-vectorized kernels with -march=native" ON)
-option(SYMFT_CPP_BATCH_PREFER_AUTOVEC "Prefer compiler-vectorized batch kernels over handwritten batch dispatch" ON)
 
 add_library(symft_cpp
     src/symft.cpp
     src/batch_sampler.cpp
-    src/batch_simd_dispatch.cpp
     src/batch_simd_scalar.cpp
     src/simd_dispatch.cpp
     src/simd_scalar.cpp
@@ -36,16 +34,12 @@ if(SYMFT_CPP_NATIVE)
     target_compile_definitions(symft_cpp PRIVATE SYMFT_CPP_NATIVE_BUILD=1)
 endif()
 
-if(SYMFT_CPP_BATCH_PREFER_AUTOVEC)
-    target_compile_definitions(symft_cpp PRIVATE SYMFT_BATCH_PREFER_AUTOVEC=1)
-endif()
-
 if(SYMFT_CPP_ENABLE_AVX2)
     check_cxx_compiler_flag("-mavx2" SYMFT_HAS_MAVX2)
     check_cxx_compiler_flag("-mfma" SYMFT_HAS_MFMA)
     if(SYMFT_HAS_MAVX2 AND SYMFT_HAS_MFMA)
-        target_sources(symft_cpp PRIVATE src/simd_avx2.cpp src/batch_simd_avx2.cpp)
-        set_source_files_properties(src/simd_avx2.cpp src/batch_simd_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+        target_sources(symft_cpp PRIVATE src/simd_avx2.cpp)
+        set_source_files_properties(src/simd_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
         target_compile_definitions(symft_cpp PRIVATE SYMFT_COMPILED_AVX2=1)
     endif()
 endif()
@@ -54,8 +48,8 @@ if(SYMFT_CPP_ENABLE_AVX512)
     check_cxx_compiler_flag("-mavx512f" SYMFT_HAS_MAVX512F)
     check_cxx_compiler_flag("-mavx512dq" SYMFT_HAS_MAVX512DQ)
     if(SYMFT_HAS_MAVX512F AND SYMFT_HAS_MAVX512DQ AND SYMFT_HAS_MFMA)
-        target_sources(symft_cpp PRIVATE src/simd_avx512.cpp src/batch_simd_avx512.cpp)
-        set_source_files_properties(src/simd_avx512.cpp src/batch_simd_avx512.cpp PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mfma")
+        target_sources(symft_cpp PRIVATE src/simd_avx512.cpp)
+        set_source_files_properties(src/simd_avx512.cpp PROPERTIES COMPILE_OPTIONS "-mavx512f;-mavx512dq;-mfma")
         target_compile_definitions(symft_cpp PRIVATE SYMFT_COMPILED_AVX512=1)
     endif()
 endif()

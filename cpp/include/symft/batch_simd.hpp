@@ -22,17 +22,6 @@ struct KernelTable {
         double c,
         const double* q_by_shot);
 
-    void (*rotate_uniform_imag_xmask)(
-        double* re,
-        double* im,
-        std::size_t leading_shots,
-        int active_shots,
-        std::uint64_t xmask,
-        unsigned pair_bit,
-        std::size_t npairs,
-        double c,
-        const double* q_by_shot);
-
     void (*rotate_real_pair_flip)(
         double* re,
         double* im,
@@ -44,29 +33,6 @@ struct KernelTable {
         double c,
         const double* q_by_shot,
         std::uint64_t zmask);
-
-    void (*rotate_real_pair_flip_xmask)(
-        double* re,
-        double* im,
-        std::size_t leading_shots,
-        int active_shots,
-        std::uint64_t xmask,
-        unsigned pair_bit,
-        std::size_t npairs,
-        double c,
-        const double* q_by_shot,
-        std::uint64_t zmask);
-
-    void (*rotate_diagonal)(
-        double* re,
-        double* im,
-        std::size_t leading_shots,
-        int active_shots,
-        std::size_t dim,
-        double c,
-        const Complex* minus_coefficients,
-        const Complex* plus_coefficients,
-        const std::uint64_t* sign_bits);
 
     void (*promote_first_dormant_rotation)(
         double* re,
@@ -141,7 +107,5 @@ struct KernelTable {
 };
 
 const KernelTable& scalar_table();
-const KernelTable& dispatch_table();
-const char* dispatch_name();
 
 } // namespace symft::batch_simd

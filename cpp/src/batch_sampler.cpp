@@ -601,7 +601,7 @@ void rotate_uniform_imag_pairs_batch(
         sign_bits,
         kernel.pair_left_minus_coefficients.front().imag(),
         kernel.pair_left_plus_coefficients.front().imag());
-    batch_simd::dispatch_table().rotate_uniform_imag_pairs(
+    batch_simd::scalar_table().rotate_uniform_imag_pairs(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.batches),
@@ -622,7 +622,7 @@ void rotate_real_pair_flip_batch(
         sign_bits,
         kernel.pair_left_minus_coefficients.front().real(),
         kernel.pair_left_plus_coefficients.front().real());
-    batch_simd::dispatch_table().rotate_real_pair_flip(
+    batch_simd::scalar_table().rotate_real_pair_flip(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.batches),
@@ -711,7 +711,7 @@ void promote_first_dormant_rotation_batch(
     const double c = std::cos(theta);
     const double s = std::sin(theta);
     const auto& coeffs = fill_rotation_coefficients(runtime, sign_bits, -s, s);
-    batch_simd::dispatch_table().promote_first_dormant_rotation(
+    batch_simd::scalar_table().promote_first_dormant_rotation(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.batches),
@@ -754,7 +754,7 @@ void measure_active_last_z_batch(
     }
     const int new_k = runtime.k - 1;
     const std::size_t dim = active_length(new_k);
-    batch_simd::dispatch_table().last_z_measure_true_prob(
+    batch_simd::scalar_table().last_z_measure_true_prob(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.batches),
@@ -767,7 +767,7 @@ void measure_active_last_z_batch(
         runtime.branch_prob_true,
         runtime.branch_invnorms);
     const auto& branch_bits = runtime.eval_scratch;
-    batch_simd::dispatch_table().last_z_project(
+    batch_simd::scalar_table().last_z_project(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.batches),
@@ -792,7 +792,7 @@ void measure_diagonal_active_pauli_batch(
     const auto& source_false = kernel.source0_false;
     const auto& source_true = kernel.source0_true;
     const std::size_t out_dim = source_false.size();
-    batch_simd::dispatch_table().diagonal_measure_true_prob(
+    batch_simd::scalar_table().diagonal_measure_true_prob(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.batches),
@@ -806,7 +806,7 @@ void measure_diagonal_active_pauli_batch(
         runtime.branch_prob_true,
         runtime.branch_invnorms);
     const auto& branch_bits = runtime.eval_scratch;
-    batch_simd::dispatch_table().diagonal_project(
+    batch_simd::scalar_table().diagonal_project(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.batches),
@@ -831,7 +831,7 @@ void measure_nondiagonal_active_pauli_batch(
     std::optional<int> record,
     std::optional<int> record_condition) {
     const std::size_t out_dim = kernel.source0_false.size();
-    batch_simd::dispatch_table().nondiagonal_measure_true_prob(
+    batch_simd::scalar_table().nondiagonal_measure_true_prob(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.batches),
@@ -847,7 +847,7 @@ void measure_nondiagonal_active_pauli_batch(
         runtime.branch_prob_true,
         runtime.branch_invnorms);
     const auto& branch_bits = runtime.eval_scratch;
-    batch_simd::dispatch_table().nondiagonal_project(
+    batch_simd::scalar_table().nondiagonal_project(
         runtime.active_re.data(),
         runtime.active_im.data(),
         runtime.scratch_re.data(),
@@ -951,8 +951,8 @@ int default_batch_count(int max_k) {
     return static_cast<int>(count);
 }
 
-const char* active_batch_simd_backend() {
-    return batch_simd::dispatch_name();
+const char* active_batch_backend() {
+    return batch_simd::scalar_table().name;
 }
 
 BatchFactoredExecutorState::BatchFactoredExecutorState(

@@ -48,7 +48,7 @@ void execute_batch_in_place(
     BatchFactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
     const PresampledExogenous& samples);
-const char* active_batch_simd_backend();
+const char* active_batch_backend();
 std::vector<std::vector<std::uint64_t>> sample_measurements_batch(
     const FactoredInstructionProgram& program,
     int shots,
