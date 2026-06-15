@@ -8,6 +8,14 @@ namespace {
 
 constexpr double kInvSqrt2 = 0.70710678118654752440;
 
+#if defined(__clang__)
+#define SYMFT_BATCH_SIMD_LOOP _Pragma("clang loop vectorize(enable) interleave(enable)")
+#elif defined(__GNUC__)
+#define SYMFT_BATCH_SIMD_LOOP _Pragma("GCC ivdep")
+#else
+#define SYMFT_BATCH_SIMD_LOOP
+#endif
+
 bool batch_bit(const std::uint64_t* bits, int shot) {
     return (bits[static_cast<std::size_t>(shot >> 6)] & (std::uint64_t{1} << (shot & 63))) != 0;
 }
@@ -47,6 +55,7 @@ void scalar_rotate_uniform_imag_pairs(
         double* i0p = im + left_indices[idx] * leading_shots;
         double* r1p = re + right_indices[idx] * leading_shots;
         double* i1p = im + right_indices[idx] * leading_shots;
+        SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < active_shots; ++shot) {
             const double q = q_by_shot[static_cast<std::size_t>(shot)];
             const double r0 = r0p[shot];
@@ -78,6 +87,7 @@ void scalar_rotate_uniform_imag_xmask(
         double* i0p = im + static_cast<std::size_t>(left) * leading_shots;
         double* r1p = re + static_cast<std::size_t>(right) * leading_shots;
         double* i1p = im + static_cast<std::size_t>(right) * leading_shots;
+        SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < active_shots; ++shot) {
             const double q = q_by_shot[static_cast<std::size_t>(shot)];
             const double r0 = r0p[shot];
@@ -110,6 +120,7 @@ void scalar_rotate_real_pair_flip(
         double* i0p = im + i0 * leading_shots;
         double* r1p = re + right_indices[idx] * leading_shots;
         double* i1p = im + right_indices[idx] * leading_shots;
+        SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < active_shots; ++shot) {
             const double q = phase_sign * q_by_shot[static_cast<std::size_t>(shot)];
             const double r0 = r0p[shot];
@@ -143,6 +154,7 @@ void scalar_rotate_real_pair_flip_xmask(
         double* i0p = im + static_cast<std::size_t>(left) * leading_shots;
         double* r1p = re + static_cast<std::size_t>(right) * leading_shots;
         double* i1p = im + static_cast<std::size_t>(right) * leading_shots;
+        SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < active_shots; ++shot) {
             const double q = phase_sign * q_by_shot[static_cast<std::size_t>(shot)];
             const double r0 = r0p[shot];
@@ -172,6 +184,7 @@ void scalar_rotate_diagonal(
         double* ip = im + basis * leading_shots;
         const Complex plus = plus_coefficients[basis];
         const Complex minus = minus_coefficients[basis];
+        SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < active_shots; ++shot) {
             const Complex coeff = batch_bit(sign_bits, shot) ? plus : minus;
             const double fr = c + coeff.real();
@@ -197,6 +210,7 @@ void scalar_promote_first_dormant_rotation(
         double* i0p = im + basis * leading_shots;
         double* r1p = re + (dim + basis) * leading_shots;
         double* i1p = im + (dim + basis) * leading_shots;
+        SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < active_shots; ++shot) {
             const double q = q_by_shot[static_cast<std::size_t>(shot)];
             const double r = r0p[shot];
@@ -220,6 +234,7 @@ void scalar_last_z_measure_true_prob(
     for (std::size_t basis = 0; basis < dim; ++basis) {
         const double* rp = re + (dim + basis) * leading_shots;
         const double* ip = im + (dim + basis) * leading_shots;
+        SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < active_shots; ++shot) {
             const double r = rp[shot];
             const double i = ip[shot];
@@ -243,6 +258,7 @@ void scalar_last_z_project(
         const double* false_i = im + basis * leading_shots;
         const double* true_r = re + (dim + basis) * leading_shots;
         const double* true_i = im + (dim + basis) * leading_shots;
+        SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < active_shots; ++shot) {
             const bool branch = batch_bit(branch_bits, shot);
             const double n = invnorms[shot];
@@ -264,6 +280,7 @@ void scalar_diagonal_measure_true_prob(
     for (std::size_t idx = 0; idx < out_dim; ++idx) {
         const double* rp = re + source_true[idx] * leading_shots;
         const double* ip = im + source_true[idx] * leading_shots;
+        SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < active_shots; ++shot) {
             const double r = rp[shot];
             const double i = ip[shot];
@@ -289,6 +306,7 @@ void scalar_diagonal_project(
         const double* false_i = im + source_false[idx] * leading_shots;
         const double* true_r = re + source_true[idx] * leading_shots;
         const double* true_i = im + source_true[idx] * leading_shots;
+        SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < active_shots; ++shot) {
             const bool branch = batch_bit(branch_bits, shot);
             const double n = invnorms[shot];
@@ -316,6 +334,7 @@ void scalar_nondiagonal_measure_true_prob(
         const double* i1p = im + source1_false[idx] * leading_shots;
         const double c1r = coeff1_false[idx].real();
         const double c1i = coeff1_false[idx].imag();
+        SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < active_shots; ++shot) {
             const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
             const double prod_i = c1r * i1p[shot] + c1i * r1p[shot];
@@ -348,6 +367,7 @@ void scalar_nondiagonal_project(
         double* dst_i = scratch_im + idx * leading_shots;
         const double c1r = coeff1_false[idx].real();
         const double c1i = coeff1_false[idx].imag();
+        SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < active_shots; ++shot) {
             const double branch_sign = batch_bit(branch_bits, shot) ? -1.0 : 1.0;
             const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
@@ -360,7 +380,11 @@ void scalar_nondiagonal_project(
 }
 
 const KernelTable table = {
-    "scalar",
+#if defined(SYMFT_CPP_NATIVE_BUILD)
+    "autovec-native",
+#else
+    "autovec",
+#endif
     scalar_rotate_uniform_imag_pairs,
     scalar_rotate_uniform_imag_xmask,
     scalar_rotate_real_pair_flip,
@@ -382,3 +406,5 @@ const KernelTable& scalar_table() {
 }
 
 } // namespace symft::batch_simd
+
+#undef SYMFT_BATCH_SIMD_LOOP

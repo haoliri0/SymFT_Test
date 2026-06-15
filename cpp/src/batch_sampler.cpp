@@ -11,6 +11,14 @@ namespace {
 constexpr int kDefaultBatchShots = 2048;
 constexpr std::size_t kDefaultBatchActiveAmplitudes = std::size_t{1} << 17;
 
+#if defined(__clang__)
+#define SYMFT_BATCH_SIMD_LOOP _Pragma("clang loop vectorize(enable) interleave(enable)")
+#elif defined(__GNUC__)
+#define SYMFT_BATCH_SIMD_LOOP _Pragma("GCC ivdep")
+#else
+#define SYMFT_BATCH_SIMD_LOOP
+#endif
+
 [[noreturn]] void fail(const std::string& message) {
     throw Error(message);
 }
@@ -575,6 +583,7 @@ const std::vector<double>& fill_rotation_coefficients(
         const std::uint64_t bits = word < sign_bits.size() ? sign_bits[word] : 0;
         const int base_shot = static_cast<int>(word << 6);
         const int live = std::min(64, runtime.active_shots - base_shot);
+        SYMFT_BATCH_SIMD_LOOP
         for (int bit = 0; bit < live; ++bit) {
             runtime.rotation_coefficients[static_cast<std::size_t>(base_shot + bit)] =
                 ((bits >> bit) & 1ULL) != 0 ? plus_coeff : minus_coeff;
@@ -639,6 +648,7 @@ void rotate_pauli_batch(
         for (std::size_t basis = 0; basis < dim; ++basis) {
             const Complex plus = kernel.diagonal_plus_coefficients[basis];
             const Complex minus = kernel.diagonal_minus_coefficients[basis];
+            SYMFT_BATCH_SIMD_LOOP
             for (int shot = 0; shot < runtime.active_shots; ++shot) {
                 const Complex coeff = batch_bit(sign_bits, shot) ? plus : minus;
                 const double fr = c + coeff.real();
@@ -667,6 +677,7 @@ void rotate_pauli_batch(
         const Complex right_plus = kernel.pair_right_plus_coefficients[idx];
         const Complex left_minus = kernel.pair_left_minus_coefficients[idx];
         const Complex right_minus = kernel.pair_right_minus_coefficients[idx];
+        SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < runtime.active_shots; ++shot) {
             const bool sign = batch_bit(sign_bits, shot);
             const Complex left_coeff = sign ? left_plus : left_minus;
@@ -1090,3 +1101,5 @@ std::vector<std::vector<std::uint64_t>> sample_measurements_batch(
 }
 
 } // namespace symft
+
+#undef SYMFT_BATCH_SIMD_LOOP

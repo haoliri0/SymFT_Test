@@ -4,10 +4,15 @@ project(symft_cpp LANGUAGES CXX)
 
 include(CheckCXXCompilerFlag)
 
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 option(SYMFT_CPP_BUILD_TESTS "Build C++ SymFT tests" ON)
 option(SYMFT_CPP_ENABLE_AVX2 "Build AVX2 active kernels when the compiler supports them" ON)
 option(SYMFT_CPP_ENABLE_AVX512 "Build AVX512 active kernels when the compiler supports them" ON)
-option(SYMFT_CPP_NATIVE "Build the scalar translation unit with -march=native" OFF)
+option(SYMFT_CPP_NATIVE "Build host-vectorized kernels with -march=native" ON)
+option(SYMFT_CPP_BATCH_PREFER_AUTOVEC "Prefer compiler-vectorized batch kernels over handwritten batch dispatch" ON)
 
 add_library(symft_cpp
     src/symft.cpp
@@ -28,6 +33,11 @@ if(SYMFT_CPP_NATIVE)
     target_compile_options(symft_cpp PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-march=native>
     )
+    target_compile_definitions(symft_cpp PRIVATE SYMFT_CPP_NATIVE_BUILD=1)
+endif()
+
+if(SYMFT_CPP_BATCH_PREFER_AUTOVEC)
+    target_compile_definitions(symft_cpp PRIVATE SYMFT_BATCH_PREFER_AUTOVEC=1)
 endif()
 
 if(SYMFT_CPP_ENABLE_AVX2)

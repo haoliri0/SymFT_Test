@@ -19,6 +19,9 @@ const KernelTable& avx512_table();
 namespace {
 
 const KernelTable& choose_table() {
+#if defined(SYMFT_BATCH_PREFER_AUTOVEC)
+    return scalar_table();
+#else
 #if SYMFT_BATCH_GNU_CPU_SUPPORTS && defined(SYMFT_COMPILED_AVX512)
     if (__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512dq")) {
         return avx512_table();
@@ -30,6 +33,7 @@ const KernelTable& choose_table() {
     }
 #endif
     return scalar_table();
+#endif
 }
 
 } // namespace

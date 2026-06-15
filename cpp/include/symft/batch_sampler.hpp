@@ -9,6 +9,9 @@ namespace symft {
 struct FactoredInstructionProgram;
 struct PresampledExogenous;
 
+// Active storage is a Julia-column-major equivalent SoA layout:
+// active_re[basis * batches + shot] and active_im[basis * batches + shot].
+// Thus shots are contiguous for each active basis column.
 struct BatchFactoredExecutorState {
     int n = 0;
     int k = 0;
