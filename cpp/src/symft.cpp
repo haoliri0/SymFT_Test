@@ -2336,13 +2336,16 @@ void reset_executor(FactoredExecutorState& runtime, const FactoredInstructionPro
     runtime.active.reserve_for_k(program.max_k);
     const std::size_t dim = program.initial_active.dim();
     std::copy(program.initial_active.alpha.begin(), program.initial_active.alpha.begin() + static_cast<std::ptrdiff_t>(dim), runtime.active.alpha.begin());
-    runtime.active_scratch.assign(active_length(program.max_k), Complex(0.0, 0.0));
+    const std::size_t max_dim = active_length(program.max_k);
+    if (runtime.active_scratch.size() < max_dim) {
+        runtime.active_scratch.resize(max_dim);
+    }
     runtime.values.assign(static_cast<std::size_t>(program.nsymbols), false);
     runtime.assigned.assign(static_cast<std::size_t>(program.nsymbols), false);
     runtime.measurements.assign(static_cast<std::size_t>(program.nrecords), false);
 }
 
-std::vector<bool> execute(FactoredExecutorState& runtime, const FactoredInstructionProgram& program) {
+void execute_in_place(FactoredExecutorState& runtime, const FactoredInstructionProgram& program) {
     if (runtime.n != program.n || runtime.k != runtime.active.k || runtime.k + runtime.ndormant != runtime.n) {
         fail("executor state does not match program");
     }
@@ -2350,6 +2353,10 @@ std::vector<bool> execute(FactoredExecutorState& runtime, const FactoredInstruct
     for (const auto& instruction : program.instructions) {
         std::visit([&](const auto& inst) { execute_instruction(runtime, inst); }, instruction);
     }
+}
+
+std::vector<bool> execute(FactoredExecutorState& runtime, const FactoredInstructionProgram& program) {
+    execute_in_place(runtime, program);
     return runtime.measurements;
 }
 
@@ -2367,7 +2374,8 @@ std::vector<std::vector<bool>> sample_measurements(const FactoredInstructionProg
     out.reserve(static_cast<std::size_t>(shots));
     for (int shot = 0; shot < shots; ++shot) {
         reset_executor(runtime, program);
-        out.push_back(execute(runtime, program));
+        execute_in_place(runtime, program);
+        out.push_back(runtime.measurements);
     }
     return out;
 }

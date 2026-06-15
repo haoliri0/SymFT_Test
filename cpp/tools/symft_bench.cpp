@@ -47,18 +47,20 @@ int main(int argc, char** argv) {
             auto program = symft::plan_factored_updates(pending);
             const auto plan_stop = Clock::now();
 
-            const auto sample_start = Clock::now();
-            auto samples = symft::sample_measurements(program, shots, 0x5eedULL + static_cast<std::uint64_t>(repeat));
-            const auto sample_stop = Clock::now();
-
             n = parsed.state.n;
             records = program.nrecords;
             max_k = program.max_k;
-            for (const auto& shot : samples) {
-                for (bool bit : shot) {
+
+            symft::FactoredExecutorState runtime(program, 0x5eedULL + static_cast<std::uint64_t>(repeat));
+            const auto sample_start = Clock::now();
+            for (int shot = 0; shot < shots; ++shot) {
+                symft::reset_executor(runtime, program);
+                symft::execute_in_place(runtime, program);
+                for (bool bit : runtime.measurements) {
                     checksum += bit ? 1 : 0;
                 }
             }
+            const auto sample_stop = Clock::now();
 
             parse_total += seconds_between(parse_start, parse_stop);
             plan_total += seconds_between(plan_start, plan_stop);

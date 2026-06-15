@@ -439,6 +439,7 @@ struct FactoredExecutorState {
 };
 
 void reset_executor(FactoredExecutorState& runtime, const FactoredInstructionProgram& program);
+void execute_in_place(FactoredExecutorState& runtime, const FactoredInstructionProgram& program);
 std::vector<bool> execute(FactoredExecutorState& runtime, const FactoredInstructionProgram& program);
 std::vector<bool> sample_measurements(const FactoredInstructionProgram& program, std::uint64_t seed = 1);
 std::vector<std::vector<bool>> sample_measurements(const FactoredInstructionProgram& program, int shots, std::uint64_t seed = 1);
