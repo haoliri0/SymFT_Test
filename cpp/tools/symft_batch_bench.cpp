@@ -74,6 +74,19 @@ int parse_batch_size(const char* raw) {
     return parse_positive_int(raw, "batch_size");
 }
 
+symft::BatchKernelBackend parse_backend(const std::string& raw) {
+    if (raw == "autovec" || raw == "soa" || raw == "structarray") {
+        return symft::BatchKernelBackend::SoaAutovec;
+    }
+    if (raw == "dispatch" || raw == "simd" || raw == "soa-dispatch" || raw == "avx2") {
+        return symft::BatchKernelBackend::SoaDispatch;
+    }
+    if (raw == "interleaved" || raw == "interleaved-avx2" || raw == "cpp-interleaved-avx2") {
+        return symft::BatchKernelBackend::InterleavedAvx2;
+    }
+    throw std::runtime_error("invalid backend: " + raw);
+}
+
 int popcount64(std::uint64_t value) {
 #if defined(__GNUC__) || defined(__clang__)
     return __builtin_popcountll(value);
@@ -138,7 +151,8 @@ BenchResult run_fixture(
     const std::string& fixture,
     int shots,
     int requested_batch_size,
-    int warmup_blocks) {
+    int warmup_blocks,
+    symft::BatchKernelBackend backend) {
     const auto parse_start = Clock::now();
     const auto parsed = symft::parse_stim_file(fixture);
     const auto parse_stop = Clock::now();
@@ -149,7 +163,7 @@ BenchResult run_fixture(
     const auto plan_stop = Clock::now();
 
     const int batch_size = requested_batch_size > 0 ? requested_batch_size : symft::default_batch_count(program.max_k);
-    symft::BatchFactoredExecutorState runtime(program, batch_size, 0x5eedULL);
+    symft::BatchFactoredExecutorState runtime(program, batch_size, 0x5eedULL, backend);
 
     for (int warmup = 0; warmup < warmup_blocks; ++warmup) {
         symft::reset_batch_executor(runtime, program, runtime.batches);
@@ -179,12 +193,16 @@ BenchResult run_fixture(
     return result;
 }
 
-void print_header(int shots, int batch_size, int warmup_blocks) {
+void print_header(int shots, int batch_size, int warmup_blocks, symft::BatchKernelBackend backend) {
     std::cout << "SymFT C++ batched FactoredInstructionProgram sampler\n";
     std::cout << "shots=" << shots
               << " batch_size=" << (batch_size > 0 ? std::to_string(batch_size) : std::string("auto"))
               << " warmup_blocks=" << warmup_blocks
-              << " active_layout=julia_column_major_soa"
+              << " active_layout="
+              << (backend == symft::BatchKernelBackend::InterleavedAvx2
+                      ? "julia_column_major_interleaved_complex"
+                      : "julia_column_major_soa")
+              << " batch_backend=" << symft::batch_kernel_backend_name(backend)
               << " batch_simd=" << symft::active_batch_simd_backend()
               << "\n";
     std::cout << std::left << std::setw(12) << "fixture"
@@ -225,9 +243,10 @@ void print_result(const BenchResult& result) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc > 5 || (argc >= 2 && (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help"))) {
-        std::cerr << "usage: symft_batch_bench [shots=10000] [batch_size=auto] [warmup_blocks=1] [fixture=all]\n";
-        return argc > 5 ? 2 : 0;
+    if (argc > 6 || (argc >= 2 && (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help"))) {
+        std::cerr << "usage: symft_batch_bench [shots=10000] [batch_size=auto] [warmup_blocks=1] [fixture=all] [backend=autovec]\n";
+        std::cerr << "backend: autovec | dispatch | interleaved-avx2 | all\n";
+        return argc > 6 ? 2 : 0;
     }
 
     try {
@@ -235,6 +254,7 @@ int main(int argc, char** argv) {
         const int batch_size = argc >= 3 ? parse_batch_size(argv[2]) : 0;
         const int warmup_blocks = argc >= 4 ? parse_nonnegative_int(argv[3], "warmup_blocks") : 1;
         const std::string fixture_arg = argc >= 5 ? argv[4] : "all";
+        const std::string backend_arg = argc >= 6 ? argv[5] : "autovec";
 
         std::vector<std::string> fixtures;
         if (fixture_arg == "all") {
@@ -243,9 +263,26 @@ int main(int argc, char** argv) {
             fixtures = {fixture_arg};
         }
 
-        print_header(shots, batch_size, warmup_blocks);
-        for (const auto& fixture : fixtures) {
-            print_result(run_fixture(fixture, shots, batch_size, warmup_blocks));
+        std::vector<symft::BatchKernelBackend> backends;
+        if (backend_arg == "all") {
+            backends = {
+                symft::BatchKernelBackend::SoaAutovec,
+                symft::BatchKernelBackend::SoaDispatch,
+                symft::BatchKernelBackend::InterleavedAvx2,
+            };
+        } else {
+            backends = {parse_backend(backend_arg)};
+        }
+
+        for (std::size_t backend_idx = 0; backend_idx < backends.size(); ++backend_idx) {
+            if (backend_idx != 0) {
+                std::cout << "\n";
+            }
+            const auto backend = backends[backend_idx];
+            print_header(shots, batch_size, warmup_blocks, backend);
+            for (const auto& fixture : fixtures) {
+                print_result(run_fixture(fixture, shots, batch_size, warmup_blocks, backend));
+            }
         }
     } catch (const std::exception& ex) {
         std::cerr << "symft_batch_bench: " << ex.what() << "\n";
