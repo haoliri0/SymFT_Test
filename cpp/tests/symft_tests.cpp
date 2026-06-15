@@ -107,6 +107,23 @@ void test_t_gate_exact_rotation() {
     require(ones > 50 && ones < 150, "T then MX produces non-deterministic X measurement");
 }
 
+void test_presampled_exogenous() {
+    using namespace symft;
+    const auto parsed = parse_stim_text("X_ERROR(1) 0\nM 0\n");
+    PendingFactoredState pending(parsed.state);
+    const auto program = plan_factored_updates(pending);
+    const auto samples = presample_exogenous(program, 4, 17);
+    require(samples.nshots == 4, "presampled shot count");
+    require(samples.nsymbols == program.nsymbols, "presampled symbol count");
+
+    FactoredExecutorState runtime(program, samples.next_rng_state);
+    for (int shot = 0; shot < samples.nshots; ++shot) {
+        reset_executor(runtime, program);
+        execute_in_place(runtime, program, samples, shot);
+        require(packed_bit(runtime.measurement_words, 0), "presampled deterministic X error");
+    }
+}
+
 void test_detectors() {
     using namespace symft;
     const auto accepted = parse_stim_text("M !0\nOBSERVABLE_INCLUDE(0) rec[-1]\n");
@@ -129,6 +146,7 @@ int main() {
     test_active_rotation();
     test_parser_feedback();
     test_t_gate_exact_rotation();
+    test_presampled_exogenous();
     test_detectors();
     std::cout << "symft_cpp_tests passed (SIMD backend: " << symft::active_simd_backend() << ")\n";
     return 0;
