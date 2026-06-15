@@ -3,6 +3,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <iosfwd>
 #include <map>
 #include <memory>
@@ -25,6 +26,10 @@ public:
 
 int checked_nqubits(int nqubits);
 int nwords_for(int nqubits);
+std::size_t bit_word_count(int nbits);
+bool packed_bit(const std::vector<std::uint64_t>& words, int bit_index);
+void set_packed_bit(std::vector<std::uint64_t>& words, int bit_index, bool value = true);
+std::vector<std::uint64_t> packed_bits(std::initializer_list<bool> bits);
 
 struct PauliString {
     int nqubits = 0;
@@ -95,8 +100,9 @@ struct SymbolicBoolEvaluationPlan {
 };
 
 struct SymbolicCategoricalDistribution {
+    int nbits = 0;
     std::vector<int> conditions;
-    std::vector<std::vector<bool>> assignments;
+    std::vector<std::vector<std::uint64_t>> assignments;
     std::vector<double> probabilities;
 };
 
@@ -115,10 +121,12 @@ struct SymbolicContext {
     int fresh_bernoulli_condition(double probability);
     SymbolicBool fresh_bernoulli_bool(double probability);
     std::vector<int> fresh_categorical_conditions(
-        const std::vector<std::vector<bool>>& assignments,
+        int nbits,
+        const std::vector<std::vector<std::uint64_t>>& assignments,
         const std::vector<double>& probabilities);
     std::vector<SymbolicBool> fresh_categorical_bools(
-        const std::vector<std::vector<bool>>& assignments,
+        int nbits,
+        const std::vector<std::vector<std::uint64_t>>& assignments,
         const std::vector<double>& probabilities);
 };
 
@@ -364,8 +372,9 @@ struct BernoulliSampleGroup {
 
 struct RareCategoricalSampleGroup {
     double event_probability = 0.0;
+    int nbits = 0;
     std::vector<std::vector<int>> conditions;
-    std::vector<std::vector<bool>> assignments;
+    std::vector<std::vector<std::uint64_t>> assignments;
     std::vector<double> probabilities;
     std::vector<int> event_rows;
     std::vector<double> event_probabilities;
@@ -476,9 +485,9 @@ struct FactoredExecutorState {
 
 void reset_executor(FactoredExecutorState& runtime, const FactoredInstructionProgram& program);
 void execute_in_place(FactoredExecutorState& runtime, const FactoredInstructionProgram& program);
-std::vector<bool> execute(FactoredExecutorState& runtime, const FactoredInstructionProgram& program);
-std::vector<bool> sample_measurements(const FactoredInstructionProgram& program, std::uint64_t seed = 1);
-std::vector<std::vector<bool>> sample_measurements(const FactoredInstructionProgram& program, int shots, std::uint64_t seed = 1);
+std::vector<std::uint64_t> execute(FactoredExecutorState& runtime, const FactoredInstructionProgram& program);
+std::vector<std::uint64_t> sample_measurements(const FactoredInstructionProgram& program, std::uint64_t seed = 1);
+std::vector<std::vector<std::uint64_t>> sample_measurements(const FactoredInstructionProgram& program, int shots, std::uint64_t seed = 1);
 
 struct StimDetector {
     std::vector<int> records;

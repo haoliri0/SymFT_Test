@@ -75,8 +75,8 @@ void test_parser_feedback() {
     PendingFactoredState pending(parsed.state);
     const auto program = plan_factored_updates(pending);
     const auto records = sample_measurements(program);
-    require(records.size() == 2, "feedback record count");
-    require(records[0] && records[1], "feedback deterministic records");
+    require(program.nrecords == 2, "feedback record count");
+    require(packed_bit(records, 0) && packed_bit(records, 1), "feedback deterministic records");
 }
 
 void test_t_gate_exact_rotation() {
@@ -88,7 +88,7 @@ void test_t_gate_exact_rotation() {
     int ones = 0;
     const auto records = sample_measurements(program, 200, 7);
     for (const auto& shot : records) {
-        ones += shot[0] ? 1 : 0;
+        ones += packed_bit(shot, 0) ? 1 : 0;
     }
     require(ones > 50 && ones < 150, "T then MX produces non-deterministic X measurement");
 }

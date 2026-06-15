@@ -299,6 +299,48 @@ int nwords_for(int nqubits) {
     return (checked_nqubits(nqubits) + kWordBits - 1) / kWordBits;
 }
 
+std::size_t bit_word_count(int nbits) {
+    if (nbits < 0) {
+        fail("number of bits must be nonnegative");
+    }
+    return static_cast<std::size_t>((nbits + kWordBits - 1) / kWordBits);
+}
+
+bool packed_bit(const std::vector<std::uint64_t>& words, int bit_index) {
+    if (bit_index < 0) {
+        fail("bit index must be nonnegative");
+    }
+    const std::size_t word = static_cast<std::size_t>(bit_index / kWordBits);
+    return word < words.size() && (words[word] & bit_mask(bit_index)) != 0;
+}
+
+void set_packed_bit(std::vector<std::uint64_t>& words, int bit_index, bool value) {
+    if (bit_index < 0) {
+        fail("bit index must be nonnegative");
+    }
+    const std::size_t word = static_cast<std::size_t>(bit_index / kWordBits);
+    if (word >= words.size()) {
+        words.resize(word + 1, 0);
+    }
+    if (value) {
+        words[word] |= bit_mask(bit_index);
+    } else {
+        words[word] &= ~bit_mask(bit_index);
+    }
+}
+
+std::vector<std::uint64_t> packed_bits(std::initializer_list<bool> bits) {
+    std::vector<std::uint64_t> out(bit_word_count(static_cast<int>(bits.size())), 0);
+    int bit_index = 0;
+    for (bool bit : bits) {
+        if (bit) {
+            set_packed_bit(out, bit_index);
+        }
+        ++bit_index;
+    }
+    return out;
+}
+
 PauliString::PauliString(int nqubits_) : nqubits(checked_nqubits(nqubits_)) {
     const int nw = nwords_for(nqubits);
     x.assign(nw, 0);
@@ -615,18 +657,19 @@ SymbolicBool SymbolicContext::fresh_bernoulli_bool(double probability) {
 }
 
 std::vector<int> SymbolicContext::fresh_categorical_conditions(
-    const std::vector<std::vector<bool>>& assignments,
+    int nbits,
+    const std::vector<std::vector<std::uint64_t>>& assignments,
     const std::vector<double>& probabilities) {
     if (assignments.empty()) {
         fail("categorical symbolic distribution needs at least one assignment");
     }
-    const std::size_t nbits = assignments.front().size();
-    if (nbits == 0 || assignments.size() != probabilities.size()) {
+    if (nbits <= 0 || assignments.size() != probabilities.size()) {
         fail("invalid categorical symbolic distribution");
     }
+    const std::size_t nwords = bit_word_count(nbits);
     double total = 0.0;
     for (const auto& assignment : assignments) {
-        if (assignment.size() != nbits) {
+        if (assignment.size() != nwords) {
             fail("categorical assignment length mismatch");
         }
     }
@@ -637,12 +680,12 @@ std::vector<int> SymbolicContext::fresh_categorical_conditions(
         fail("categorical symbolic distribution probabilities must sum to 1");
     }
     std::vector<int> conditions;
-    conditions.reserve(nbits);
-    for (std::size_t i = 0; i < nbits; ++i) {
+    conditions.reserve(static_cast<std::size_t>(nbits));
+    for (int i = 0; i < nbits; ++i) {
         conditions.push_back(fresh_condition());
     }
     const std::size_t group = categorical_distributions.size();
-    categorical_distributions.push_back({conditions, assignments, probabilities});
+    categorical_distributions.push_back({nbits, conditions, assignments, probabilities});
     for (int condition : conditions) {
         condition_to_categorical[condition] = group;
     }
@@ -650,9 +693,10 @@ std::vector<int> SymbolicContext::fresh_categorical_conditions(
 }
 
 std::vector<SymbolicBool> SymbolicContext::fresh_categorical_bools(
-    const std::vector<std::vector<bool>>& assignments,
+    int nbits,
+    const std::vector<std::vector<std::uint64_t>>& assignments,
     const std::vector<double>& probabilities) {
-    const auto conditions = fresh_categorical_conditions(assignments, probabilities);
+    const auto conditions = fresh_categorical_conditions(nbits, assignments, probabilities);
     std::vector<SymbolicBool> out;
     out.reserve(conditions.size());
     for (int condition : conditions) {
@@ -2049,7 +2093,11 @@ struct RareInfo {
 std::optional<RareInfo> rare_categorical_sample_info(const SymbolicCategoricalDistribution& distribution) {
     std::optional<std::size_t> false_row;
     for (std::size_t row = 0; row < distribution.assignments.size(); ++row) {
-        if (std::none_of(distribution.assignments[row].begin(), distribution.assignments[row].end(), [](bool bit) { return bit; })) {
+        bool any_true = false;
+        for (int bit = 0; bit < distribution.nbits; ++bit) {
+            any_true = any_true || packed_bit(distribution.assignments[row], bit);
+        }
+        if (!any_true) {
             false_row = row;
             break;
         }
@@ -2092,6 +2140,7 @@ void push_rare_categorical_sample_group(
     const RareInfo& info) {
     for (auto& group : groups) {
         if (group.event_probability == info.event_probability &&
+            group.nbits == distribution.nbits &&
             group.assignments == distribution.assignments &&
             group.probabilities == distribution.probabilities &&
             group.event_rows == info.event_rows &&
@@ -2102,6 +2151,7 @@ void push_rare_categorical_sample_group(
     }
     groups.push_back(RareCategoricalSampleGroup{
         info.event_probability,
+        distribution.nbits,
         {distribution.conditions},
         distribution.assignments,
         distribution.probabilities,
@@ -2336,8 +2386,12 @@ void write_measurement_record(
 void sample_categorical_distribution(
     FactoredExecutorState& runtime,
     const std::vector<int>& conditions,
-    const std::vector<std::vector<bool>>& assignments,
+    int nbits,
+    const std::vector<std::vector<std::uint64_t>>& assignments,
     const std::vector<double>& probabilities) {
+    if (static_cast<int>(conditions.size()) != nbits) {
+        fail("categorical condition count does not match assignment bit count");
+    }
     bool any_assigned = false;
     bool all_assigned = true;
     for (int condition : conditions) {
@@ -2353,7 +2407,7 @@ void sample_categorical_distribution(
     }
     const int row = sample_categorical_row(runtime.rng_state, probabilities);
     for (std::size_t i = 0; i < conditions.size(); ++i) {
-        assign_symbol(runtime, conditions[i], assignments[static_cast<std::size_t>(row)][i]);
+        assign_symbol(runtime, conditions[i], packed_bit(assignments[static_cast<std::size_t>(row)], static_cast<int>(i)));
     }
 }
 
@@ -2407,7 +2461,7 @@ void assign_categorical_group_false(
 void sample_rare_categorical_group(FactoredExecutorState& runtime, const RareCategoricalSampleGroup& group) {
     if (any_categorical_group_assigned(runtime, group.conditions)) {
         for (const auto& conditions : group.conditions) {
-            sample_categorical_distribution(runtime, conditions, group.assignments, group.probabilities);
+            sample_categorical_distribution(runtime, conditions, group.nbits, group.assignments, group.probabilities);
         }
         return;
     }
@@ -2428,7 +2482,7 @@ void sample_rare_categorical_group(FactoredExecutorState& runtime, const RareCat
         const auto& conditions = group.conditions[static_cast<std::size_t>(idx)];
         const auto& assignment = group.assignments[static_cast<std::size_t>(row)];
         for (std::size_t bit_idx = 0; bit_idx < conditions.size(); ++bit_idx) {
-            if (assignment[bit_idx]) {
+            if (packed_bit(assignment, static_cast<int>(bit_idx))) {
                 set_assigned_symbol_true_unchecked(runtime, conditions[bit_idx]);
             }
         }
@@ -2465,7 +2519,7 @@ void sample_low_probability_bernoulli_group(FactoredExecutorState& runtime, cons
 
 void sample_exogenous_symbols(FactoredExecutorState& runtime, const FactoredInstructionProgram& program) {
     for (const auto& distribution : program.sampled_categorical_distributions) {
-        sample_categorical_distribution(runtime, distribution.conditions, distribution.assignments, distribution.probabilities);
+        sample_categorical_distribution(runtime, distribution.conditions, distribution.nbits, distribution.assignments, distribution.probabilities);
     }
     for (const auto& group : program.sampled_rare_categorical_groups) {
         sample_rare_categorical_group(runtime, group);
@@ -2720,41 +2774,27 @@ void execute_in_place(FactoredExecutorState& runtime, const FactoredInstructionP
     }
 }
 
-std::vector<bool> execute(FactoredExecutorState& runtime, const FactoredInstructionProgram& program) {
+std::vector<std::uint64_t> execute(FactoredExecutorState& runtime, const FactoredInstructionProgram& program) {
     execute_in_place(runtime, program);
-    std::vector<bool> out(static_cast<std::size_t>(runtime.nrecords), false);
-    for (int record = 1; record <= runtime.nrecords; ++record) {
-        const std::size_t word = symbol_word_index(record);
-        out[static_cast<std::size_t>(record - 1)] =
-            word < runtime.measurement_words.size() &&
-            (runtime.measurement_words[word] & symbol_bit_mask(record)) != 0;
-    }
-    return out;
+    return runtime.measurement_words;
 }
 
-std::vector<bool> sample_measurements(const FactoredInstructionProgram& program, std::uint64_t seed) {
+std::vector<std::uint64_t> sample_measurements(const FactoredInstructionProgram& program, std::uint64_t seed) {
     FactoredExecutorState runtime(program, seed);
     return execute(runtime, program);
 }
 
-std::vector<std::vector<bool>> sample_measurements(const FactoredInstructionProgram& program, int shots, std::uint64_t seed) {
+std::vector<std::vector<std::uint64_t>> sample_measurements(const FactoredInstructionProgram& program, int shots, std::uint64_t seed) {
     if (shots < 0) {
         fail("shot count must be nonnegative");
     }
     FactoredExecutorState runtime(program, seed);
-    std::vector<std::vector<bool>> out;
+    std::vector<std::vector<std::uint64_t>> out;
     out.reserve(static_cast<std::size_t>(shots));
     for (int shot = 0; shot < shots; ++shot) {
         reset_executor(runtime, program);
         execute_in_place(runtime, program);
-        std::vector<bool> shot_records(static_cast<std::size_t>(runtime.nrecords), false);
-        for (int record = 1; record <= runtime.nrecords; ++record) {
-            const std::size_t word = symbol_word_index(record);
-            shot_records[static_cast<std::size_t>(record - 1)] =
-                word < runtime.measurement_words.size() &&
-                (runtime.measurement_words[word] & symbol_bit_mask(record)) != 0;
-        }
-        out.push_back(std::move(shot_records));
+        out.push_back(runtime.measurement_words);
     }
     return out;
 }
@@ -3143,22 +3183,26 @@ struct StimAccumulator {
 };
 
 void apply_depolarize1(FrameFactoredState& state, int q, double probability) {
-    const std::vector<std::vector<bool>> assignments{{false, false}, {false, true}, {true, false}, {true, true}};
-    const auto bits = state.context->fresh_categorical_bools(assignments, {1.0 - probability, probability / 3.0, probability / 3.0, probability / 3.0});
+    const std::vector<std::vector<std::uint64_t>> assignments{
+        packed_bits({false, false}),
+        packed_bits({false, true}),
+        packed_bits({true, false}),
+        packed_bits({true, true}),
+    };
+    const auto bits = state.context->fresh_categorical_bools(2, assignments, {1.0 - probability, probability / 3.0, probability / 3.0, probability / 3.0});
     apply_pauli(state, pauli_x(state.n, q), bits[0]);
     apply_pauli(state, pauli_z(state.n, q), bits[1]);
 }
 
 void apply_depolarize2(FrameFactoredState& state, int q1, int q2, double probability) {
-    std::vector<std::vector<bool>> assignments;
-    assignments.push_back({false, false, false, false});
+    std::vector<std::vector<std::uint64_t>> assignments;
+    assignments.push_back(packed_bits({false, false, false, false}));
     for (bool x1 : {false, true}) {
         for (bool z1 : {false, true}) {
             for (bool x2 : {false, true}) {
                 for (bool z2 : {false, true}) {
-                    std::vector<bool> assignment{x1, z1, x2, z2};
-                    if (std::any_of(assignment.begin(), assignment.end(), [](bool b) { return b; })) {
-                        assignments.push_back(assignment);
+                    if (x1 || z1 || x2 || z2) {
+                        assignments.push_back(packed_bits({x1, z1, x2, z2}));
                     }
                 }
             }
@@ -3166,7 +3210,7 @@ void apply_depolarize2(FrameFactoredState& state, int q1, int q2, double probabi
     }
     std::vector<double> probabilities(16, probability / 15.0);
     probabilities[0] = 1.0 - probability;
-    const auto bits = state.context->fresh_categorical_bools(assignments, probabilities);
+    const auto bits = state.context->fresh_categorical_bools(4, assignments, probabilities);
     apply_pauli(state, pauli_x(state.n, q1), bits[0]);
     apply_pauli(state, pauli_z(state.n, q1), bits[1]);
     apply_pauli(state, pauli_x(state.n, q2), bits[2]);
@@ -3408,7 +3452,7 @@ StimSampleSummary estimate_stim_logical_error_rate(const StimParseResult& parsed
         for (const auto& detector : parsed.detectors) {
             bool parity = false;
             for (int record : detector.records) {
-                parity ^= shot_records[static_cast<std::size_t>(record - 1)];
+                parity ^= packed_bit(shot_records, record - 1);
             }
             discarded = discarded || parity;
         }
@@ -3421,7 +3465,7 @@ StimSampleSummary estimate_stim_logical_error_rate(const StimParseResult& parsed
         for (const auto& observable : parsed.observables) {
             bool parity = false;
             for (int record : observable.records) {
-                parity ^= shot_records[static_cast<std::size_t>(record - 1)];
+                parity ^= packed_bit(shot_records, record - 1);
             }
             logical ^= parity;
         }
