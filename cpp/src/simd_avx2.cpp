@@ -47,7 +47,9 @@ void avx2_rotate_uniform_imag_pairs(
     for (std::size_t idx = 0; idx < npairs; ++idx) {
         double* a0 = raw + 2 * left_indices[idx];
         double* a1 = raw + 2 * right_indices[idx];
-        const __m256d v = _mm256_setr_pd(a0[0], a0[1], a1[0], a1[1]);
+        const __m128d lo = _mm_loadu_pd(a0);
+        const __m128d hi = _mm_loadu_pd(a1);
+        const __m256d v = _mm256_insertf128_pd(_mm256_castpd128_pd256(lo), hi, 1);
         const __m256d cross = _mm256_permute4x64_pd(v, 0x1b);
         const __m256d result = _mm256_fmadd_pd(vq, cross, _mm256_mul_pd(vc, v));
         _mm_storeu_pd(a0, _mm256_castpd256_pd128(result));
@@ -71,7 +73,9 @@ void avx2_rotate_real_pair_flip(
         const double q = (__builtin_popcountll(static_cast<std::uint64_t>(i0) & zmask) & 1) != 0 ? -base_coeff : base_coeff;
         double* a0 = raw + 2 * i0;
         double* a1 = raw + 2 * i1;
-        const __m256d v = _mm256_setr_pd(a0[0], a0[1], a1[0], a1[1]);
+        const __m128d lo = _mm_loadu_pd(a0);
+        const __m128d hi = _mm_loadu_pd(a1);
+        const __m256d v = _mm256_insertf128_pd(_mm256_castpd128_pd256(lo), hi, 1);
         const __m256d cross = _mm256_permute4x64_pd(v, 0x4e);
         const __m256d vq = _mm256_setr_pd(-q, -q, q, q);
         const __m256d result = _mm256_fmadd_pd(vq, cross, _mm256_mul_pd(vc, v));

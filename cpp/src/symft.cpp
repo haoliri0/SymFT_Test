@@ -2426,16 +2426,21 @@ void assign_symbol(FactoredExecutorState& runtime, int condition, bool value) {
 }
 
 bool eval_symbolic_bool_packed(const SymbolicBoolEvaluationPlan& plan, const FactoredExecutorState& runtime) {
+    const std::size_t max_word = static_cast<std::size_t>(plan.word_indices.back());
+    if (max_word >= runtime.assigned_words.size()) {
+        fail("symbolic condition expression has no concrete value");
+    }
+    const auto* word_indices = plan.word_indices.data();
+    const auto* word_masks = plan.word_masks.data();
+    const auto* assigned_words = runtime.assigned_words.data();
+    const auto* value_words = runtime.value_words.data();
     std::uint64_t parity_bits = 0;
     std::uint64_t missing = 0;
     for (std::size_t i = 0; i < plan.word_indices.size(); ++i) {
-        const std::size_t word = static_cast<std::size_t>(plan.word_indices[i]);
-        if (word >= runtime.assigned_words.size()) {
-            fail("symbolic condition expression has no concrete value");
-        }
-        const std::uint64_t mask = plan.word_masks[i];
-        missing |= mask & ~runtime.assigned_words[word];
-        parity_bits ^= runtime.value_words[word] & mask;
+        const std::size_t word = static_cast<std::size_t>(word_indices[i]);
+        const std::uint64_t mask = word_masks[i];
+        missing |= mask & ~assigned_words[word];
+        parity_bits ^= value_words[word] & mask;
     }
     if (missing != 0) {
         fail("symbolic condition expression has no concrete value");
