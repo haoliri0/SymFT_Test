@@ -174,35 +174,6 @@ void test_batch_sampler() {
         ones += packed_bit(shot, 0) ? 1 : 0;
     }
     require(ones > 50 && ones < 150, "batch T then MX produces non-deterministic X measurement");
-
-    const std::vector<BatchKernelBackend> backends = {
-        BatchKernelBackend::SoaAutovec,
-        BatchKernelBackend::SoaDispatch,
-        BatchKernelBackend::InterleavedAvx2,
-    };
-    for (const auto backend : backends) {
-        try {
-            const auto backend_records = sample_measurements_batch(program, 9, 4, 17, backend);
-            for (const auto& shot : backend_records) {
-                require(packed_bit(shot, 0), "batch backend deterministic X error");
-            }
-            const auto backend_t_records = sample_measurements_batch(t_program, 200, 32, 23, backend);
-            int backend_ones = 0;
-            for (const auto& shot : backend_t_records) {
-                backend_ones += packed_bit(shot, 0) ? 1 : 0;
-            }
-            require(
-                backend_ones > 50 && backend_ones < 150,
-                std::string("batch backend T stochastic range: ") + batch_kernel_backend_name(backend));
-        } catch (const Error& ex) {
-            const bool optional_unavailable =
-                backend == BatchKernelBackend::InterleavedAvx2 &&
-                std::string(ex.what()).find("unavailable") != std::string::npos;
-            if (!optional_unavailable) {
-                throw;
-            }
-        }
-    }
 }
 
 void test_detectors() {

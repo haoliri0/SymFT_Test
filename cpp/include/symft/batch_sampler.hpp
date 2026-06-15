@@ -9,14 +9,6 @@ namespace symft {
 struct FactoredInstructionProgram;
 struct PresampledExogenous;
 
-enum class BatchKernelBackend {
-    SoaAutovec,
-    SoaDispatch,
-    InterleavedAvx2,
-};
-
-const char* batch_kernel_backend_name(BatchKernelBackend backend);
-
 // Active storage is a Julia-column-major equivalent SoA layout:
 // active_re[basis * batches + shot] and active_im[basis * batches + shot].
 // Thus shots are contiguous for each active basis column.
@@ -34,8 +26,6 @@ struct BatchFactoredExecutorState {
     std::vector<double> active_im;
     std::vector<double> scratch_re;
     std::vector<double> scratch_im;
-    std::vector<double> active_interleaved;
-    std::vector<double> scratch_interleaved;
     std::vector<std::uint64_t> value_words;
     std::vector<std::uint64_t> assigned_words;
     std::vector<std::uint64_t> measurement_words;
@@ -44,13 +34,11 @@ struct BatchFactoredExecutorState {
     std::vector<double> branch_prob_true;
     std::vector<double> branch_invnorms;
     std::uint64_t rng_state = 1;
-    BatchKernelBackend backend = BatchKernelBackend::SoaAutovec;
 
     explicit BatchFactoredExecutorState(
         const FactoredInstructionProgram& program,
         int batches = 0,
-        std::uint64_t seed = 1,
-        BatchKernelBackend backend = BatchKernelBackend::SoaAutovec);
+        std::uint64_t seed = 1);
 };
 
 int default_batch_count(int max_k);
@@ -65,7 +53,6 @@ std::vector<std::vector<std::uint64_t>> sample_measurements_batch(
     const FactoredInstructionProgram& program,
     int shots,
     int batches = 0,
-    std::uint64_t seed = 1,
-    BatchKernelBackend backend = BatchKernelBackend::SoaAutovec);
+    std::uint64_t seed = 1);
 
 } // namespace symft

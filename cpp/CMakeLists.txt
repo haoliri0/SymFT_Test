@@ -44,18 +44,9 @@ if(SYMFT_CPP_ENABLE_AVX2)
     check_cxx_compiler_flag("-mavx2" SYMFT_HAS_MAVX2)
     check_cxx_compiler_flag("-mfma" SYMFT_HAS_MFMA)
     if(SYMFT_HAS_MAVX2 AND SYMFT_HAS_MFMA)
-        target_sources(symft_cpp PRIVATE
-            src/simd_avx2.cpp
-            src/batch_simd_avx2.cpp
-            src/batch_interleaved_avx2.cpp
-        )
-        set_source_files_properties(
-            src/simd_avx2.cpp
-            src/batch_simd_avx2.cpp
-            src/batch_interleaved_avx2.cpp
-            PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
+        target_sources(symft_cpp PRIVATE src/simd_avx2.cpp src/batch_simd_avx2.cpp)
+        set_source_files_properties(src/simd_avx2.cpp src/batch_simd_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma")
         target_compile_definitions(symft_cpp PRIVATE SYMFT_COMPILED_AVX2=1)
-        target_compile_definitions(symft_cpp PRIVATE SYMFT_COMPILED_BATCH_INTERLEAVED_AVX2=1)
     endif()
 endif()
 

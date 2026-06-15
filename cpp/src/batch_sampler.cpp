@@ -1,21 +1,9 @@
 #include "symft/symft.hpp"
-#include "symft/batch_interleaved.hpp"
 #include "symft/batch_simd.hpp"
 
 #include <algorithm>
 #include <cmath>
-#include <cstdint>
 #include <limits>
-#include <string>
-
-namespace symft::batch_simd {
-#if defined(SYMFT_COMPILED_AVX2)
-const KernelTable& avx2_table();
-#endif
-#if defined(SYMFT_COMPILED_AVX512)
-const KernelTable& avx512_table();
-#endif
-} // namespace symft::batch_simd
 
 namespace symft {
 namespace {
@@ -173,10 +161,6 @@ std::size_t batch_active_offset(const BatchFactoredExecutorState& runtime, std::
     return basis * static_cast<std::size_t>(runtime.batches) + static_cast<std::size_t>(shot);
 }
 
-std::size_t batch_active_interleaved_offset(const BatchFactoredExecutorState& runtime, std::size_t basis, int shot) {
-    return 2 * batch_active_offset(runtime, basis, shot);
-}
-
 std::size_t batch_condition_offset(const BatchFactoredExecutorState& runtime, int condition, std::size_t word) {
     return static_cast<std::size_t>(condition - 1) * runtime.batch_words + word;
 }
@@ -264,63 +248,6 @@ bool any_batch_categorical_group_assigned(
         }
     }
     return false;
-}
-
-bool cpu_supports_avx2_fma() {
-#if defined(__GNUC__) || defined(__clang__)
-#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
-    return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
-#else
-    return false;
-#endif
-#else
-    return false;
-#endif
-}
-
-bool cpu_supports_avx512() {
-#if defined(__GNUC__) || defined(__clang__)
-#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
-    return __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512dq");
-#else
-    return false;
-#endif
-#else
-    return false;
-#endif
-}
-
-bool interleaved_avx2_available() {
-#if defined(SYMFT_COMPILED_BATCH_INTERLEAVED_AVX2)
-    return cpu_supports_avx2_fma();
-#else
-    return false;
-#endif
-}
-
-bool uses_interleaved(const BatchFactoredExecutorState& runtime) {
-    return runtime.backend == BatchKernelBackend::InterleavedAvx2;
-}
-
-const batch_simd::KernelTable& explicit_soa_dispatch_table() {
-#if defined(SYMFT_COMPILED_AVX512)
-    if (cpu_supports_avx512()) {
-        return batch_simd::avx512_table();
-    }
-#endif
-#if defined(SYMFT_COMPILED_AVX2)
-    if (cpu_supports_avx2_fma()) {
-        return batch_simd::avx2_table();
-    }
-#endif
-    return batch_simd::scalar_table();
-}
-
-const batch_simd::KernelTable& soa_kernel_table(const BatchFactoredExecutorState& runtime) {
-    if (runtime.backend == BatchKernelBackend::SoaDispatch) {
-        return explicit_soa_dispatch_table();
-    }
-    return batch_simd::scalar_table();
 }
 
 bool batch_symbol_matches_bits(
@@ -669,35 +596,18 @@ void rotate_uniform_imag_pairs_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliRotationKernel& kernel,
     const std::vector<std::uint64_t>& sign_bits) {
-    const unsigned pair_bit = static_cast<unsigned>(trailing_zeros64(kernel.action.xmask));
     const auto& coeffs = fill_rotation_coefficients(
         runtime,
         sign_bits,
         kernel.pair_left_minus_coefficients.front().imag(),
         kernel.pair_left_plus_coefficients.front().imag());
-    if (uses_interleaved(runtime)) {
-#if defined(SYMFT_COMPILED_BATCH_INTERLEAVED_AVX2)
-        batch_interleaved_avx2::rotate_uniform_imag_xmask(
-            runtime.active_interleaved.data(),
-            static_cast<std::size_t>(runtime.batches),
-            runtime.active_shots,
-            kernel.action.xmask,
-            pair_bit,
-            kernel.pair_left_indices.size(),
-            kernel.cos_theta,
-            coeffs.data());
-        return;
-#else
-        fail("C++ interleaved AVX2 batch backend was not compiled");
-#endif
-    }
-    soa_kernel_table(runtime).rotate_uniform_imag_xmask(
+    batch_simd::dispatch_table().rotate_uniform_imag_pairs(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.batches),
         runtime.active_shots,
-        kernel.action.xmask,
-        pair_bit,
+        kernel.pair_left_indices.data(),
+        kernel.pair_right_indices.data(),
         kernel.pair_left_indices.size(),
         kernel.cos_theta,
         coeffs.data());
@@ -707,36 +617,18 @@ void rotate_real_pair_flip_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliRotationKernel& kernel,
     const std::vector<std::uint64_t>& sign_bits) {
-    const unsigned pair_bit = static_cast<unsigned>(trailing_zeros64(kernel.action.xmask));
     const auto& coeffs = fill_rotation_coefficients(
         runtime,
         sign_bits,
         kernel.pair_left_minus_coefficients.front().real(),
         kernel.pair_left_plus_coefficients.front().real());
-    if (uses_interleaved(runtime)) {
-#if defined(SYMFT_COMPILED_BATCH_INTERLEAVED_AVX2)
-        batch_interleaved_avx2::rotate_real_pair_flip_xmask(
-            runtime.active_interleaved.data(),
-            static_cast<std::size_t>(runtime.batches),
-            runtime.active_shots,
-            kernel.action.xmask,
-            pair_bit,
-            kernel.pair_left_indices.size(),
-            kernel.cos_theta,
-            coeffs.data(),
-            kernel.action.zmask);
-        return;
-#else
-        fail("C++ interleaved AVX2 batch backend was not compiled");
-#endif
-    }
-    soa_kernel_table(runtime).rotate_real_pair_flip_xmask(
+    batch_simd::dispatch_table().rotate_real_pair_flip(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.batches),
         runtime.active_shots,
-        kernel.action.xmask,
-        pair_bit,
+        kernel.pair_left_indices.data(),
+        kernel.pair_right_indices.data(),
         kernel.pair_left_indices.size(),
         kernel.cos_theta,
         coeffs.data(),
@@ -753,24 +645,6 @@ void rotate_pauli_batch(
     const double c = kernel.cos_theta;
     if (kernel.is_diagonal) {
         const std::size_t dim = active_length(runtime.k);
-        if (uses_interleaved(runtime)) {
-            for (std::size_t basis = 0; basis < dim; ++basis) {
-                const Complex plus = kernel.diagonal_plus_coefficients[basis];
-                const Complex minus = kernel.diagonal_minus_coefficients[basis];
-                SYMFT_BATCH_SIMD_LOOP
-                for (int shot = 0; shot < runtime.active_shots; ++shot) {
-                    const Complex coeff = batch_bit(sign_bits, shot) ? plus : minus;
-                    const double fr = c + coeff.real();
-                    const double fi = coeff.imag();
-                    const std::size_t off = batch_active_interleaved_offset(runtime, basis, shot);
-                    const double r = runtime.active_interleaved[off];
-                    const double i = runtime.active_interleaved[off + 1];
-                    runtime.active_interleaved[off] = fr * r - fi * i;
-                    runtime.active_interleaved[off + 1] = fr * i + fi * r;
-                }
-            }
-            return;
-        }
         for (std::size_t basis = 0; basis < dim; ++basis) {
             const Complex plus = kernel.diagonal_plus_coefficients[basis];
             const Complex minus = kernel.diagonal_minus_coefficients[basis];
@@ -794,33 +668,6 @@ void rotate_pauli_batch(
     }
     if (kernel.real_pair_flip) {
         rotate_real_pair_flip_batch(runtime, kernel, sign_bits);
-        return;
-    }
-    if (uses_interleaved(runtime)) {
-        for (std::size_t idx = 0; idx < kernel.pair_left_indices.size(); ++idx) {
-            const std::size_t i0 = kernel.pair_left_indices[idx];
-            const std::size_t i1 = kernel.pair_right_indices[idx];
-            const Complex left_plus = kernel.pair_left_plus_coefficients[idx];
-            const Complex right_plus = kernel.pair_right_plus_coefficients[idx];
-            const Complex left_minus = kernel.pair_left_minus_coefficients[idx];
-            const Complex right_minus = kernel.pair_right_minus_coefficients[idx];
-            SYMFT_BATCH_SIMD_LOOP
-            for (int shot = 0; shot < runtime.active_shots; ++shot) {
-                const bool sign = batch_bit(sign_bits, shot);
-                const Complex left_coeff = sign ? left_plus : left_minus;
-                const Complex right_coeff = sign ? right_plus : right_minus;
-                const std::size_t off0 = batch_active_interleaved_offset(runtime, i0, shot);
-                const std::size_t off1 = batch_active_interleaved_offset(runtime, i1, shot);
-                const double r0 = runtime.active_interleaved[off0];
-                const double im0 = runtime.active_interleaved[off0 + 1];
-                const double r1 = runtime.active_interleaved[off1];
-                const double im1 = runtime.active_interleaved[off1 + 1];
-                runtime.active_interleaved[off0] = c * r0 + right_coeff.real() * r1 - right_coeff.imag() * im1;
-                runtime.active_interleaved[off0 + 1] = c * im0 + right_coeff.real() * im1 + right_coeff.imag() * r1;
-                runtime.active_interleaved[off1] = c * r1 + left_coeff.real() * r0 - left_coeff.imag() * im0;
-                runtime.active_interleaved[off1 + 1] = c * im1 + left_coeff.real() * im0 + left_coeff.imag() * r0;
-            }
-        }
         return;
     }
     for (std::size_t idx = 0; idx < kernel.pair_left_indices.size(); ++idx) {
@@ -858,33 +705,13 @@ void promote_first_dormant_rotation_batch(
     }
     const std::size_t dim = active_length(runtime.k);
     const std::size_t promoted_dim = 2 * dim;
-    const std::size_t promoted_size = promoted_dim * static_cast<std::size_t>(runtime.batches);
-    if (uses_interleaved(runtime) && runtime.active_interleaved.size() < 2 * promoted_size) {
-        fail("batch active storage has too few columns for dormant promotion");
-    }
-    if (!uses_interleaved(runtime) && runtime.active_re.size() < promoted_size) {
+    if (runtime.active_re.size() < promoted_dim * static_cast<std::size_t>(runtime.batches)) {
         fail("batch active storage has too few columns for dormant promotion");
     }
     const double c = std::cos(theta);
     const double s = std::sin(theta);
     const auto& coeffs = fill_rotation_coefficients(runtime, sign_bits, -s, s);
-    if (uses_interleaved(runtime)) {
-#if defined(SYMFT_COMPILED_BATCH_INTERLEAVED_AVX2)
-        batch_interleaved_avx2::promote_first_dormant_rotation(
-            runtime.active_interleaved.data(),
-            static_cast<std::size_t>(runtime.batches),
-            runtime.active_shots,
-            dim,
-            c,
-            coeffs.data());
-        ++runtime.k;
-        --runtime.ndormant;
-        return;
-#else
-        fail("C++ interleaved AVX2 batch backend was not compiled");
-#endif
-    }
-    soa_kernel_table(runtime).promote_first_dormant_rotation(
+    batch_simd::dispatch_table().promote_first_dormant_rotation(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.batches),
@@ -927,49 +754,7 @@ void measure_active_last_z_batch(
     }
     const int new_k = runtime.k - 1;
     const std::size_t dim = active_length(new_k);
-    if (uses_interleaved(runtime)) {
-        std::fill(
-            runtime.branch_prob_true.begin(),
-            runtime.branch_prob_true.begin() + runtime.active_shots,
-            0.0);
-        for (std::size_t basis = 0; basis < dim; ++basis) {
-            const std::size_t true_base = 2 * (dim + basis) * static_cast<std::size_t>(runtime.batches);
-            SYMFT_BATCH_SIMD_LOOP
-            for (int shot = 0; shot < runtime.active_shots; ++shot) {
-                const std::size_t off = true_base + 2 * static_cast<std::size_t>(shot);
-                const double r = runtime.active_interleaved[off];
-                const double i = runtime.active_interleaved[off + 1];
-                runtime.branch_prob_true[static_cast<std::size_t>(shot)] += r * r + i * i;
-            }
-        }
-        sample_batch_measurement_branches_from_true(
-            runtime,
-            runtime.eval_scratch,
-            runtime.branch_prob_true,
-            runtime.branch_invnorms);
-        const auto& branch_bits = runtime.eval_scratch;
-        for (std::size_t basis = 0; basis < dim; ++basis) {
-            const std::size_t false_base = 2 * basis * static_cast<std::size_t>(runtime.batches);
-            const std::size_t true_base = 2 * (dim + basis) * static_cast<std::size_t>(runtime.batches);
-            SYMFT_BATCH_SIMD_LOOP
-            for (int shot = 0; shot < runtime.active_shots; ++shot) {
-                const bool branch = batch_bit(branch_bits, shot);
-                const double n = runtime.branch_invnorms[static_cast<std::size_t>(shot)];
-                const std::size_t shot_off = 2 * static_cast<std::size_t>(shot);
-                const std::size_t src = (branch ? true_base : false_base) + shot_off;
-                const std::size_t dst = false_base + shot_off;
-                runtime.active_interleaved[dst] = runtime.active_interleaved[src] * n;
-                runtime.active_interleaved[dst + 1] = runtime.active_interleaved[src + 1] * n;
-            }
-        }
-        runtime.k = new_k;
-        ++runtime.ndormant;
-        assign_batch_symbol(runtime, branch_condition, branch_bits);
-        eval_symbolic_bool_batch(runtime.eval_scratch, outcome_plan, runtime);
-        write_batch_measurement_record(runtime, record, runtime.eval_scratch, record_condition);
-        return;
-    }
-    soa_kernel_table(runtime).last_z_measure_true_prob(
+    batch_simd::dispatch_table().last_z_measure_true_prob(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.batches),
@@ -982,7 +767,7 @@ void measure_active_last_z_batch(
         runtime.branch_prob_true,
         runtime.branch_invnorms);
     const auto& branch_bits = runtime.eval_scratch;
-    soa_kernel_table(runtime).last_z_project(
+    batch_simd::dispatch_table().last_z_project(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.batches),
@@ -1007,42 +792,7 @@ void measure_diagonal_active_pauli_batch(
     const auto& source_false = kernel.source0_false;
     const auto& source_true = kernel.source0_true;
     const std::size_t out_dim = source_false.size();
-    if (uses_interleaved(runtime)) {
-#if defined(SYMFT_COMPILED_BATCH_INTERLEAVED_AVX2)
-        batch_interleaved_avx2::diagonal_measure_true_prob(
-            runtime.active_interleaved.data(),
-            static_cast<std::size_t>(runtime.batches),
-            runtime.active_shots,
-            source_true.data(),
-            out_dim,
-            runtime.branch_prob_true.data());
-        sample_batch_measurement_branches_from_true(
-            runtime,
-            runtime.eval_scratch,
-            runtime.branch_prob_true,
-            runtime.branch_invnorms);
-        const auto& branch_bits = runtime.eval_scratch;
-        batch_interleaved_avx2::diagonal_project(
-            runtime.active_interleaved.data(),
-            runtime.active_interleaved.data(),
-            static_cast<std::size_t>(runtime.batches),
-            runtime.active_shots,
-            source_false.data(),
-            source_true.data(),
-            out_dim,
-            branch_bits.data(),
-            runtime.branch_invnorms.data());
-        --runtime.k;
-        ++runtime.ndormant;
-        assign_batch_symbol(runtime, branch_condition, branch_bits);
-        eval_symbolic_bool_batch(runtime.eval_scratch, outcome_plan, runtime);
-        write_batch_measurement_record(runtime, record, runtime.eval_scratch, record_condition);
-        return;
-#else
-        fail("C++ interleaved AVX2 batch backend was not compiled");
-#endif
-    }
-    soa_kernel_table(runtime).diagonal_measure_true_prob(
+    batch_simd::dispatch_table().diagonal_measure_true_prob(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.batches),
@@ -1056,7 +806,7 @@ void measure_diagonal_active_pauli_batch(
         runtime.branch_prob_true,
         runtime.branch_invnorms);
     const auto& branch_bits = runtime.eval_scratch;
-    soa_kernel_table(runtime).diagonal_project(
+    batch_simd::dispatch_table().diagonal_project(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.batches),
@@ -1081,47 +831,7 @@ void measure_nondiagonal_active_pauli_batch(
     std::optional<int> record,
     std::optional<int> record_condition) {
     const std::size_t out_dim = kernel.source0_false.size();
-    if (uses_interleaved(runtime)) {
-#if defined(SYMFT_COMPILED_BATCH_INTERLEAVED_AVX2)
-        batch_interleaved_avx2::nondiagonal_measure_true_prob(
-            runtime.active_interleaved.data(),
-            static_cast<std::size_t>(runtime.batches),
-            runtime.active_shots,
-            kernel.source0_false.data(),
-            kernel.source1_false.data(),
-            kernel.coeff1_false.data(),
-            out_dim,
-            runtime.branch_prob_true.data());
-        sample_batch_measurement_branches_from_true(
-            runtime,
-            runtime.eval_scratch,
-            runtime.branch_prob_true,
-            runtime.branch_invnorms);
-        const auto& branch_bits = runtime.eval_scratch;
-        batch_interleaved_avx2::nondiagonal_project(
-            runtime.active_interleaved.data(),
-            runtime.scratch_interleaved.data(),
-            static_cast<std::size_t>(runtime.batches),
-            runtime.active_shots,
-            kernel.source0_false.data(),
-            kernel.source1_false.data(),
-            kernel.coeff1_false.data(),
-            out_dim,
-            branch_bits.data(),
-            runtime.branch_invnorms.data());
-        const std::size_t active_prefix_size = 2 * out_dim * static_cast<std::size_t>(runtime.batches);
-        std::copy_n(runtime.scratch_interleaved.data(), active_prefix_size, runtime.active_interleaved.data());
-        --runtime.k;
-        ++runtime.ndormant;
-        assign_batch_symbol(runtime, branch_condition, branch_bits);
-        eval_symbolic_bool_batch(runtime.eval_scratch, outcome_plan, runtime);
-        write_batch_measurement_record(runtime, record, runtime.eval_scratch, record_condition);
-        return;
-#else
-        fail("C++ interleaved AVX2 batch backend was not compiled");
-#endif
-    }
-    soa_kernel_table(runtime).nondiagonal_measure_true_prob(
+    batch_simd::dispatch_table().nondiagonal_measure_true_prob(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.batches),
@@ -1137,7 +847,7 @@ void measure_nondiagonal_active_pauli_batch(
         runtime.branch_prob_true,
         runtime.branch_invnorms);
     const auto& branch_bits = runtime.eval_scratch;
-    soa_kernel_table(runtime).nondiagonal_project(
+    batch_simd::dispatch_table().nondiagonal_project(
         runtime.active_re.data(),
         runtime.active_im.data(),
         runtime.scratch_re.data(),
@@ -1245,29 +955,12 @@ const char* active_batch_simd_backend() {
     return batch_simd::dispatch_name();
 }
 
-const char* batch_kernel_backend_name(BatchKernelBackend backend) {
-    switch (backend) {
-    case BatchKernelBackend::SoaAutovec:
-        return batch_simd::scalar_table().name;
-    case BatchKernelBackend::SoaDispatch:
-        return explicit_soa_dispatch_table().name;
-    case BatchKernelBackend::InterleavedAvx2:
-        return "cpp-interleaved-avx2";
-    }
-    return "unknown";
-}
-
 BatchFactoredExecutorState::BatchFactoredExecutorState(
     const FactoredInstructionProgram& program,
     int batches_,
-    std::uint64_t seed,
-    BatchKernelBackend backend_)
+    std::uint64_t seed)
     : batches(batches_ > 0 ? batches_ : default_batch_count(program.max_k)),
-      rng_state(seed),
-      backend(backend_) {
-    if (backend == BatchKernelBackend::InterleavedAvx2 && !interleaved_avx2_available()) {
-        fail("C++ interleaved AVX2 batch backend is unavailable on this build or CPU");
-    }
+      rng_state(seed) {
     reset_batch_executor(*this, program, batches);
 }
 
@@ -1286,26 +979,17 @@ void reset_batch_executor(BatchFactoredExecutorState& runtime, const FactoredIns
 
     const std::size_t max_dim = active_length(program.max_k);
     const std::size_t active_size = max_dim * static_cast<std::size_t>(runtime.batches);
-    if (uses_interleaved(runtime)) {
-        if (runtime.active_interleaved.size() < 2 * active_size) {
-            runtime.active_interleaved.resize(2 * active_size, 0.0);
-        }
-        if (runtime.scratch_interleaved.size() < 2 * active_size) {
-            runtime.scratch_interleaved.resize(2 * active_size, 0.0);
-        }
-    } else {
-        if (runtime.active_re.size() < active_size) {
-            runtime.active_re.resize(active_size, 0.0);
-        }
-        if (runtime.active_im.size() < active_size) {
-            runtime.active_im.resize(active_size, 0.0);
-        }
-        if (runtime.scratch_re.size() < active_size) {
-            runtime.scratch_re.resize(active_size, 0.0);
-        }
-        if (runtime.scratch_im.size() < active_size) {
-            runtime.scratch_im.resize(active_size, 0.0);
-        }
+    if (runtime.active_re.size() < active_size) {
+        runtime.active_re.resize(active_size, 0.0);
+    }
+    if (runtime.active_im.size() < active_size) {
+        runtime.active_im.resize(active_size, 0.0);
+    }
+    if (runtime.scratch_re.size() < active_size) {
+        runtime.scratch_re.resize(active_size, 0.0);
+    }
+    if (runtime.scratch_im.size() < active_size) {
+        runtime.scratch_im.resize(active_size, 0.0);
     }
 
     const std::size_t symbol_size = static_cast<std::size_t>(program.nsymbols) * runtime.batch_words;
@@ -1343,19 +1027,10 @@ void reset_batch_executor(BatchFactoredExecutorState& runtime, const FactoredIns
     const std::size_t dim = program.initial_active.dim();
     for (std::size_t basis = 0; basis < dim; ++basis) {
         const Complex amp = program.initial_active.alpha[basis];
-        if (uses_interleaved(runtime)) {
-            const std::size_t base = 2 * basis * static_cast<std::size_t>(runtime.batches);
-            for (int shot = 0; shot < runtime.active_shots; ++shot) {
-                const std::size_t off = base + 2 * static_cast<std::size_t>(shot);
-                runtime.active_interleaved[off] = amp.real();
-                runtime.active_interleaved[off + 1] = amp.imag();
-            }
-        } else {
-            const std::size_t base = basis * static_cast<std::size_t>(runtime.batches);
-            for (int shot = 0; shot < runtime.active_shots; ++shot) {
-                runtime.active_re[base + static_cast<std::size_t>(shot)] = amp.real();
-                runtime.active_im[base + static_cast<std::size_t>(shot)] = amp.imag();
-            }
+        const std::size_t base = basis * static_cast<std::size_t>(runtime.batches);
+        for (int shot = 0; shot < runtime.active_shots; ++shot) {
+            runtime.active_re[base + static_cast<std::size_t>(shot)] = amp.real();
+            runtime.active_im[base + static_cast<std::size_t>(shot)] = amp.imag();
         }
     }
 }
@@ -1393,12 +1068,11 @@ std::vector<std::vector<std::uint64_t>> sample_measurements_batch(
     const FactoredInstructionProgram& program,
     int shots,
     int batches,
-    std::uint64_t seed,
-    BatchKernelBackend backend) {
+    std::uint64_t seed) {
     if (shots < 0) {
         fail("shot count must be nonnegative");
     }
-    BatchFactoredExecutorState runtime(program, batches, seed, backend);
+    BatchFactoredExecutorState runtime(program, batches, seed);
     std::vector<std::vector<std::uint64_t>> out(
         static_cast<std::size_t>(shots),
         std::vector<std::uint64_t>(symbol_word_count(program.nrecords), 0));
