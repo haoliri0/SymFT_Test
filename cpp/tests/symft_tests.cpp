@@ -81,6 +81,28 @@ void test_active_rotation() {
     rotate_pauli(y_expected, y_pauli, -0.19);
     rotate_pauli(y_fast, PrecomputedActivePauliRotationKernel(ActivePauliAction(y_pauli), 0.19), true);
     require(approx(y_fast.alpha[0], y_expected.alpha[0]) && approx(y_fast.alpha[1], y_expected.alpha[1]), "precomputed Y fast signed rotation");
+
+    std::vector<Complex> alpha6(64);
+    for (std::size_t i = 0; i < alpha6.size(); ++i) {
+        alpha6[i] = {0.01 * static_cast<double>(i + 1), -0.02 * static_cast<double>((i % 7) + 1)};
+    }
+    ActiveState x6_expected(6, alpha6);
+    ActiveState x6_fast(6, alpha6);
+    const auto x6_pauli = pauli_x(6, 5);
+    rotate_pauli(x6_expected, x6_pauli, 0.17);
+    rotate_pauli(x6_fast, PrecomputedActivePauliRotationKernel(ActivePauliAction(x6_pauli), 0.17), false);
+    for (std::size_t i = 0; i < alpha6.size(); ++i) {
+        require(approx(x6_fast.alpha[i], x6_expected.alpha[i]), "precomputed multi-qubit X fast rotation");
+    }
+
+    ActiveState y6_expected(6, alpha6);
+    ActiveState y6_fast(6, alpha6);
+    const auto y6_pauli = pauli_y(6, 4);
+    rotate_pauli(y6_expected, y6_pauli, 0.11);
+    rotate_pauli(y6_fast, PrecomputedActivePauliRotationKernel(ActivePauliAction(y6_pauli), 0.11), false);
+    for (std::size_t i = 0; i < alpha6.size(); ++i) {
+        require(approx(y6_fast.alpha[i], y6_expected.alpha[i]), "precomputed multi-qubit Y fast rotation");
+    }
 }
 
 void test_parser_feedback() {

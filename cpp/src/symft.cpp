@@ -20,6 +20,7 @@ constexpr int kWordBits = 64;
 constexpr double kPi = 3.141592653589793238462643383279502884;
 constexpr std::size_t kNoSource = std::numeric_limits<std::size_t>::max();
 constexpr double kLowProbabilitySampleThreshold = 0.02;
+constexpr std::size_t kSimdPairRotationThreshold = 16;
 
 [[noreturn]] void fail(const std::string& message) {
     throw Error(message);
@@ -181,8 +182,52 @@ bool can_rotate_real_pair_flip(const ActivePauliAction& action) {
     return is_near_zero(action.even_phase.real()) && !is_near_zero(action.even_phase.imag());
 }
 
-double real_pair_flip_coeff(double base_coeff, std::uint64_t zmask, std::size_t basis) {
-    return is_odd_popcount(static_cast<std::uint64_t>(basis) & zmask) ? -base_coeff : base_coeff;
+inline void rotate_uniform_imag_pairs_scalar(
+    Complex* alpha,
+    const std::size_t* left_indices,
+    const std::size_t* right_indices,
+    std::size_t npairs,
+    double c,
+    double q) {
+    auto* raw = reinterpret_cast<double*>(alpha);
+    for (std::size_t idx = 0; idx < npairs; ++idx) {
+        double* a0 = raw + 2 * left_indices[idx];
+        double* a1 = raw + 2 * right_indices[idx];
+        const double r0 = a0[0];
+        const double i0 = a0[1];
+        const double r1 = a1[0];
+        const double i1 = a1[1];
+        a0[0] = c * r0 - q * i1;
+        a0[1] = c * i0 + q * r1;
+        a1[0] = c * r1 - q * i0;
+        a1[1] = c * i1 + q * r0;
+    }
+}
+
+inline void rotate_real_pair_flip_scalar(
+    Complex* alpha,
+    const std::size_t* left_indices,
+    const std::size_t* right_indices,
+    std::size_t npairs,
+    double c,
+    double base_coeff,
+    std::uint64_t zmask) {
+    auto* raw = reinterpret_cast<double*>(alpha);
+    for (std::size_t idx = 0; idx < npairs; ++idx) {
+        const std::size_t i0 = left_indices[idx];
+        const std::size_t i1 = right_indices[idx];
+        const double q = is_odd_popcount(static_cast<std::uint64_t>(i0) & zmask) ? -base_coeff : base_coeff;
+        double* a0 = raw + 2 * i0;
+        double* a1 = raw + 2 * i1;
+        const double r0 = a0[0];
+        const double i0v = a0[1];
+        const double r1 = a1[0];
+        const double i1v = a1[1];
+        a0[0] = c * r0 - q * r1;
+        a0[1] = c * i0v - q * i1v;
+        a1[0] = c * r1 + q * r0;
+        a1[1] = c * i1v + q * i0v;
+    }
 }
 
 PauliString project_pauli_body(const PauliString& pauli, int qstart, int qcount) {
@@ -1276,41 +1321,47 @@ void rotate_pauli(ActiveState& state, const PrecomputedActivePauliRotationKernel
     }
     if (kernel.uniform_imag_pairs) {
         const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
-        const double q = coefficient.imag();
-        auto* raw = reinterpret_cast<double*>(state.alpha.data());
-        for (std::size_t idx = 0; idx < kernel.pair_left_indices.size(); ++idx) {
-            double* a0 = raw + 2 * kernel.pair_left_indices[idx];
-            double* a1 = raw + 2 * kernel.pair_right_indices[idx];
-            const double r0 = a0[0];
-            const double i0v = a0[1];
-            const double r1 = a1[0];
-            const double i1v = a1[1];
-            a0[0] = c * r0 - q * i1v;
-            a0[1] = c * i0v + q * r1;
-            a1[0] = c * r1 - q * i0v;
-            a1[1] = c * i1v + q * r0;
+        const std::size_t npairs = kernel.pair_left_indices.size();
+        if (npairs < kSimdPairRotationThreshold) {
+            rotate_uniform_imag_pairs_scalar(
+                state.alpha.data(),
+                kernel.pair_left_indices.data(),
+                kernel.pair_right_indices.data(),
+                npairs,
+                c,
+                coefficient.imag());
+        } else {
+            simd::dispatch_table().rotate_uniform_imag_pairs(
+                state.alpha.data(),
+                kernel.pair_left_indices.data(),
+                kernel.pair_right_indices.data(),
+                npairs,
+                c,
+                coefficient.imag());
         }
         return;
     }
     if (kernel.real_pair_flip) {
         const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
-        const double base_coeff = coefficient.real();
-        const std::uint64_t zmask = kernel.action.zmask;
-        auto* raw = reinterpret_cast<double*>(state.alpha.data());
-        for (std::size_t idx = 0; idx < kernel.pair_left_indices.size(); ++idx) {
-            const std::size_t i0 = kernel.pair_left_indices[idx];
-            const std::size_t i1 = kernel.pair_right_indices[idx];
-            const double q = real_pair_flip_coeff(base_coeff, zmask, i0);
-            double* a0 = raw + 2 * i0;
-            double* a1 = raw + 2 * i1;
-            const double r0 = a0[0];
-            const double i0v = a0[1];
-            const double r1 = a1[0];
-            const double i1v = a1[1];
-            a0[0] = c * r0 - q * r1;
-            a0[1] = c * i0v - q * i1v;
-            a1[0] = c * r1 + q * r0;
-            a1[1] = c * i1v + q * i0v;
+        const std::size_t npairs = kernel.pair_left_indices.size();
+        if (npairs < kSimdPairRotationThreshold) {
+            rotate_real_pair_flip_scalar(
+                state.alpha.data(),
+                kernel.pair_left_indices.data(),
+                kernel.pair_right_indices.data(),
+                npairs,
+                c,
+                coefficient.real(),
+                kernel.action.zmask);
+        } else {
+            simd::dispatch_table().rotate_real_pair_flip(
+                state.alpha.data(),
+                kernel.pair_left_indices.data(),
+                kernel.pair_right_indices.data(),
+                npairs,
+                c,
+                coefficient.real(),
+                kernel.action.zmask);
         }
         return;
     }
@@ -2374,22 +2425,8 @@ void assign_symbol(FactoredExecutorState& runtime, int condition, bool value) {
     assign_symbol(runtime, std::optional<int>(condition), value);
 }
 
-bool eval_symbolic_bool_scalar(const SymbolicBoolEvaluationPlan& plan, const FactoredExecutorState& runtime) {
-    bool out = plan.constant;
-    for (int condition : plan.conditions) {
-        check_symbol_slot(runtime, condition);
-        const std::size_t word = symbol_word_index(condition);
-        const std::uint64_t mask = symbol_bit_mask(condition);
-        if ((runtime.assigned_words[word] & mask) == 0) {
-            fail("symbolic condition has no concrete value");
-        }
-        out ^= (runtime.value_words[word] & mask) != 0;
-    }
-    return out;
-}
-
 bool eval_symbolic_bool_packed(const SymbolicBoolEvaluationPlan& plan, const FactoredExecutorState& runtime) {
-    bool out = plan.constant;
+    std::uint64_t parity_bits = 0;
     std::uint64_t missing = 0;
     for (std::size_t i = 0; i < plan.word_indices.size(); ++i) {
         const std::size_t word = static_cast<std::size_t>(plan.word_indices[i]);
@@ -2398,17 +2435,17 @@ bool eval_symbolic_bool_packed(const SymbolicBoolEvaluationPlan& plan, const Fac
         }
         const std::uint64_t mask = plan.word_masks[i];
         missing |= mask & ~runtime.assigned_words[word];
-        out ^= is_odd_popcount(runtime.value_words[word] & mask);
+        parity_bits ^= runtime.value_words[word] & mask;
     }
     if (missing != 0) {
         fail("symbolic condition expression has no concrete value");
     }
-    return out;
+    return plan.constant != is_odd_popcount(parity_bits);
 }
 
 bool eval_symbolic_bool(const SymbolicBoolEvaluationPlan& plan, const FactoredExecutorState& runtime) {
     if (plan.word_indices.empty()) {
-        return eval_symbolic_bool_scalar(plan, runtime);
+        return plan.constant;
     }
     return eval_symbolic_bool_packed(plan, runtime);
 }
