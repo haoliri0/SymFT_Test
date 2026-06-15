@@ -13,6 +13,19 @@ double seconds_between(Clock::time_point start, Clock::time_point stop) {
     return std::chrono::duration<double>(stop - start).count();
 }
 
+int popcount64(std::uint64_t value) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_popcountll(value);
+#else
+    int count = 0;
+    while (value != 0) {
+        value &= value - 1;
+        ++count;
+    }
+    return count;
+#endif
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -56,8 +69,8 @@ int main(int argc, char** argv) {
             for (int shot = 0; shot < shots; ++shot) {
                 symft::reset_executor(runtime, program);
                 symft::execute_in_place(runtime, program);
-                for (bool bit : runtime.measurements) {
-                    checksum += bit ? 1 : 0;
+                for (std::uint64_t word : runtime.measurement_words) {
+                    checksum += static_cast<std::uint64_t>(popcount64(word));
                 }
             }
             const auto sample_stop = Clock::now();

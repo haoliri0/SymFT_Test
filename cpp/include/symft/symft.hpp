@@ -7,7 +7,6 @@
 #include <map>
 #include <memory>
 #include <optional>
-#include <random>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -84,6 +83,16 @@ SymbolicBool xor_bool(const SymbolicBool& lhs, const SymbolicBool& rhs);
 SymbolicBool xor_bool(const SymbolicBool& lhs, bool rhs);
 SymbolicBool xor_bool(bool lhs, const SymbolicBool& rhs);
 std::ostream& operator<<(std::ostream& out, const SymbolicBool& expr);
+
+struct SymbolicBoolEvaluationPlan {
+    bool constant = false;
+    std::vector<int> conditions;
+    std::vector<int> word_indices;
+    std::vector<std::uint64_t> word_masks;
+
+    SymbolicBoolEvaluationPlan() = default;
+    explicit SymbolicBoolEvaluationPlan(const SymbolicBool& expr);
+};
 
 struct SymbolicCategoricalDistribution {
     std::vector<int> conditions;
@@ -290,17 +299,20 @@ struct ApplyPrecomputedActivePauliRotation {
     PrecomputedActivePauliRotationKernel rotation_kernel;
     double theta = 0.0;
     SymbolicBool sign;
+    SymbolicBoolEvaluationPlan sign_plan;
 };
 
 struct PromoteDormantRotation {
     double theta = 0.0;
     SymbolicBool sign;
+    SymbolicBoolEvaluationPlan sign_plan;
 };
 
 struct RecordMeasurement {
     SymbolicBool outcome;
     std::optional<int> record;
     std::optional<int> record_condition;
+    SymbolicBoolEvaluationPlan outcome_plan;
 };
 
 struct MeasureActiveLastZ {
@@ -308,6 +320,7 @@ struct MeasureActiveLastZ {
     SymbolicBool outcome;
     std::optional<int> record;
     std::optional<int> record_condition;
+    SymbolicBoolEvaluationPlan outcome_plan;
 };
 
 struct MeasurePrecomputedActivePauli {
@@ -317,6 +330,7 @@ struct MeasurePrecomputedActivePauli {
     SymbolicBool outcome;
     std::optional<int> record;
     std::optional<int> record_condition;
+    SymbolicBoolEvaluationPlan outcome_plan;
 };
 
 struct IntroduceDormantMeasurementBranch {
@@ -324,6 +338,7 @@ struct IntroduceDormantMeasurementBranch {
     SymbolicBool outcome;
     std::optional<int> record;
     std::optional<int> record_condition;
+    SymbolicBoolEvaluationPlan outcome_plan;
 };
 
 using FactoredInstruction = std::variant<
@@ -341,6 +356,20 @@ bool operator==(const MeasureActiveLastZ& lhs, const MeasureActiveLastZ& rhs);
 bool operator==(const MeasurePrecomputedActivePauli& lhs, const MeasurePrecomputedActivePauli& rhs);
 bool operator==(const IntroduceDormantMeasurementBranch& lhs, const IntroduceDormantMeasurementBranch& rhs);
 bool operator==(const FactoredInstruction& lhs, const FactoredInstruction& rhs);
+
+struct BernoulliSampleGroup {
+    double probability = 0.0;
+    std::vector<int> conditions;
+};
+
+struct RareCategoricalSampleGroup {
+    double event_probability = 0.0;
+    std::vector<std::vector<int>> conditions;
+    std::vector<std::vector<bool>> assignments;
+    std::vector<double> probabilities;
+    std::vector<int> event_rows;
+    std::vector<double> event_probabilities;
+};
 
 struct FrameFactoredState {
     int n = 0;
@@ -410,6 +439,11 @@ struct FactoredInstructionProgram {
     SymbolicContext context;
     int nsymbols = 0;
     int nrecords = 0;
+    std::vector<SymbolicCategoricalDistribution> sampled_categorical_distributions;
+    std::vector<RareCategoricalSampleGroup> sampled_rare_categorical_groups;
+    std::vector<int> sampled_bernoulli_conditions;
+    std::vector<double> sampled_bernoulli_probabilities;
+    std::vector<BernoulliSampleGroup> sampled_low_probability_bernoulli_groups;
 
     FactoredInstructionProgram() = default;
     FactoredInstructionProgram(
@@ -428,12 +462,14 @@ struct FactoredExecutorState {
     int n = 0;
     int k = 0;
     int ndormant = 0;
+    int nsymbols = 0;
+    int nrecords = 0;
     ActiveState active;
     std::vector<Complex> active_scratch;
-    std::vector<bool> values;
-    std::vector<bool> assigned;
-    std::vector<bool> measurements;
-    std::mt19937_64 rng;
+    std::vector<std::uint64_t> value_words;
+    std::vector<std::uint64_t> assigned_words;
+    std::vector<std::uint64_t> measurement_words;
+    std::uint64_t rng_state = 1;
 
     explicit FactoredExecutorState(const FactoredInstructionProgram& program, std::uint64_t seed = 1);
 };

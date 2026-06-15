@@ -19,6 +19,7 @@ namespace {
 constexpr int kWordBits = 64;
 constexpr double kPi = 3.141592653589793238462643383279502884;
 constexpr std::size_t kNoSource = std::numeric_limits<std::size_t>::max();
+constexpr double kLowProbabilitySampleThreshold = 0.02;
 
 [[noreturn]] void fail(const std::string& message) {
     throw Error(message);
@@ -56,6 +57,27 @@ int popcount64(std::uint64_t value) {
     }
     return count;
 #endif
+}
+
+std::uint64_t symbol_bit_mask(int condition) {
+    if (condition <= 0) {
+        fail("condition id must be positive");
+    }
+    return std::uint64_t{1} << ((condition - 1) & 63);
+}
+
+std::size_t symbol_word_index(int condition) {
+    if (condition <= 0) {
+        fail("condition id must be positive");
+    }
+    return static_cast<std::size_t>((condition - 1) >> 6);
+}
+
+std::size_t symbol_word_count(int nsymbols) {
+    if (nsymbols <= 0) {
+        return 0;
+    }
+    return static_cast<std::size_t>((nsymbols + 63) >> 6);
 }
 
 int trailing_zeros64(std::uint64_t value) {
@@ -541,6 +563,20 @@ SymbolicBool xor_bool(bool lhs, const SymbolicBool& rhs) {
 std::ostream& operator<<(std::ostream& out, const SymbolicBool& expr) {
     out << expr.str();
     return out;
+}
+
+SymbolicBoolEvaluationPlan::SymbolicBoolEvaluationPlan(const SymbolicBool& expr)
+    : constant(expr.constant), conditions(expr.conditions) {
+    for (int condition : conditions) {
+        const std::size_t word = symbol_word_index(condition);
+        const std::uint64_t mask = symbol_bit_mask(condition);
+        if (word_indices.empty() || word_indices.back() != static_cast<int>(word)) {
+            word_indices.push_back(static_cast<int>(word));
+            word_masks.push_back(mask);
+        } else {
+            word_masks.back() |= mask;
+        }
+    }
 }
 
 SymbolicContext::SymbolicContext(int next_condition_) : next_condition(next_condition_) {
@@ -1610,6 +1646,7 @@ ApplyPrecomputedActivePauliRotation active_rotation_instruction(
         PrecomputedActivePauliRotationKernel(action, theta),
         theta,
         sign,
+        SymbolicBoolEvaluationPlan(sign),
     };
 }
 
@@ -1711,7 +1748,7 @@ std::optional<FactoredInstruction> process_nondiagonal_dormant_rotation(
     }
     current = normalize_first_dormant_rotation_to_x(state, current);
     const SymbolicBool sign = rotation_sign_from_pauli(current.pauli);
-    PromoteDormantRotation instruction{current.theta, sign};
+    PromoteDormantRotation instruction{current.theta, sign, SymbolicBoolEvaluationPlan(sign)};
     FactoredInstruction pushed = push_instruction(state, instruction);
     set_planning_active_count(state, state.k + 1);
     return pushed;
@@ -1725,7 +1762,14 @@ std::optional<FactoredInstruction> record_deterministic_measurement(
     PendingFactoredState& state,
     const PendingPauliMeasurement& measurement,
     const SymbolicBool& outcome) {
-    return push_instruction(state, RecordMeasurement{outcome, measurement_record(state, measurement), measurement.record_condition});
+    return push_instruction(
+        state,
+        RecordMeasurement{
+            outcome,
+            measurement_record(state, measurement),
+            measurement.record_condition,
+            SymbolicBoolEvaluationPlan(outcome),
+        });
 }
 
 PendingPauliMeasurement prepare_active_qubit_for_dormant_measurement(
@@ -1805,6 +1849,7 @@ std::optional<FactoredInstruction> measure_dormant_xy_pauli(
             xor_bool(base_outcome, branch_bit),
             measurement_record(state, current),
             current.record_condition,
+            SymbolicBoolEvaluationPlan(xor_bool(base_outcome, branch_bit)),
         });
 }
 
@@ -1892,13 +1937,15 @@ std::optional<FactoredInstruction> measure_active_pauli_branches(
         queued_first ? 2 : 1,
         pauli_x(state.n, state.k - 1),
         branch_bit);
+    const SymbolicBool outcome = xor_bool(base_outcome, branch_bit);
     MeasurePrecomputedActivePauli instruction{
         active_body,
         kernel,
         branch,
-        xor_bool(base_outcome, branch_bit),
+        outcome,
         measurement_record(state, current),
         current.record_condition,
+        SymbolicBoolEvaluationPlan(outcome),
     };
     FactoredInstruction pushed = push_instruction(state, instruction);
     set_planning_active_count(state, state.k - 1);
@@ -1963,6 +2010,122 @@ std::vector<FactoredInstruction> process_pending_operations(PendingFactoredState
     return std::vector<FactoredInstruction>(state.instructions.begin() + static_cast<std::ptrdiff_t>(start), state.instructions.end());
 }
 
+namespace {
+
+void refresh_instruction_plans(ApplyPrecomputedActivePauliRotation& instruction) {
+    instruction.sign_plan = SymbolicBoolEvaluationPlan(instruction.sign);
+}
+
+void refresh_instruction_plans(PromoteDormantRotation& instruction) {
+    instruction.sign_plan = SymbolicBoolEvaluationPlan(instruction.sign);
+}
+
+void refresh_instruction_plans(RecordMeasurement& instruction) {
+    instruction.outcome_plan = SymbolicBoolEvaluationPlan(instruction.outcome);
+}
+
+void refresh_instruction_plans(MeasureActiveLastZ& instruction) {
+    instruction.outcome_plan = SymbolicBoolEvaluationPlan(instruction.outcome);
+}
+
+void refresh_instruction_plans(MeasurePrecomputedActivePauli& instruction) {
+    instruction.outcome_plan = SymbolicBoolEvaluationPlan(instruction.outcome);
+}
+
+void refresh_instruction_plans(IntroduceDormantMeasurementBranch& instruction) {
+    instruction.outcome_plan = SymbolicBoolEvaluationPlan(instruction.outcome);
+}
+
+void refresh_instruction_plans(FactoredInstruction& instruction) {
+    std::visit([](auto& inst) { refresh_instruction_plans(inst); }, instruction);
+}
+
+struct RareInfo {
+    double event_probability = 0.0;
+    std::vector<int> event_rows;
+    std::vector<double> event_probabilities;
+};
+
+std::optional<RareInfo> rare_categorical_sample_info(const SymbolicCategoricalDistribution& distribution) {
+    std::optional<std::size_t> false_row;
+    for (std::size_t row = 0; row < distribution.assignments.size(); ++row) {
+        if (std::none_of(distribution.assignments[row].begin(), distribution.assignments[row].end(), [](bool bit) { return bit; })) {
+            false_row = row;
+            break;
+        }
+    }
+    if (!false_row) {
+        return std::nullopt;
+    }
+    const double event_probability = 1.0 - distribution.probabilities[*false_row];
+    if (!(event_probability < kLowProbabilitySampleThreshold)) {
+        return std::nullopt;
+    }
+    RareInfo info;
+    info.event_probability = event_probability;
+    if (event_probability > 0.0) {
+        const double inv_event = 1.0 / event_probability;
+        for (std::size_t row = 0; row < distribution.assignments.size(); ++row) {
+            if (row == *false_row || distribution.probabilities[row] <= 0.0) {
+                continue;
+            }
+            info.event_rows.push_back(static_cast<int>(row));
+            info.event_probabilities.push_back(distribution.probabilities[row] * inv_event);
+        }
+    }
+    return info;
+}
+
+void push_bernoulli_sample_group(std::vector<BernoulliSampleGroup>& groups, double probability, int condition) {
+    for (auto& group : groups) {
+        if (group.probability == probability) {
+            group.conditions.push_back(condition);
+            return;
+        }
+    }
+    groups.push_back(BernoulliSampleGroup{probability, {condition}});
+}
+
+void push_rare_categorical_sample_group(
+    std::vector<RareCategoricalSampleGroup>& groups,
+    const SymbolicCategoricalDistribution& distribution,
+    const RareInfo& info) {
+    for (auto& group : groups) {
+        if (group.event_probability == info.event_probability &&
+            group.assignments == distribution.assignments &&
+            group.probabilities == distribution.probabilities &&
+            group.event_rows == info.event_rows &&
+            group.event_probabilities == info.event_probabilities) {
+            group.conditions.push_back(distribution.conditions);
+            return;
+        }
+    }
+    groups.push_back(RareCategoricalSampleGroup{
+        info.event_probability,
+        {distribution.conditions},
+        distribution.assignments,
+        distribution.probabilities,
+        info.event_rows,
+        info.event_probabilities,
+    });
+}
+
+void build_categorical_sample_plan(
+    const std::vector<SymbolicCategoricalDistribution>& distributions,
+    std::vector<SymbolicCategoricalDistribution>& scalar,
+    std::vector<RareCategoricalSampleGroup>& rare_groups) {
+    for (const auto& distribution : distributions) {
+        const auto info = rare_categorical_sample_info(distribution);
+        if (info) {
+            push_rare_categorical_sample_group(rare_groups, distribution, *info);
+        } else {
+            scalar.push_back(distribution);
+        }
+    }
+}
+
+} // namespace
+
 FactoredInstructionProgram::FactoredInstructionProgram(
     int n_,
     int initial_k_,
@@ -1980,7 +2143,8 @@ FactoredInstructionProgram::FactoredInstructionProgram(
         fail("invalid factored instruction program dimensions");
     }
     int record_count = 0;
-    for (const auto& instruction : instructions) {
+    for (auto& instruction : instructions) {
+        refresh_instruction_plans(instruction);
         context.bump_next_condition(max_condition(instruction));
         std::visit(
             [&](const auto& inst) {
@@ -1994,6 +2158,18 @@ FactoredInstructionProgram::FactoredInstructionProgram(
     }
     nsymbols = std::max(0, context.next_condition - 1);
     nrecords = record_count;
+    build_categorical_sample_plan(
+        context.categorical_distributions,
+        sampled_categorical_distributions,
+        sampled_rare_categorical_groups);
+    for (const auto& [condition, probability] : context.bernoulli_probabilities) {
+        if (probability < kLowProbabilitySampleThreshold) {
+            push_bernoulli_sample_group(sampled_low_probability_bernoulli_groups, probability, condition);
+        } else {
+            sampled_bernoulli_conditions.push_back(condition);
+            sampled_bernoulli_probabilities.push_back(probability);
+        }
+    }
 }
 
 FactoredInstructionProgram factored_instruction_program(const PendingFactoredState& state) {
@@ -2007,11 +2183,19 @@ FactoredInstructionProgram plan_factored_updates(PendingFactoredState& state) {
 
 namespace {
 
-double rand_float(std::mt19937_64& rng) {
-    return std::generate_canonical<double, 53>(rng);
+std::uint64_t next_random_u64(std::uint64_t& state) {
+    state += 0x9e3779b97f4a7c15ULL;
+    std::uint64_t z = state;
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
 }
 
-bool sample_bernoulli(std::mt19937_64& rng, double probability) {
+double rand_float(std::uint64_t& state) {
+    return static_cast<double>(next_random_u64(state) >> 11) * 0x1.0p-53;
+}
+
+bool sample_bernoulli(std::uint64_t& rng_state, double probability) {
     const double p = check_probability(probability);
     if (p <= 0.0) {
         return false;
@@ -2019,11 +2203,11 @@ bool sample_bernoulli(std::mt19937_64& rng, double probability) {
     if (p >= 1.0) {
         return true;
     }
-    return rand_float(rng) < p;
+    return rand_float(rng_state) < p;
 }
 
-int sample_categorical_row(std::mt19937_64& rng, const std::vector<double>& probabilities) {
-    const double r = rand_float(rng);
+int sample_categorical_row(std::uint64_t& rng_state, const std::vector<double>& probabilities) {
+    const double r = rand_float(rng_state);
     double cumulative = 0.0;
     for (std::size_t i = 0; i < probabilities.size(); ++i) {
         cumulative += probabilities[i];
@@ -2035,14 +2219,32 @@ int sample_categorical_row(std::mt19937_64& rng, const std::vector<double>& prob
 }
 
 void check_symbol_slot(const FactoredExecutorState& runtime, int condition) {
-    if (condition <= 0 || condition > static_cast<int>(runtime.values.size())) {
+    if (condition <= 0 || condition > runtime.nsymbols) {
         fail("symbolic condition exceeds executor symbol table");
     }
 }
 
 bool is_assigned(const FactoredExecutorState& runtime, int condition) {
     check_symbol_slot(runtime, condition);
-    return runtime.assigned[static_cast<std::size_t>(condition - 1)];
+    const std::size_t word = symbol_word_index(condition);
+    return word < runtime.assigned_words.size() && (runtime.assigned_words[word] & symbol_bit_mask(condition)) != 0;
+}
+
+void set_symbol_assignment_unchecked(FactoredExecutorState& runtime, int condition, bool value) {
+    const std::size_t word = symbol_word_index(condition);
+    const std::uint64_t mask = symbol_bit_mask(condition);
+    runtime.assigned_words[word] |= mask;
+    if (value) {
+        runtime.value_words[word] |= mask;
+    } else {
+        runtime.value_words[word] &= ~mask;
+    }
+}
+
+void set_assigned_symbol_true_unchecked(FactoredExecutorState& runtime, int condition) {
+    const std::size_t word = symbol_word_index(condition);
+    const std::uint64_t mask = symbol_bit_mask(condition);
+    runtime.value_words[word] |= mask;
 }
 
 void assign_symbol(FactoredExecutorState& runtime, std::optional<int> condition, bool value) {
@@ -2050,32 +2252,58 @@ void assign_symbol(FactoredExecutorState& runtime, std::optional<int> condition,
         return;
     }
     check_symbol_slot(runtime, *condition);
-    const std::size_t idx = static_cast<std::size_t>(*condition - 1);
-    if (runtime.assigned[idx]) {
-        if (runtime.values[idx] != value) {
+    const std::size_t word = symbol_word_index(*condition);
+    const std::uint64_t mask = symbol_bit_mask(*condition);
+    if ((runtime.assigned_words[word] & mask) != 0) {
+        if (((runtime.value_words[word] & mask) != 0) != value) {
             fail("symbolic condition was assigned inconsistent concrete values");
         }
         return;
     }
-    runtime.assigned[idx] = true;
-    runtime.values[idx] = value;
+    set_symbol_assignment_unchecked(runtime, *condition, value);
 }
 
 void assign_symbol(FactoredExecutorState& runtime, int condition, bool value) {
     assign_symbol(runtime, std::optional<int>(condition), value);
 }
 
-bool eval_symbolic_bool(const SymbolicBool& expr, const FactoredExecutorState& runtime) {
-    bool out = expr.constant;
-    for (int condition : expr.conditions) {
+bool eval_symbolic_bool_scalar(const SymbolicBoolEvaluationPlan& plan, const FactoredExecutorState& runtime) {
+    bool out = plan.constant;
+    for (int condition : plan.conditions) {
         check_symbol_slot(runtime, condition);
-        const std::size_t idx = static_cast<std::size_t>(condition - 1);
-        if (!runtime.assigned[idx]) {
+        const std::size_t word = symbol_word_index(condition);
+        const std::uint64_t mask = symbol_bit_mask(condition);
+        if ((runtime.assigned_words[word] & mask) == 0) {
             fail("symbolic condition has no concrete value");
         }
-        out ^= runtime.values[idx];
+        out ^= (runtime.value_words[word] & mask) != 0;
     }
     return out;
+}
+
+bool eval_symbolic_bool_packed(const SymbolicBoolEvaluationPlan& plan, const FactoredExecutorState& runtime) {
+    bool out = plan.constant;
+    std::uint64_t missing = 0;
+    for (std::size_t i = 0; i < plan.word_indices.size(); ++i) {
+        const std::size_t word = static_cast<std::size_t>(plan.word_indices[i]);
+        if (word >= runtime.assigned_words.size()) {
+            fail("symbolic condition expression has no concrete value");
+        }
+        const std::uint64_t mask = plan.word_masks[i];
+        missing |= mask & ~runtime.assigned_words[word];
+        out ^= is_odd_popcount(runtime.value_words[word] & mask);
+    }
+    if (missing != 0) {
+        fail("symbolic condition expression has no concrete value");
+    }
+    return out;
+}
+
+bool eval_symbolic_bool(const SymbolicBoolEvaluationPlan& plan, const FactoredExecutorState& runtime) {
+    if (plan.word_indices.empty()) {
+        return eval_symbolic_bool_scalar(plan, runtime);
+    }
+    return eval_symbolic_bool_packed(plan, runtime);
 }
 
 void write_measurement_record(
@@ -2087,11 +2315,20 @@ void write_measurement_record(
         if (*record <= 0) {
             fail("measurement record id must be positive");
         }
-        const std::size_t idx = static_cast<std::size_t>(*record - 1);
-        if (runtime.measurements.size() <= idx) {
-            runtime.measurements.resize(idx + 1, false);
+        if (*record > runtime.nrecords) {
+            runtime.nrecords = *record;
         }
-        runtime.measurements[idx] = outcome;
+        const std::size_t nwords = symbol_word_count(runtime.nrecords);
+        if (runtime.measurement_words.size() < nwords) {
+            runtime.measurement_words.resize(nwords, 0);
+        }
+        const std::size_t word = symbol_word_index(*record);
+        const std::uint64_t mask = symbol_bit_mask(*record);
+        if (outcome) {
+            runtime.measurement_words[word] |= mask;
+        } else {
+            runtime.measurement_words[word] &= ~mask;
+        }
     }
     assign_symbol(runtime, record_condition, outcome);
 }
@@ -2114,20 +2351,133 @@ void sample_categorical_distribution(
     if (any_assigned) {
         fail("categorical symbolic distribution was only partially preassigned");
     }
-    const int row = sample_categorical_row(runtime.rng, probabilities);
+    const int row = sample_categorical_row(runtime.rng_state, probabilities);
     for (std::size_t i = 0; i < conditions.size(); ++i) {
         assign_symbol(runtime, conditions[i], assignments[static_cast<std::size_t>(row)][i]);
     }
 }
 
+double sample_geometric_gap(std::uint64_t& rng_state, double probability) {
+    if (!(probability > 0.0 && probability < 1.0)) {
+        fail("geometric gap probability must be in (0, 1)");
+    }
+    const double u = std::max(rand_float(rng_state), std::numeric_limits<double>::min());
+    const double gap = std::floor(std::log(u) / std::log1p(-probability));
+    if (!std::isfinite(gap) || gap >= static_cast<double>(std::numeric_limits<int>::max())) {
+        return static_cast<double>(std::numeric_limits<int>::max());
+    }
+    return gap;
+}
+
+bool any_assigned(const FactoredExecutorState& runtime, const std::vector<int>& conditions) {
+    for (int condition : conditions) {
+        if (is_assigned(runtime, condition)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool any_categorical_group_assigned(
+    const FactoredExecutorState& runtime,
+    const std::vector<std::vector<int>>& condition_sets) {
+    for (const auto& conditions : condition_sets) {
+        if (any_assigned(runtime, conditions)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void assign_conditions_false(FactoredExecutorState& runtime, const std::vector<int>& conditions) {
+    for (int condition : conditions) {
+        check_symbol_slot(runtime, condition);
+        set_symbol_assignment_unchecked(runtime, condition, false);
+    }
+}
+
+void assign_categorical_group_false(
+    FactoredExecutorState& runtime,
+    const std::vector<std::vector<int>>& condition_sets) {
+    for (const auto& conditions : condition_sets) {
+        assign_conditions_false(runtime, conditions);
+    }
+}
+
+void sample_rare_categorical_group(FactoredExecutorState& runtime, const RareCategoricalSampleGroup& group) {
+    if (any_categorical_group_assigned(runtime, group.conditions)) {
+        for (const auto& conditions : group.conditions) {
+            sample_categorical_distribution(runtime, conditions, group.assignments, group.probabilities);
+        }
+        return;
+    }
+
+    assign_categorical_group_false(runtime, group.conditions);
+    if (group.event_probability <= 0.0) {
+        return;
+    }
+    int idx = 0;
+    const int nsets = static_cast<int>(group.conditions.size());
+    while (true) {
+        const int gap = static_cast<int>(sample_geometric_gap(runtime.rng_state, group.event_probability));
+        if (gap >= nsets - idx) {
+            return;
+        }
+        idx += gap;
+        const int row = group.event_rows[static_cast<std::size_t>(sample_categorical_row(runtime.rng_state, group.event_probabilities))];
+        const auto& conditions = group.conditions[static_cast<std::size_t>(idx)];
+        const auto& assignment = group.assignments[static_cast<std::size_t>(row)];
+        for (std::size_t bit_idx = 0; bit_idx < conditions.size(); ++bit_idx) {
+            if (assignment[bit_idx]) {
+                set_assigned_symbol_true_unchecked(runtime, conditions[bit_idx]);
+            }
+        }
+        ++idx;
+    }
+}
+
+void sample_low_probability_bernoulli_group(FactoredExecutorState& runtime, const BernoulliSampleGroup& group) {
+    if (any_assigned(runtime, group.conditions)) {
+        for (int condition : group.conditions) {
+            if (!is_assigned(runtime, condition)) {
+                assign_symbol(runtime, condition, sample_bernoulli(runtime.rng_state, group.probability));
+            }
+        }
+        return;
+    }
+
+    assign_conditions_false(runtime, group.conditions);
+    if (group.probability <= 0.0) {
+        return;
+    }
+    int idx = 0;
+    const int nconditions = static_cast<int>(group.conditions.size());
+    while (true) {
+        const int gap = static_cast<int>(sample_geometric_gap(runtime.rng_state, group.probability));
+        if (gap >= nconditions - idx) {
+            return;
+        }
+        idx += gap;
+        set_assigned_symbol_true_unchecked(runtime, group.conditions[static_cast<std::size_t>(idx)]);
+        ++idx;
+    }
+}
+
 void sample_exogenous_symbols(FactoredExecutorState& runtime, const FactoredInstructionProgram& program) {
-    for (const auto& distribution : program.context.categorical_distributions) {
+    for (const auto& distribution : program.sampled_categorical_distributions) {
         sample_categorical_distribution(runtime, distribution.conditions, distribution.assignments, distribution.probabilities);
     }
-    for (const auto& [condition, probability] : program.context.bernoulli_probabilities) {
+    for (const auto& group : program.sampled_rare_categorical_groups) {
+        sample_rare_categorical_group(runtime, group);
+    }
+    for (std::size_t i = 0; i < program.sampled_bernoulli_conditions.size(); ++i) {
+        const int condition = program.sampled_bernoulli_conditions[i];
         if (!is_assigned(runtime, condition)) {
-            assign_symbol(runtime, condition, sample_bernoulli(runtime.rng, probability));
+            assign_symbol(runtime, condition, sample_bernoulli(runtime.rng_state, program.sampled_bernoulli_probabilities[i]));
         }
+    }
+    for (const auto& group : program.sampled_low_probability_bernoulli_groups) {
+        sample_low_probability_bernoulli_group(runtime, group);
     }
 }
 
@@ -2258,28 +2608,28 @@ void project_active_pauli_measurement(
 }
 
 void execute_instruction(FactoredExecutorState& runtime, const ApplyPrecomputedActivePauliRotation& instruction) {
-    const bool sign = eval_symbolic_bool(instruction.sign, runtime);
+    const bool sign = eval_symbolic_bool(instruction.sign_plan, runtime);
     rotate_pauli(runtime.active, instruction.rotation_kernel, sign);
 }
 
 void execute_instruction(FactoredExecutorState& runtime, const PromoteDormantRotation& instruction) {
-    const bool sign = eval_symbolic_bool(instruction.sign, runtime);
+    const bool sign = eval_symbolic_bool(instruction.sign_plan, runtime);
     promote_first_dormant_rotation(runtime, sign ? -instruction.theta : instruction.theta);
 }
 
 void execute_instruction(FactoredExecutorState& runtime, const RecordMeasurement& instruction) {
-    const bool outcome = eval_symbolic_bool(instruction.outcome, runtime);
+    const bool outcome = eval_symbolic_bool(instruction.outcome_plan, runtime);
     write_measurement_record(runtime, instruction.record, outcome, instruction.record_condition);
 }
 
 void execute_instruction(FactoredExecutorState& runtime, const MeasureActiveLastZ& instruction) {
     const double prob1 = active_last_z_probability_one(runtime.active);
-    const bool branch = sample_bernoulli(runtime.rng, prob1);
+    const bool branch = sample_bernoulli(runtime.rng_state, prob1);
     assign_symbol(runtime, instruction.branch, branch);
     project_active_last_z(runtime.active, branch, prob1);
     runtime.k = runtime.active.k;
     ++runtime.ndormant;
-    const bool outcome = eval_symbolic_bool(instruction.outcome, runtime);
+    const bool outcome = eval_symbolic_bool(instruction.outcome_plan, runtime);
     write_measurement_record(runtime, instruction.record, outcome, instruction.record_condition);
 }
 
@@ -2292,7 +2642,7 @@ void execute_instruction(FactoredExecutorState& runtime, const MeasurePrecompute
                            : active_measurement_branch_probability(runtime.active, instruction.kernel, true);
     prob_true = std::clamp(prob_true, 0.0, 1.0);
     const double prob_false = 1.0 - prob_true;
-    const bool branch = sample_bernoulli(runtime.rng, prob_true);
+    const bool branch = sample_bernoulli(runtime.rng_state, prob_true);
     const double probability = branch ? prob_true : prob_false;
     assign_symbol(runtime, instruction.branch, branch);
     if (instruction.kernel.is_diagonal) {
@@ -2302,14 +2652,14 @@ void execute_instruction(FactoredExecutorState& runtime, const MeasurePrecompute
     }
     runtime.k = runtime.active.k;
     ++runtime.ndormant;
-    const bool outcome = eval_symbolic_bool(instruction.outcome, runtime);
+    const bool outcome = eval_symbolic_bool(instruction.outcome_plan, runtime);
     write_measurement_record(runtime, instruction.record, outcome, instruction.record_condition);
 }
 
 void execute_instruction(FactoredExecutorState& runtime, const IntroduceDormantMeasurementBranch& instruction) {
-    const bool branch = sample_bernoulli(runtime.rng, 0.5);
+    const bool branch = sample_bernoulli(runtime.rng_state, 0.5);
     assign_symbol(runtime, instruction.branch, branch);
-    const bool outcome = eval_symbolic_bool(instruction.outcome, runtime);
+    const bool outcome = eval_symbolic_bool(instruction.outcome_plan, runtime);
     write_measurement_record(runtime, instruction.record, outcome, instruction.record_condition);
 }
 
@@ -2319,12 +2669,14 @@ FactoredExecutorState::FactoredExecutorState(const FactoredInstructionProgram& p
     : n(program.n),
       k(program.initial_k),
       ndormant(program.n - program.initial_k),
+      nsymbols(program.nsymbols),
+      nrecords(program.nrecords),
       active(program.initial_active),
       active_scratch(active_length(program.max_k), Complex(0.0, 0.0)),
-      values(static_cast<std::size_t>(program.nsymbols), false),
-      assigned(static_cast<std::size_t>(program.nsymbols), false),
-      measurements(static_cast<std::size_t>(program.nrecords), false),
-      rng(seed) {
+      value_words(symbol_word_count(program.nsymbols), 0),
+      assigned_words(symbol_word_count(program.nsymbols), 0),
+      measurement_words(symbol_word_count(program.nrecords), 0),
+      rng_state(seed) {
     active.reserve_for_k(program.max_k);
 }
 
@@ -2332,6 +2684,8 @@ void reset_executor(FactoredExecutorState& runtime, const FactoredInstructionPro
     runtime.n = program.n;
     runtime.k = program.initial_k;
     runtime.ndormant = program.n - program.initial_k;
+    runtime.nsymbols = program.nsymbols;
+    runtime.nrecords = program.nrecords;
     runtime.active.k = program.initial_active.k;
     runtime.active.reserve_for_k(program.max_k);
     const std::size_t dim = program.initial_active.dim();
@@ -2340,9 +2694,20 @@ void reset_executor(FactoredExecutorState& runtime, const FactoredInstructionPro
     if (runtime.active_scratch.size() < max_dim) {
         runtime.active_scratch.resize(max_dim);
     }
-    runtime.values.assign(static_cast<std::size_t>(program.nsymbols), false);
-    runtime.assigned.assign(static_cast<std::size_t>(program.nsymbols), false);
-    runtime.measurements.assign(static_cast<std::size_t>(program.nrecords), false);
+    const std::size_t nwords = symbol_word_count(program.nsymbols);
+    if (runtime.value_words.size() != nwords) {
+        runtime.value_words.resize(nwords);
+    }
+    std::fill(runtime.value_words.begin(), runtime.value_words.end(), 0);
+    if (runtime.assigned_words.size() != nwords) {
+        runtime.assigned_words.resize(nwords);
+    }
+    std::fill(runtime.assigned_words.begin(), runtime.assigned_words.end(), 0);
+    const std::size_t record_words = symbol_word_count(program.nrecords);
+    if (runtime.measurement_words.size() != record_words) {
+        runtime.measurement_words.resize(record_words);
+    }
+    std::fill(runtime.measurement_words.begin(), runtime.measurement_words.end(), 0);
 }
 
 void execute_in_place(FactoredExecutorState& runtime, const FactoredInstructionProgram& program) {
@@ -2357,7 +2722,14 @@ void execute_in_place(FactoredExecutorState& runtime, const FactoredInstructionP
 
 std::vector<bool> execute(FactoredExecutorState& runtime, const FactoredInstructionProgram& program) {
     execute_in_place(runtime, program);
-    return runtime.measurements;
+    std::vector<bool> out(static_cast<std::size_t>(runtime.nrecords), false);
+    for (int record = 1; record <= runtime.nrecords; ++record) {
+        const std::size_t word = symbol_word_index(record);
+        out[static_cast<std::size_t>(record - 1)] =
+            word < runtime.measurement_words.size() &&
+            (runtime.measurement_words[word] & symbol_bit_mask(record)) != 0;
+    }
+    return out;
 }
 
 std::vector<bool> sample_measurements(const FactoredInstructionProgram& program, std::uint64_t seed) {
@@ -2375,7 +2747,14 @@ std::vector<std::vector<bool>> sample_measurements(const FactoredInstructionProg
     for (int shot = 0; shot < shots; ++shot) {
         reset_executor(runtime, program);
         execute_in_place(runtime, program);
-        out.push_back(runtime.measurements);
+        std::vector<bool> shot_records(static_cast<std::size_t>(runtime.nrecords), false);
+        for (int record = 1; record <= runtime.nrecords; ++record) {
+            const std::size_t word = symbol_word_index(record);
+            shot_records[static_cast<std::size_t>(record - 1)] =
+                word < runtime.measurement_words.size() &&
+                (runtime.measurement_words[word] & symbol_bit_mask(record)) != 0;
+        }
+        out.push_back(std::move(shot_records));
     }
     return out;
 }
