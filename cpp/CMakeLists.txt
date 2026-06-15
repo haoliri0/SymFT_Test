@@ -53,6 +53,9 @@ target_link_libraries(symft_cli PRIVATE symft_cpp)
 add_executable(symft_bench tools/symft_bench.cpp)
 target_link_libraries(symft_bench PRIVATE symft_cpp)
 
+add_executable(symft_rate_bench tools/symft_rate_bench.cpp)
+target_link_libraries(symft_rate_bench PRIVATE symft_cpp)
+
 if(SYMFT_CPP_BUILD_TESTS)
     enable_testing()
     add_executable(symft_cpp_tests tests/symft_tests.cpp)

@@ -214,6 +214,13 @@ Run the C++ CLI on a Stim fixture:
 ./build/cpp/cpp/symft_cli d3.stim 1000
 ```
 
+Benchmark d3 logical error and discard rates with streaming presampled
+exogenous symbols:
+
+```bash
+./build/cpp/cpp/symft_rate_bench d3.stim 100000000
+```
+
 The C++ build compiles scalar kernels by default and, when the compiler
 supports the flags, target-specific AVX2 and AVX512 translation units. Runtime
 dispatch selects only SIMD instruction sets reported by the current CPU.
