@@ -245,6 +245,8 @@ struct ActivePauliAction {
 struct PrecomputedActivePauliRotationKernel {
     ActivePauliAction action;
     bool is_diagonal = true;
+    bool uniform_imag_pairs = false;
+    bool real_pair_flip = false;
     double theta = 0.0;
     double cos_theta = 1.0;
     std::vector<Complex> diagonal_minus_coefficients;

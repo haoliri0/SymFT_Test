@@ -170,6 +170,21 @@ Complex active_action_phase(const ActivePauliAction& action, std::size_t basis) 
     return active_action_phase_odd(action, basis) ? action.odd_phase : action.even_phase;
 }
 
+bool is_near_zero(double value) {
+    return std::abs(value) < 1e-14;
+}
+
+bool can_rotate_real_pair_flip(const ActivePauliAction& action) {
+    if (action.zmask == 0 || !action.xz_overlap_odd) {
+        return false;
+    }
+    return is_near_zero(action.even_phase.real()) && !is_near_zero(action.even_phase.imag());
+}
+
+double real_pair_flip_coeff(double base_coeff, std::uint64_t zmask, std::size_t basis) {
+    return is_odd_popcount(static_cast<std::uint64_t>(basis) & zmask) ? -base_coeff : base_coeff;
+}
+
 PauliString project_pauli_body(const PauliString& pauli, int qstart, int qcount) {
     PauliString out(qcount);
     int y_count = 0;
@@ -1063,6 +1078,8 @@ PrecomputedActivePauliRotationKernel::PrecomputedActivePauliRotationKernel(const
         }
         return;
     }
+    uniform_imag_pairs = action.zmask == 0;
+    real_pair_flip = can_rotate_real_pair_flip(action);
     const std::size_t pair_selector = action.xmask & (~action.xmask + 1);
     for (std::size_t left = 0; left < dim; ++left) {
         if ((left & pair_selector) != 0) {
@@ -1255,6 +1272,46 @@ void rotate_pauli(ActiveState& state, const PrecomputedActivePauliRotationKernel
     if (kernel.is_diagonal) {
         const auto& coefficients = sign ? kernel.diagonal_plus_coefficients : kernel.diagonal_minus_coefficients;
         simd::dispatch_table().mul_assign(state.alpha.data(), coefficients.data(), c, coefficients.size());
+        return;
+    }
+    if (kernel.uniform_imag_pairs) {
+        const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
+        const double q = coefficient.imag();
+        auto* raw = reinterpret_cast<double*>(state.alpha.data());
+        for (std::size_t idx = 0; idx < kernel.pair_left_indices.size(); ++idx) {
+            double* a0 = raw + 2 * kernel.pair_left_indices[idx];
+            double* a1 = raw + 2 * kernel.pair_right_indices[idx];
+            const double r0 = a0[0];
+            const double i0v = a0[1];
+            const double r1 = a1[0];
+            const double i1v = a1[1];
+            a0[0] = c * r0 - q * i1v;
+            a0[1] = c * i0v + q * r1;
+            a1[0] = c * r1 - q * i0v;
+            a1[1] = c * i1v + q * r0;
+        }
+        return;
+    }
+    if (kernel.real_pair_flip) {
+        const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
+        const double base_coeff = coefficient.real();
+        const std::uint64_t zmask = kernel.action.zmask;
+        auto* raw = reinterpret_cast<double*>(state.alpha.data());
+        for (std::size_t idx = 0; idx < kernel.pair_left_indices.size(); ++idx) {
+            const std::size_t i0 = kernel.pair_left_indices[idx];
+            const std::size_t i1 = kernel.pair_right_indices[idx];
+            const double q = real_pair_flip_coeff(base_coeff, zmask, i0);
+            double* a0 = raw + 2 * i0;
+            double* a1 = raw + 2 * i1;
+            const double r0 = a0[0];
+            const double i0v = a0[1];
+            const double r1 = a1[0];
+            const double i1v = a1[1];
+            a0[0] = c * r0 - q * r1;
+            a0[1] = c * i0v - q * i1v;
+            a1[0] = c * r1 + q * r0;
+            a1[1] = c * i1v + q * i0v;
+        }
         return;
     }
     const auto& left_coeff = sign ? kernel.pair_left_plus_coefficients : kernel.pair_left_minus_coefficients;

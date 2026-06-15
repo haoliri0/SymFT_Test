@@ -67,6 +67,20 @@ void test_active_rotation() {
     rotate_pauli(z, kernel, false);
     require(approx(z.alpha[0], std::exp(symft::Complex(0.0, -0.31)) * before[0]), "precomputed Z rotation 0");
     require(approx(z.alpha[1], std::exp(symft::Complex(0.0, 0.31)) * before[1]), "precomputed Z rotation 1");
+
+    ActiveState x_expected(1, {{0.2, -0.3}, {0.7, 0.4}});
+    ActiveState x_fast(1, x_expected.alpha);
+    const auto x_pauli = pauli_x(1, 0);
+    rotate_pauli(x_expected, x_pauli, 0.23);
+    rotate_pauli(x_fast, PrecomputedActivePauliRotationKernel(ActivePauliAction(x_pauli), 0.23), false);
+    require(approx(x_fast.alpha[0], x_expected.alpha[0]) && approx(x_fast.alpha[1], x_expected.alpha[1]), "precomputed X fast rotation");
+
+    ActiveState y_expected(1, {{0.1, 0.8}, {-0.6, 0.2}});
+    ActiveState y_fast(1, y_expected.alpha);
+    const auto y_pauli = pauli_y(1, 0);
+    rotate_pauli(y_expected, y_pauli, -0.19);
+    rotate_pauli(y_fast, PrecomputedActivePauliRotationKernel(ActivePauliAction(y_pauli), 0.19), true);
+    require(approx(y_fast.alpha[0], y_expected.alpha[0]) && approx(y_fast.alpha[1], y_expected.alpha[1]), "precomputed Y fast signed rotation");
 }
 
 void test_parser_feedback() {
