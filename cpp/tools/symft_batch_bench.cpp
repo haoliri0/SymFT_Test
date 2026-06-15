@@ -184,7 +184,9 @@ void print_header(int shots, int batch_size, int warmup_blocks) {
     std::cout << "shots=" << shots
               << " batch_size=" << (batch_size > 0 ? std::to_string(batch_size) : std::string("auto"))
               << " warmup_blocks=" << warmup_blocks
-              << " active_layout=basis_major_shots_contiguous\n";
+              << " active_layout=basis_major_shots_contiguous"
+              << " batch_simd=" << symft::active_batch_simd_backend()
+              << "\n";
     std::cout << std::left << std::setw(12) << "fixture"
               << std::right << std::setw(5) << "n"
               << std::setw(5) << "k0"

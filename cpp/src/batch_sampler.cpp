@@ -1,4 +1,5 @@
 #include "symft/symft.hpp"
+#include "symft/batch_simd.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -9,7 +10,6 @@ namespace {
 
 constexpr int kDefaultBatchShots = 2048;
 constexpr std::size_t kDefaultBatchActiveAmplitudes = std::size_t{1} << 17;
-constexpr std::size_t kNoSource = std::numeric_limits<std::size_t>::max();
 
 [[noreturn]] void fail(const std::string& message) {
     throw Error(message);
@@ -28,19 +28,6 @@ int trailing_zeros64(std::uint64_t value) {
         ++count;
     }
     return count;
-#endif
-}
-
-bool is_odd_popcount(std::uint64_t value) {
-#if defined(__GNUC__) || defined(__clang__)
-    return (__builtin_popcountll(value) & 1) != 0;
-#else
-    bool parity = false;
-    while (value != 0) {
-        parity = !parity;
-        value &= value - 1;
-    }
-    return parity;
 #endif
 }
 
@@ -372,64 +359,43 @@ void rotate_uniform_imag_pairs_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliRotationKernel& kernel,
     const std::vector<std::uint64_t>& sign_bits) {
-    const double c = kernel.cos_theta;
     const auto& coeffs = fill_rotation_coefficients(
         runtime,
         sign_bits,
         kernel.pair_left_minus_coefficients.front().imag(),
         kernel.pair_left_plus_coefficients.front().imag());
-    for (std::size_t idx = 0; idx < kernel.pair_left_indices.size(); ++idx) {
-        const std::size_t i0 = kernel.pair_left_indices[idx];
-        const std::size_t i1 = kernel.pair_right_indices[idx];
-        const std::size_t base0 = i0 * static_cast<std::size_t>(runtime.batches);
-        const std::size_t base1 = i1 * static_cast<std::size_t>(runtime.batches);
-        for (int shot = 0; shot < runtime.active_shots; ++shot) {
-            const std::size_t off0 = base0 + static_cast<std::size_t>(shot);
-            const std::size_t off1 = base1 + static_cast<std::size_t>(shot);
-            const double q = coeffs[static_cast<std::size_t>(shot)];
-            const double r0 = runtime.active_re[off0];
-            const double i0v = runtime.active_im[off0];
-            const double r1 = runtime.active_re[off1];
-            const double i1v = runtime.active_im[off1];
-            runtime.active_re[off0] = c * r0 - q * i1v;
-            runtime.active_im[off0] = c * i0v + q * r1;
-            runtime.active_re[off1] = c * r1 - q * i0v;
-            runtime.active_im[off1] = c * i1v + q * r0;
-        }
-    }
+    batch_simd::dispatch_table().rotate_uniform_imag_pairs(
+        runtime.active_re.data(),
+        runtime.active_im.data(),
+        static_cast<std::size_t>(runtime.batches),
+        runtime.active_shots,
+        kernel.pair_left_indices.data(),
+        kernel.pair_right_indices.data(),
+        kernel.pair_left_indices.size(),
+        kernel.cos_theta,
+        coeffs.data());
 }
 
 void rotate_real_pair_flip_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliRotationKernel& kernel,
     const std::vector<std::uint64_t>& sign_bits) {
-    const double c = kernel.cos_theta;
     const auto& coeffs = fill_rotation_coefficients(
         runtime,
         sign_bits,
         kernel.pair_left_minus_coefficients.front().real(),
         kernel.pair_left_plus_coefficients.front().real());
-    const std::uint64_t zmask = kernel.action.zmask;
-    for (std::size_t idx = 0; idx < kernel.pair_left_indices.size(); ++idx) {
-        const std::size_t i0 = kernel.pair_left_indices[idx];
-        const std::size_t i1 = kernel.pair_right_indices[idx];
-        const std::size_t base0 = i0 * static_cast<std::size_t>(runtime.batches);
-        const std::size_t base1 = i1 * static_cast<std::size_t>(runtime.batches);
-        const double phase_sign = is_odd_popcount(static_cast<std::uint64_t>(i0) & zmask) ? -1.0 : 1.0;
-        for (int shot = 0; shot < runtime.active_shots; ++shot) {
-            const std::size_t off0 = base0 + static_cast<std::size_t>(shot);
-            const std::size_t off1 = base1 + static_cast<std::size_t>(shot);
-            const double q = phase_sign * coeffs[static_cast<std::size_t>(shot)];
-            const double r0 = runtime.active_re[off0];
-            const double i0v = runtime.active_im[off0];
-            const double r1 = runtime.active_re[off1];
-            const double i1v = runtime.active_im[off1];
-            runtime.active_re[off0] = c * r0 - q * r1;
-            runtime.active_im[off0] = c * i0v - q * i1v;
-            runtime.active_re[off1] = c * r1 + q * r0;
-            runtime.active_im[off1] = c * i1v + q * i0v;
-        }
-    }
+    batch_simd::dispatch_table().rotate_real_pair_flip(
+        runtime.active_re.data(),
+        runtime.active_im.data(),
+        static_cast<std::size_t>(runtime.batches),
+        runtime.active_shots,
+        kernel.pair_left_indices.data(),
+        kernel.pair_right_indices.data(),
+        kernel.pair_left_indices.size(),
+        kernel.cos_theta,
+        coeffs.data(),
+        kernel.action.zmask);
 }
 
 void rotate_pauli_batch(
@@ -506,20 +472,14 @@ void promote_first_dormant_rotation_batch(
     const double c = std::cos(theta);
     const double s = std::sin(theta);
     const auto& coeffs = fill_rotation_coefficients(runtime, sign_bits, -s, s);
-    for (std::size_t basis = 0; basis < dim; ++basis) {
-        const std::size_t promoted_basis = dim + basis;
-        for (int shot = 0; shot < runtime.active_shots; ++shot) {
-            const double coeff = coeffs[static_cast<std::size_t>(shot)];
-            const std::size_t src = batch_active_offset(runtime, basis, shot);
-            const std::size_t dst = batch_active_offset(runtime, promoted_basis, shot);
-            const double r = runtime.active_re[src];
-            const double i = runtime.active_im[src];
-            runtime.active_re[src] = c * r;
-            runtime.active_im[src] = c * i;
-            runtime.active_re[dst] = -coeff * i;
-            runtime.active_im[dst] = coeff * r;
-        }
-    }
+    batch_simd::dispatch_table().promote_first_dormant_rotation(
+        runtime.active_re.data(),
+        runtime.active_im.data(),
+        static_cast<std::size_t>(runtime.batches),
+        runtime.active_shots,
+        dim,
+        c,
+        coeffs.data());
     ++runtime.k;
     --runtime.ndormant;
 }
@@ -555,34 +515,27 @@ void measure_active_last_z_batch(
     }
     const int new_k = runtime.k - 1;
     const std::size_t dim = active_length(new_k);
-    std::fill(runtime.branch_prob_true.begin(), runtime.branch_prob_true.begin() + runtime.active_shots, 0.0);
-    for (std::size_t basis = 0; basis < dim; ++basis) {
-        const std::size_t true_basis = dim + basis;
-        for (int shot = 0; shot < runtime.active_shots; ++shot) {
-            const std::size_t off = batch_active_offset(runtime, true_basis, shot);
-            const double r = runtime.active_re[off];
-            const double i = runtime.active_im[off];
-            runtime.branch_prob_true[static_cast<std::size_t>(shot)] += r * r + i * i;
-        }
-    }
+    batch_simd::dispatch_table().last_z_measure_true_prob(
+        runtime.active_re.data(),
+        runtime.active_im.data(),
+        static_cast<std::size_t>(runtime.batches),
+        runtime.active_shots,
+        dim,
+        runtime.branch_prob_true.data());
     sample_batch_measurement_branches_from_true(
         runtime,
         runtime.eval_scratch,
         runtime.branch_prob_true,
         runtime.branch_invnorms);
-    const auto branch_bits = runtime.eval_scratch;
-    for (std::size_t basis = 0; basis < dim; ++basis) {
-        const std::size_t false_basis = basis;
-        const std::size_t true_basis = dim + basis;
-        for (int shot = 0; shot < runtime.active_shots; ++shot) {
-            const std::size_t src_basis = batch_bit(branch_bits, shot) ? true_basis : false_basis;
-            const std::size_t src = batch_active_offset(runtime, src_basis, shot);
-            const std::size_t dst = batch_active_offset(runtime, basis, shot);
-            const double invnorm = runtime.branch_invnorms[static_cast<std::size_t>(shot)];
-            runtime.active_re[dst] = runtime.active_re[src] * invnorm;
-            runtime.active_im[dst] = runtime.active_im[src] * invnorm;
-        }
-    }
+    const auto& branch_bits = runtime.eval_scratch;
+    batch_simd::dispatch_table().last_z_project(
+        runtime.active_re.data(),
+        runtime.active_im.data(),
+        static_cast<std::size_t>(runtime.batches),
+        runtime.active_shots,
+        dim,
+        branch_bits.data(),
+        runtime.branch_invnorms.data());
     runtime.k = new_k;
     ++runtime.ndormant;
     assign_batch_symbol(runtime, branch_condition, branch_bits);
@@ -600,34 +553,30 @@ void measure_diagonal_active_pauli_batch(
     const auto& source_false = kernel.source0_false;
     const auto& source_true = kernel.source0_true;
     const std::size_t out_dim = source_false.size();
-    std::fill(runtime.branch_prob_true.begin(), runtime.branch_prob_true.begin() + runtime.active_shots, 0.0);
-    for (std::size_t idx = 0; idx < out_dim; ++idx) {
-        const std::size_t st = source_true[idx];
-        for (int shot = 0; shot < runtime.active_shots; ++shot) {
-            const std::size_t off = batch_active_offset(runtime, st, shot);
-            const double r = runtime.active_re[off];
-            const double i = runtime.active_im[off];
-            runtime.branch_prob_true[static_cast<std::size_t>(shot)] += r * r + i * i;
-        }
-    }
+    batch_simd::dispatch_table().diagonal_measure_true_prob(
+        runtime.active_re.data(),
+        runtime.active_im.data(),
+        static_cast<std::size_t>(runtime.batches),
+        runtime.active_shots,
+        source_true.data(),
+        out_dim,
+        runtime.branch_prob_true.data());
     sample_batch_measurement_branches_from_true(
         runtime,
         runtime.eval_scratch,
         runtime.branch_prob_true,
         runtime.branch_invnorms);
-    const auto branch_bits = runtime.eval_scratch;
-    for (std::size_t idx = 0; idx < out_dim; ++idx) {
-        const std::size_t sf = source_false[idx];
-        const std::size_t st = source_true[idx];
-        for (int shot = 0; shot < runtime.active_shots; ++shot) {
-            const std::size_t src_basis = batch_bit(branch_bits, shot) ? st : sf;
-            const std::size_t src = batch_active_offset(runtime, src_basis, shot);
-            const std::size_t dst = batch_active_offset(runtime, idx, shot);
-            const double invnorm = runtime.branch_invnorms[static_cast<std::size_t>(shot)];
-            runtime.active_re[dst] = runtime.active_re[src] * invnorm;
-            runtime.active_im[dst] = runtime.active_im[src] * invnorm;
-        }
-    }
+    const auto& branch_bits = runtime.eval_scratch;
+    batch_simd::dispatch_table().diagonal_project(
+        runtime.active_re.data(),
+        runtime.active_im.data(),
+        static_cast<std::size_t>(runtime.batches),
+        runtime.active_shots,
+        source_false.data(),
+        source_true.data(),
+        out_dim,
+        branch_bits.data(),
+        runtime.branch_invnorms.data());
     --runtime.k;
     ++runtime.ndormant;
     assign_batch_symbol(runtime, branch_condition, branch_bits);
@@ -642,63 +591,39 @@ void measure_nondiagonal_active_pauli_batch(
     const SymbolicBoolEvaluationPlan& outcome_plan,
     std::optional<int> record,
     std::optional<int> record_condition) {
-    const std::size_t out_dim = kernel.source0_true.size();
-    std::fill(runtime.branch_prob_true.begin(), runtime.branch_prob_true.begin() + runtime.active_shots, 0.0);
-    for (std::size_t idx = 0; idx < out_dim; ++idx) {
-        const std::size_t s0 = kernel.source0_true[idx];
-        const std::size_t s1 = kernel.source1_true[idx];
-        const Complex c0 = kernel.coeff0_true[idx];
-        const Complex c1 = kernel.coeff1_true[idx];
-        for (int shot = 0; shot < runtime.active_shots; ++shot) {
-            const std::size_t off0 = batch_active_offset(runtime, s0, shot);
-            double ar = c0.real() * runtime.active_re[off0] - c0.imag() * runtime.active_im[off0];
-            double ai = c0.real() * runtime.active_im[off0] + c0.imag() * runtime.active_re[off0];
-            if (s1 != kNoSource) {
-                const std::size_t off1 = batch_active_offset(runtime, s1, shot);
-                ar += c1.real() * runtime.active_re[off1] - c1.imag() * runtime.active_im[off1];
-                ai += c1.real() * runtime.active_im[off1] + c1.imag() * runtime.active_re[off1];
-            }
-            runtime.branch_prob_true[static_cast<std::size_t>(shot)] += ar * ar + ai * ai;
-        }
-    }
+    const std::size_t out_dim = kernel.source0_false.size();
+    batch_simd::dispatch_table().nondiagonal_measure_true_prob(
+        runtime.active_re.data(),
+        runtime.active_im.data(),
+        static_cast<std::size_t>(runtime.batches),
+        runtime.active_shots,
+        kernel.source0_false.data(),
+        kernel.source1_false.data(),
+        kernel.coeff1_false.data(),
+        out_dim,
+        runtime.branch_prob_true.data());
     sample_batch_measurement_branches_from_true(
         runtime,
         runtime.eval_scratch,
         runtime.branch_prob_true,
         runtime.branch_invnorms);
-    const auto branch_bits = runtime.eval_scratch;
-    for (std::size_t idx = 0; idx < out_dim; ++idx) {
-        for (int shot = 0; shot < runtime.active_shots; ++shot) {
-            const bool branch = batch_bit(branch_bits, shot);
-            const auto& sources0 = branch ? kernel.source0_true : kernel.source0_false;
-            const auto& sources1 = branch ? kernel.source1_true : kernel.source1_false;
-            const auto& coeff0 = branch ? kernel.coeff0_true : kernel.coeff0_false;
-            const auto& coeff1 = branch ? kernel.coeff1_true : kernel.coeff1_false;
-            const std::size_t off0 = batch_active_offset(runtime, sources0[idx], shot);
-            double ar = coeff0[idx].real() * runtime.active_re[off0] -
-                        coeff0[idx].imag() * runtime.active_im[off0];
-            double ai = coeff0[idx].real() * runtime.active_im[off0] +
-                        coeff0[idx].imag() * runtime.active_re[off0];
-            if (sources1[idx] != kNoSource) {
-                const std::size_t off1 = batch_active_offset(runtime, sources1[idx], shot);
-                ar += coeff1[idx].real() * runtime.active_re[off1] -
-                      coeff1[idx].imag() * runtime.active_im[off1];
-                ai += coeff1[idx].real() * runtime.active_im[off1] +
-                      coeff1[idx].imag() * runtime.active_re[off1];
-            }
-            const double invnorm = runtime.branch_invnorms[static_cast<std::size_t>(shot)];
-            const std::size_t dst = batch_active_offset(runtime, idx, shot);
-            runtime.scratch_re[dst] = ar * invnorm;
-            runtime.scratch_im[dst] = ai * invnorm;
-        }
-    }
-    for (std::size_t idx = 0; idx < out_dim; ++idx) {
-        for (int shot = 0; shot < runtime.active_shots; ++shot) {
-            const std::size_t off = batch_active_offset(runtime, idx, shot);
-            runtime.active_re[off] = runtime.scratch_re[off];
-            runtime.active_im[off] = runtime.scratch_im[off];
-        }
-    }
+    const auto& branch_bits = runtime.eval_scratch;
+    batch_simd::dispatch_table().nondiagonal_project(
+        runtime.active_re.data(),
+        runtime.active_im.data(),
+        runtime.scratch_re.data(),
+        runtime.scratch_im.data(),
+        static_cast<std::size_t>(runtime.batches),
+        runtime.active_shots,
+        kernel.source0_false.data(),
+        kernel.source1_false.data(),
+        kernel.coeff1_false.data(),
+        out_dim,
+        branch_bits.data(),
+        runtime.branch_invnorms.data());
+    const std::size_t active_prefix_size = out_dim * static_cast<std::size_t>(runtime.batches);
+    std::copy_n(runtime.scratch_re.data(), active_prefix_size, runtime.active_re.data());
+    std::copy_n(runtime.scratch_im.data(), active_prefix_size, runtime.active_im.data());
     --runtime.k;
     ++runtime.ndormant;
     assign_batch_symbol(runtime, branch_condition, branch_bits);
@@ -767,7 +692,7 @@ void execute_batch_instruction(BatchFactoredExecutorState& runtime, const Introd
             set_batch_bit(runtime.eval_scratch, shot);
         }
     }
-    const auto branch_bits = runtime.eval_scratch;
+    const auto& branch_bits = runtime.eval_scratch;
     assign_batch_symbol(runtime, instruction.branch, branch_bits);
     eval_symbolic_bool_batch(runtime.eval_scratch, instruction.outcome_plan, runtime);
     write_batch_measurement_record(runtime, instruction.record, runtime.eval_scratch, instruction.record_condition);
@@ -785,6 +710,10 @@ int default_batch_count(int max_k) {
         kDefaultBatchShots,
         std::max<std::size_t>(1, kDefaultBatchActiveAmplitudes / dim));
     return static_cast<int>(count);
+}
+
+const char* active_batch_simd_backend() {
+    return batch_simd::dispatch_name();
 }
 
 BatchFactoredExecutorState::BatchFactoredExecutorState(
