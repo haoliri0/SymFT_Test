@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 project(symft_cpp LANGUAGES CXX)
 
 include(CheckCXXCompilerFlag)
+find_package(Threads REQUIRED)
 
 if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
@@ -64,7 +65,7 @@ add_executable(symft_batch_bench tools/symft_batch_bench.cpp)
 target_link_libraries(symft_batch_bench PRIVATE symft_cpp)
 
 add_executable(symft_rate_bench tools/symft_rate_bench.cpp)
-target_link_libraries(symft_rate_bench PRIVATE symft_cpp)
+target_link_libraries(symft_rate_bench PRIVATE symft_cpp Threads::Threads)
 
 if(SYMFT_CPP_BUILD_TESTS)
     enable_testing()

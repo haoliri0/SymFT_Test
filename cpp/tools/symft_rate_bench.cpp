@@ -10,6 +10,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <variant>
 #include <vector>
@@ -27,6 +28,13 @@ struct RateCounts {
     std::uint64_t discarded = 0;
     std::uint64_t accepted = 0;
     std::uint64_t logical_errors = 0;
+};
+
+struct WorkerResult {
+    RateCounts counts;
+    double presample_s = 0.0;
+    double execute_s = 0.0;
+    double accumulate_s = 0.0;
 };
 
 double seconds_between(Clock::time_point start, Clock::time_point stop) {
@@ -80,12 +88,22 @@ int parse_block_shots(const char* raw) {
     return parse_positive_int(raw, "block_shots");
 }
 
+int parse_threads(const char* raw) {
+    const std::string value(raw);
+    if (value == "auto") {
+        const unsigned int detected = std::thread::hardware_concurrency();
+        return std::max(1, static_cast<int>(detected == 0 ? 1 : detected));
+    }
+    return parse_positive_int(raw, "threads");
+}
+
 struct Options {
     std::string path = "d3.stim";
     std::uint64_t shots = 100000000ULL;
     int block_shots = 0;
     int repeats = 1;
     int observable = 0;
+    int threads = 1;
     bool postselect_detectors = false;
 };
 
@@ -100,6 +118,7 @@ void print_usage(const char* argv0) {
         << "  --batch-size N|auto               Batch size; --block-shots is accepted as an alias\n"
         << "  --repeats N                       Number of repeats\n"
         << "  --observable N                    Observable index\n"
+        << "  --threads N|auto                  Parallel worker threads over independent batches\n"
         << "  --postselect-detectors            Abort and compact shots after fired detectors\n"
         << "  --no-postselect-detectors         Disable detector postselection abort\n";
 }
@@ -180,6 +199,9 @@ Options parse_options(int argc, char** argv) {
         } else if (name == "--observable") {
             const std::string raw = require_option_value(name, value, idx, argc, argv);
             options.observable = parse_nonnegative_int(raw.c_str(), "observable");
+        } else if (name == "--threads") {
+            const std::string raw = require_option_value(name, value, idx, argc, argv);
+            options.threads = parse_threads(raw.c_str());
         } else if (name == "--postselect-detectors" || name == "--detector-postselection") {
             options.postselect_detectors = value.empty() ? true : parse_bool_flag(value.c_str(), "postselect_detectors");
         } else if (name == "--no-postselect-detectors") {
@@ -298,6 +320,52 @@ std::optional<int> instruction_record(const symft::FactoredInstruction& instruct
         instruction);
 }
 
+std::vector<int> instruction_records(const symft::FactoredInstructionProgram& program) {
+    std::vector<int> out;
+    out.reserve(program.instructions.size());
+    for (const auto& instruction : program.instructions) {
+        const auto record = instruction_record(instruction);
+        out.push_back(record.value_or(0));
+    }
+    return out;
+}
+
+void mark_condition_uses(
+    std::vector<int>& last_use,
+    const symft::SymbolicBoolEvaluationPlan& plan,
+    int instruction_index) {
+    for (int condition : plan.conditions) {
+        if (condition > 0 && condition < static_cast<int>(last_use.size())) {
+            last_use[static_cast<std::size_t>(condition)] =
+                std::max(last_use[static_cast<std::size_t>(condition)], instruction_index);
+        }
+    }
+}
+
+std::vector<int> condition_last_uses(const symft::FactoredInstructionProgram& program) {
+    std::vector<int> last_use(static_cast<std::size_t>(program.nsymbols + 1), -1);
+    for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+        const int instruction_index = static_cast<int>(idx);
+        std::visit(
+            [&](const auto& inst) {
+                using T = std::decay_t<decltype(inst)>;
+                if constexpr (
+                    std::is_same_v<T, symft::ApplyPrecomputedActivePauliRotation> ||
+                    std::is_same_v<T, symft::PromoteDormantRotation>) {
+                    mark_condition_uses(last_use, inst.sign_plan, instruction_index);
+                } else if constexpr (
+                    std::is_same_v<T, symft::RecordMeasurement> ||
+                    std::is_same_v<T, symft::MeasureActiveLastZ> ||
+                    std::is_same_v<T, symft::MeasurePrecomputedActivePauli> ||
+                    std::is_same_v<T, symft::IntroduceDormantMeasurementBranch>) {
+                    mark_condition_uses(last_use, inst.outcome_plan, instruction_index);
+                }
+            },
+            program.instructions[idx]);
+    }
+    return last_use;
+}
+
 std::vector<std::vector<std::vector<int>>> detectors_by_max_record(
     const std::vector<symft::StimDetector>& detectors,
     int nrecords) {
@@ -366,6 +434,23 @@ std::uint64_t compress_bits(std::uint64_t bits, std::uint64_t keep_mask) {
     return compress_bits_portable(bits, keep_mask);
 }
 
+void append_compressed_bits(
+    std::vector<std::uint64_t>& out,
+    int& dest_bit,
+    std::uint64_t compressed,
+    int nbits) {
+    if (nbits == 0) {
+        return;
+    }
+    const std::size_t word = static_cast<std::size_t>(dest_bit >> 6);
+    const int shift = dest_bit & 63;
+    out[word] |= compressed << shift;
+    if (shift != 0 && nbits > 64 - shift) {
+        out[word + 1] |= compressed >> (64 - shift);
+    }
+    dest_bit += nbits;
+}
+
 void compact_packed_columns(
     std::vector<std::uint64_t>& columns,
     int column_count,
@@ -391,21 +476,81 @@ void compact_packed_columns(
     if (scratch.size() < stride_words) {
         scratch.resize(stride_words, 0);
     }
+    const std::size_t nwords = batch_word_count(old_shots);
     for (int column = 0; column < column_count; ++column) {
         std::fill(scratch.begin(), scratch.begin() + static_cast<std::ptrdiff_t>(stride_words), 0);
         const std::size_t base = static_cast<std::size_t>(column) * stride_words;
-        int dest = 0;
-        for (int src = 0; src < old_shots; ++src) {
-            if (!packed_batch_bit(keep_bits, src)) {
+        int dest_bit = 0;
+        for (std::size_t word = 0; word < nwords; ++word) {
+            const std::uint64_t keep_mask = keep_bits[word] & live_word_mask(old_shots, word);
+            if (keep_mask == 0) {
                 continue;
             }
-            if ((columns[base + static_cast<std::size_t>(src >> 6)] & (std::uint64_t{1} << (src & 63))) != 0) {
-                set_packed_batch_bit(scratch, dest);
-            }
-            ++dest;
+            const int kept = popcount64(keep_mask);
+            append_compressed_bits(
+                scratch,
+                dest_bit,
+                compress_bits(columns[base + word], keep_mask),
+                kept);
         }
-        if (dest != survivor_count) {
+        if (dest_bit != survivor_count) {
             throw std::runtime_error("internal survivor compaction count mismatch");
+        }
+        std::copy_n(scratch.data(), stride_words, columns.data() + base);
+    }
+}
+
+void compact_live_symbol_columns(
+    std::vector<std::uint64_t>& columns,
+    const std::vector<int>& condition_last_use,
+    int instruction_index,
+    std::size_t stride_words,
+    int old_shots,
+    int survivor_count,
+    const std::vector<std::uint64_t>& keep_bits,
+    std::vector<std::uint64_t>& scratch) {
+    if (stride_words == 0 || old_shots == 0 || condition_last_use.size() <= 1) {
+        return;
+    }
+    if (old_shots <= 64) {
+        const std::uint64_t keep_mask = keep_bits.empty() ? 0 : keep_bits[0] & live_word_mask(old_shots, 0);
+        for (int condition = 1; condition < static_cast<int>(condition_last_use.size()); ++condition) {
+            if (condition_last_use[static_cast<std::size_t>(condition)] <= instruction_index) {
+                continue;
+            }
+            const std::size_t base = static_cast<std::size_t>(condition - 1) * stride_words;
+            columns[base] = compress_bits(columns[base], keep_mask);
+            for (std::size_t word = 1; word < stride_words; ++word) {
+                columns[base + word] = 0;
+            }
+        }
+        return;
+    }
+    if (scratch.size() < stride_words) {
+        scratch.resize(stride_words, 0);
+    }
+    const std::size_t nwords = batch_word_count(old_shots);
+    for (int condition = 1; condition < static_cast<int>(condition_last_use.size()); ++condition) {
+        if (condition_last_use[static_cast<std::size_t>(condition)] <= instruction_index) {
+            continue;
+        }
+        std::fill(scratch.begin(), scratch.begin() + static_cast<std::ptrdiff_t>(stride_words), 0);
+        const std::size_t base = static_cast<std::size_t>(condition - 1) * stride_words;
+        int dest_bit = 0;
+        for (std::size_t word = 0; word < nwords; ++word) {
+            const std::uint64_t keep_mask = keep_bits[word] & live_word_mask(old_shots, word);
+            if (keep_mask == 0) {
+                continue;
+            }
+            const int kept = popcount64(keep_mask);
+            append_compressed_bits(
+                scratch,
+                dest_bit,
+                compress_bits(columns[base + word], keep_mask),
+                kept);
+        }
+        if (dest_bit != survivor_count) {
+            throw std::runtime_error("internal symbol compaction count mismatch");
         }
         std::copy_n(scratch.data(), stride_words, columns.data() + base);
     }
@@ -417,20 +562,47 @@ void compact_active_columns(
     int survivor_count,
     const std::vector<std::uint64_t>& keep_bits) {
     const std::size_t dim = std::size_t{1} << runtime.k;
+    if (old_shots <= 64) {
+        const std::uint64_t keep_mask = keep_bits.empty() ? 0 : keep_bits[0] & live_word_mask(old_shots, 0);
+        for (std::size_t basis = 0; basis < dim; ++basis) {
+            const std::size_t base = basis * static_cast<std::size_t>(runtime.batches);
+            int dest = 0;
+            for (int src = 0; src < old_shots; ++src) {
+                if ((keep_mask & (std::uint64_t{1} << src)) == 0) {
+                    continue;
+                }
+                if (dest != src) {
+                    runtime.active_re[base + static_cast<std::size_t>(dest)] =
+                        runtime.active_re[base + static_cast<std::size_t>(src)];
+                    runtime.active_im[base + static_cast<std::size_t>(dest)] =
+                        runtime.active_im[base + static_cast<std::size_t>(src)];
+                }
+                ++dest;
+            }
+            if (dest != survivor_count) {
+                throw std::runtime_error("internal active compaction count mismatch");
+            }
+        }
+        return;
+    }
+    const std::size_t nwords = batch_word_count(old_shots);
     for (std::size_t basis = 0; basis < dim; ++basis) {
         const std::size_t base = basis * static_cast<std::size_t>(runtime.batches);
         int dest = 0;
-        for (int src = 0; src < old_shots; ++src) {
-            if (!packed_batch_bit(keep_bits, src)) {
-                continue;
+        for (std::size_t word = 0; word < nwords; ++word) {
+            std::uint64_t mask = keep_bits[word] & live_word_mask(old_shots, word);
+            while (mask != 0) {
+                const int bit = __builtin_ctzll(mask);
+                const int src = static_cast<int>(word << 6) + bit;
+                if (dest != src) {
+                    runtime.active_re[base + static_cast<std::size_t>(dest)] =
+                        runtime.active_re[base + static_cast<std::size_t>(src)];
+                    runtime.active_im[base + static_cast<std::size_t>(dest)] =
+                        runtime.active_im[base + static_cast<std::size_t>(src)];
+                }
+                ++dest;
+                mask &= mask - 1;
             }
-            if (dest != src) {
-                runtime.active_re[base + static_cast<std::size_t>(dest)] =
-                    runtime.active_re[base + static_cast<std::size_t>(src)];
-                runtime.active_im[base + static_cast<std::size_t>(dest)] =
-                    runtime.active_im[base + static_cast<std::size_t>(src)];
-            }
-            ++dest;
         }
         if (dest != survivor_count) {
             throw std::runtime_error("internal active compaction count mismatch");
@@ -441,6 +613,8 @@ void compact_active_columns(
 void compact_surviving_shots(
     symft::BatchFactoredExecutorState& runtime,
     const std::vector<std::uint64_t>& keep_bits,
+    const std::vector<int>& condition_last_use,
+    int instruction_index,
     std::vector<std::uint64_t>& scratch) {
     const int old_shots = runtime.active_shots;
     const int survivor_count = count_live_bits(keep_bits, old_shots);
@@ -448,9 +622,10 @@ void compact_surviving_shots(
         return;
     }
     compact_active_columns(runtime, old_shots, survivor_count, keep_bits);
-    compact_packed_columns(
+    compact_live_symbol_columns(
         runtime.value_words,
-        runtime.nsymbols,
+        condition_last_use,
+        instruction_index,
         runtime.batch_words,
         old_shots,
         survivor_count,
@@ -471,6 +646,8 @@ void compact_dead_shots_if_needed(
     symft::BatchFactoredExecutorState& runtime,
     std::vector<std::uint64_t>& dead_bits,
     std::vector<std::uint64_t>& keep_bits,
+    const std::vector<int>& condition_last_use,
+    int instruction_index,
     std::vector<std::uint64_t>& compact_scratch,
     bool force) {
     if (runtime.active_shots == 0) {
@@ -488,7 +665,7 @@ void compact_dead_shots_if_needed(
         keep_bits[word] = (~dead_bits[word]) & live_word_mask(runtime.active_shots, word);
     }
     std::fill(keep_bits.begin() + static_cast<std::ptrdiff_t>(nwords), keep_bits.end(), 0);
-    compact_surviving_shots(runtime, keep_bits, compact_scratch);
+    compact_surviving_shots(runtime, keep_bits, condition_last_use, instruction_index, compact_scratch);
     std::fill(dead_bits.begin(), dead_bits.end(), 0);
 }
 
@@ -499,6 +676,8 @@ void apply_postselection_checks_for_record(
     std::vector<std::uint64_t>& detector_bits,
     std::vector<std::uint64_t>& dead_bits,
     std::vector<std::uint64_t>& keep_bits,
+    const std::vector<int>& condition_last_use,
+    int instruction_index,
     std::vector<std::uint64_t>& scratch,
     std::vector<std::uint64_t>& compact_scratch) {
     if (detectors.empty() || runtime.active_shots == 0) {
@@ -523,7 +702,14 @@ void apply_postselection_checks_for_record(
         return;
     }
     counts.discarded += static_cast<std::uint64_t>(discarded_now);
-    compact_dead_shots_if_needed(runtime, dead_bits, keep_bits, compact_scratch, false);
+    compact_dead_shots_if_needed(
+        runtime,
+        dead_bits,
+        keep_bits,
+        condition_last_use,
+        instruction_index,
+        compact_scratch,
+        false);
 }
 
 void accumulate_logical_counts_for_survivors(
@@ -555,6 +741,8 @@ void execute_postselected_block(
     symft::BatchFactoredExecutorState& runtime,
     const symft::FactoredInstructionProgram& program,
     const symft::PresampledExogenous& samples,
+    const std::vector<int>& instruction_records_by_index,
+    const std::vector<int>& condition_last_use,
     const std::vector<std::vector<std::vector<int>>>& detectors_by_record,
     const std::vector<std::vector<int>>& logical_records,
     std::vector<std::uint64_t>& detector_bits,
@@ -564,27 +752,43 @@ void execute_postselected_block(
     std::vector<std::uint64_t>& compact_scratch) {
     std::fill(dead_bits.begin(), dead_bits.end(), 0);
     symft::assign_presampled_exogenous_batch_in_place(runtime, samples);
-    for (const auto& instruction : program.instructions) {
+    for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
         if (runtime.active_shots == 0) {
             break;
         }
+        const auto& instruction = program.instructions[idx];
         symft::execute_batch_instruction_in_place(runtime, instruction);
-        const auto record = instruction_record(instruction);
-        if (!record || *record <= 0 || *record >= static_cast<int>(detectors_by_record.size())) {
+        const int record = instruction_records_by_index[idx];
+        if (record <= 0 || record >= static_cast<int>(detectors_by_record.size())) {
             continue;
         }
         apply_postselection_checks_for_record(
             counts,
             runtime,
-            detectors_by_record[static_cast<std::size_t>(*record)],
+            detectors_by_record[static_cast<std::size_t>(record)],
             detector_bits,
             dead_bits,
             keep_bits,
+            condition_last_use,
+            static_cast<int>(idx),
             scratch,
             compact_scratch);
     }
-    compact_dead_shots_if_needed(runtime, dead_bits, keep_bits, compact_scratch, true);
+    compact_dead_shots_if_needed(
+        runtime,
+        dead_bits,
+        keep_bits,
+        condition_last_use,
+        static_cast<int>(program.instructions.size()),
+        compact_scratch,
+        true);
     accumulate_logical_counts_for_survivors(counts, runtime, logical_records, keep_bits, scratch);
+}
+
+std::uint64_t block_seed(std::uint64_t base, int repeat, std::uint64_t block_index) {
+    return base ^
+           (std::uint64_t{0x9e3779b97f4a7c15} * (block_index + 1)) ^
+           (std::uint64_t{0xbf58476d1ce4e5b9} * static_cast<std::uint64_t>(repeat + 1));
 }
 
 } // namespace
@@ -597,6 +801,7 @@ int main(int argc, char** argv) {
         const int requested_block_shots = options.block_shots;
         const int repeats = options.repeats;
         const int observable = options.observable;
+        const int thread_count = options.threads;
         const bool postselect_detectors = options.postselect_detectors;
 
         double parse_total = 0.0;
@@ -604,6 +809,7 @@ int main(int argc, char** argv) {
         double presample_total = 0.0;
         double execute_total = 0.0;
         double accumulate_total = 0.0;
+        double sample_wall_total = 0.0;
         RateCounts total_counts;
         int n = 0;
         int records = 0;
@@ -611,6 +817,7 @@ int main(int argc, char** argv) {
         int block_shots = 0;
         int detectors_count = 0;
         int observable_includes_count = 0;
+        int active_threads_used = 1;
 
         for (int repeat = 0; repeat < repeats; ++repeat) {
             const auto parse_start = Clock::now();
@@ -637,66 +844,109 @@ int main(int argc, char** argv) {
             }
             const auto postselection_detectors_by_record =
                 detectors_by_max_record(parsed.detectors, program.nrecords);
+            const auto instruction_records_by_index = instruction_records(program);
+            const auto condition_last_use_by_index = condition_last_uses(program);
+
+            const std::uint64_t nblocks =
+                (shots + static_cast<std::uint64_t>(block_shots) - 1) /
+                static_cast<std::uint64_t>(block_shots);
+            const int active_threads = std::min<int>(
+                thread_count,
+                static_cast<int>(std::max<std::uint64_t>(1, nblocks)));
+            active_threads_used = std::max(active_threads_used, active_threads);
+            std::vector<WorkerResult> worker_results(static_cast<std::size_t>(active_threads));
+            const auto sample_wall_start = Clock::now();
+            auto run_worker = [&](int worker_id) {
+                WorkerResult local;
+                symft::BatchFactoredExecutorState runtime(
+                    program,
+                    block_shots,
+                    block_seed(0x5eed1234ULL, repeat, static_cast<std::uint64_t>(worker_id)));
+                std::vector<std::uint64_t> discard_bits(runtime.batch_words, 0);
+                std::vector<std::uint64_t> dead_bits(runtime.batch_words, 0);
+                std::vector<std::uint64_t> logical_bits(runtime.batch_words, 0);
+                std::vector<std::uint64_t> scratch(runtime.batch_words, 0);
+                std::vector<std::uint64_t> compact_scratch(runtime.batch_words, 0);
+                for (std::uint64_t block_index = static_cast<std::uint64_t>(worker_id);
+                     block_index < nblocks;
+                     block_index += static_cast<std::uint64_t>(active_threads)) {
+                    const std::uint64_t offset = block_index * static_cast<std::uint64_t>(block_shots);
+                    const int block = static_cast<int>(std::min<std::uint64_t>(
+                        static_cast<std::uint64_t>(block_shots),
+                        shots - offset));
+
+                    const auto presample_start = Clock::now();
+                    const auto samples = symft::presample_exogenous(
+                        program,
+                        block,
+                        block_seed(0x7eed0000ULL, repeat, block_index));
+                    const auto presample_stop = Clock::now();
+
+                    symft::reset_batch_executor(runtime, program, block);
+                    runtime.rng_state = block_seed(0x5eed1234ULL, repeat, block_index);
+                    if (postselect_detectors) {
+                        execute_postselected_block(
+                            local.counts,
+                            runtime,
+                            program,
+                            samples,
+                            instruction_records_by_index,
+                            condition_last_use_by_index,
+                            postselection_detectors_by_record,
+                            logical_records,
+                            discard_bits,
+                            dead_bits,
+                            logical_bits,
+                            scratch,
+                            compact_scratch);
+                    } else {
+                        symft::execute_batch_in_place(runtime, program, samples);
+                    }
+                    const auto execute_stop = Clock::now();
+                    if (!postselect_detectors) {
+                        accumulate_block_counts(
+                            local.counts,
+                            runtime,
+                            block,
+                            parsed.detectors,
+                            logical_records,
+                            discard_bits,
+                            logical_bits,
+                            scratch);
+                    }
+                    const auto accumulate_stop = Clock::now();
+                    local.counts.shots += static_cast<std::uint64_t>(block);
+                    local.presample_s += seconds_between(presample_start, presample_stop);
+                    local.execute_s += seconds_between(presample_stop, execute_stop);
+                    local.accumulate_s += seconds_between(execute_stop, accumulate_stop);
+                }
+                worker_results[static_cast<std::size_t>(worker_id)] = local;
+            };
+            if (active_threads == 1) {
+                run_worker(0);
+            } else {
+                std::vector<std::thread> workers;
+                workers.reserve(static_cast<std::size_t>(active_threads));
+                for (int worker_id = 0; worker_id < active_threads; ++worker_id) {
+                    workers.emplace_back(run_worker, worker_id);
+                }
+                for (auto& worker : workers) {
+                    worker.join();
+                }
+            }
+            const auto sample_wall_stop = Clock::now();
 
             RateCounts counts;
-            counts.shots = shots;
-            symft::BatchFactoredExecutorState runtime(
-                program,
-                block_shots,
-                0x5eed1234ULL + static_cast<std::uint64_t>(repeat));
-            std::vector<std::uint64_t> discard_bits(runtime.batch_words, 0);
-            std::vector<std::uint64_t> dead_bits(runtime.batch_words, 0);
-            std::vector<std::uint64_t> logical_bits(runtime.batch_words, 0);
-            std::vector<std::uint64_t> scratch(runtime.batch_words, 0);
-            std::vector<std::uint64_t> compact_scratch(runtime.batch_words, 0);
-            std::uint64_t exogenous_seed = 0x7eed0000ULL + static_cast<std::uint64_t>(repeat);
-            std::uint64_t offset = 0;
-            while (offset < shots) {
-                const int block = static_cast<int>(std::min<std::uint64_t>(
-                    static_cast<std::uint64_t>(block_shots),
-                    shots - offset));
-
-                const auto presample_start = Clock::now();
-                const auto samples = symft::presample_exogenous(program, block, exogenous_seed);
-                const auto presample_stop = Clock::now();
-                exogenous_seed = samples.next_rng_state;
-
-                symft::reset_batch_executor(runtime, program, block);
-                if (postselect_detectors) {
-                    execute_postselected_block(
-                        counts,
-                        runtime,
-                        program,
-                        samples,
-                        postselection_detectors_by_record,
-                        logical_records,
-                        discard_bits,
-                        dead_bits,
-                        logical_bits,
-                        scratch,
-                        compact_scratch);
-                } else {
-                    symft::execute_batch_in_place(runtime, program, samples);
-                }
-                const auto execute_stop = Clock::now();
-                if (!postselect_detectors) {
-                    accumulate_block_counts(
-                        counts,
-                        runtime,
-                        block,
-                        parsed.detectors,
-                        logical_records,
-                        discard_bits,
-                        logical_bits,
-                        scratch);
-                }
-                const auto accumulate_stop = Clock::now();
-
-                presample_total += seconds_between(presample_start, presample_stop);
-                execute_total += seconds_between(presample_stop, execute_stop);
-                accumulate_total += seconds_between(execute_stop, accumulate_stop);
-                offset += static_cast<std::uint64_t>(block);
+            for (const auto& worker : worker_results) {
+                counts.shots += worker.counts.shots;
+                counts.discarded += worker.counts.discarded;
+                counts.accepted += worker.counts.accepted;
+                counts.logical_errors += worker.counts.logical_errors;
+                presample_total += worker.presample_s;
+                execute_total += worker.execute_s;
+                accumulate_total += worker.accumulate_s;
             }
+            sample_wall_total += seconds_between(sample_wall_start, sample_wall_stop);
 
             total_counts.shots += counts.shots;
             total_counts.discarded += counts.discarded;
@@ -712,7 +962,7 @@ int main(int argc, char** argv) {
         const double presample_s = presample_total * inv_repeats;
         const double execute_s = execute_total * inv_repeats;
         const double accumulate_s = accumulate_total * inv_repeats;
-        const double sample_s = presample_s + execute_s + accumulate_s;
+        const double sample_s = sample_wall_total * inv_repeats;
         const double shots_per_s = sample_s > 0.0 ? static_cast<double>(shots) / sample_s : 0.0;
         const double discard_rate = total_counts.shots == 0 ? std::numeric_limits<double>::quiet_NaN()
                                                             : static_cast<double>(total_counts.discarded) / static_cast<double>(total_counts.shots);
@@ -732,15 +982,19 @@ int main(int argc, char** argv) {
         std::cout << "batch_size " << block_shots << "\n";
         std::cout << "block_shots " << block_shots << "\n";
         std::cout << "repeats " << repeats << "\n";
+        std::cout << "threads " << active_threads_used << "\n";
+        std::cout << "requested_threads " << thread_count << "\n";
         std::cout << "sampler " << (postselect_detectors ? "batch_postselected" : "batch") << "\n";
         std::cout << "detector_postselection " << (postselect_detectors ? "enabled" : "disabled") << "\n";
         std::cout << "exogenous_mode presampled_streaming\n";
         std::cout << "rng_streams split_exogenous_branch\n";
+        std::cout << "phase_timing " << (active_threads_used > 1 ? "worker_sum" : "wall") << "\n";
         std::cout << "parse_s_avg " << parse_s << "\n";
         std::cout << "plan_s_avg " << plan_s << "\n";
         std::cout << "presample_s_avg " << presample_s << "\n";
         std::cout << "execute_s_avg " << execute_s << "\n";
         std::cout << "accumulate_s_avg " << accumulate_s << "\n";
+        std::cout << "sample_wall_s_avg " << sample_s << "\n";
         std::cout << "sample_s_avg " << sample_s << "\n";
         std::cout << "sample_shots_per_s " << shots_per_s << "\n";
         std::cout << "discarded " << total_counts.discarded << "\n";
