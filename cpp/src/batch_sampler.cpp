@@ -193,6 +193,23 @@ void mask_batch_bits(std::vector<std::uint64_t>& bits, const BatchFactoredExecut
     }
 }
 
+void fill_batch_random_half_bits(std::vector<std::uint64_t>& bits, BatchFactoredExecutorState& runtime) {
+    const std::size_t nwords = runtime_batch_word_count(runtime);
+    if (bits.size() < runtime.batch_words) {
+        bits.resize(runtime.batch_words, 0);
+    }
+    if ((runtime.active_shots & 63) == 0) {
+        for (std::size_t word = 0; word < nwords; ++word) {
+            bits[word] = next_random_u64(runtime.rng_state);
+        }
+    } else {
+        for (std::size_t word = 0; word < nwords; ++word) {
+            bits[word] = next_random_u64(runtime.rng_state) & batch_live_word_mask(runtime, word);
+        }
+    }
+    std::fill(bits.begin() + static_cast<std::ptrdiff_t>(nwords), bits.end(), 0);
+}
+
 void check_batch_symbol_slot(const BatchFactoredExecutorState& runtime, int condition) {
     if (condition <= 0 || condition > runtime.nsymbols) {
         fail("symbolic condition exceeds batch executor symbol table");
@@ -346,8 +363,14 @@ void eval_symbolic_bool_batch(
     const std::size_t nwords = runtime_batch_word_count(runtime);
     if (nwords == 1) {
         std::uint64_t out0 = out[0];
-        for (int condition : plan.conditions) {
-            out0 ^= runtime.value_words[batch_condition_offset(runtime, condition, 0)];
+        if (runtime.batch_words == 1) {
+            for (int condition : plan.conditions) {
+                out0 ^= runtime.value_words[static_cast<std::size_t>(condition - 1)];
+            }
+        } else {
+            for (int condition : plan.conditions) {
+                out0 ^= runtime.value_words[batch_condition_offset(runtime, condition, 0)];
+            }
         }
         out[0] = out0;
         mask_batch_bits(out, runtime);
@@ -996,12 +1019,7 @@ void execute_batch_instruction(BatchFactoredExecutorState& runtime, const Measur
 }
 
 void execute_batch_instruction(BatchFactoredExecutorState& runtime, const IntroduceDormantMeasurementBranch& instruction) {
-    fill_batch_bits(runtime.eval_scratch, runtime, false);
-    for (int shot = 0; shot < runtime.active_shots; ++shot) {
-        if (sample_bernoulli(runtime.rng_state, 0.5)) {
-            set_batch_bit(runtime.eval_scratch, shot);
-        }
-    }
+    fill_batch_random_half_bits(runtime.eval_scratch, runtime);
     const auto& branch_bits = runtime.eval_scratch;
     assign_batch_symbol(runtime, instruction.branch, branch_bits);
     eval_symbolic_bool_batch(runtime.eval_scratch, instruction.outcome_plan, runtime);
