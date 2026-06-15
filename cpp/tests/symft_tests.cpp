@@ -146,6 +146,36 @@ void test_presampled_exogenous() {
     }
 }
 
+void test_batch_sampler() {
+    using namespace symft;
+    const auto parsed = parse_stim_text("X_ERROR(1) 0\nM 0\n");
+    PendingFactoredState pending(parsed.state);
+    const auto program = plan_factored_updates(pending);
+    const auto records = sample_measurements_batch(program, 9, 4, 17);
+    require(records.size() == 9, "batch sampler shot count");
+    for (const auto& shot : records) {
+        require(packed_bit(shot, 0), "batch presampled deterministic X error");
+    }
+
+    const auto feedback = parse_stim_text("M !0\nCX rec[-1] 1\nM 1\n");
+    PendingFactoredState pending_feedback(feedback.state);
+    const auto feedback_program = plan_factored_updates(pending_feedback);
+    const auto feedback_records = sample_measurements_batch(feedback_program, 7, 3, 19);
+    for (const auto& shot : feedback_records) {
+        require(packed_bit(shot, 0) && packed_bit(shot, 1), "batch feedback deterministic records");
+    }
+
+    const auto t_circuit = parse_stim_text("H 0\nT 0\nM 0\n");
+    PendingFactoredState pending_t(t_circuit.state);
+    const auto t_program = plan_factored_updates(pending_t);
+    const auto t_records = sample_measurements_batch(t_program, 200, 32, 23);
+    int ones = 0;
+    for (const auto& shot : t_records) {
+        ones += packed_bit(shot, 0) ? 1 : 0;
+    }
+    require(ones > 50 && ones < 150, "batch T then MX produces non-deterministic X measurement");
+}
+
 void test_detectors() {
     using namespace symft;
     const auto accepted = parse_stim_text("M !0\nOBSERVABLE_INCLUDE(0) rec[-1]\n");
@@ -169,6 +199,7 @@ int main() {
     test_parser_feedback();
     test_t_gate_exact_rotation();
     test_presampled_exogenous();
+    test_batch_sampler();
     test_detectors();
     std::cout << "symft_cpp_tests passed (SIMD backend: " << symft::active_simd_backend() << ")\n";
     return 0;

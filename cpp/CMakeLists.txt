@@ -11,6 +11,7 @@ option(SYMFT_CPP_NATIVE "Build the scalar translation unit with -march=native" O
 
 add_library(symft_cpp
     src/symft.cpp
+    src/batch_sampler.cpp
     src/simd_dispatch.cpp
     src/simd_scalar.cpp
 )

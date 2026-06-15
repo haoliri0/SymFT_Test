@@ -15,11 +15,6 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-struct RecordBitRef {
-    std::size_t word = 0;
-    std::uint64_t mask = 0;
-};
-
 struct RateCounts {
     std::uint64_t shots = 0;
     std::uint64_t discarded = 0;
@@ -60,46 +55,115 @@ int parse_nonnegative_int(const char* raw, const char* name) {
     return static_cast<int>(value);
 }
 
-RecordBitRef record_ref(int record) {
+int parse_block_shots(const char* raw) {
+    if (std::string(raw) == "auto") {
+        return 0;
+    }
+    return parse_positive_int(raw, "block_shots");
+}
+
+int popcount64(std::uint64_t value) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_popcountll(value);
+#else
+    int count = 0;
+    while (value != 0) {
+        value &= value - 1;
+        ++count;
+    }
+    return count;
+#endif
+}
+
+std::size_t batch_word_count(int shots) {
+    return shots <= 0 ? 0 : static_cast<std::size_t>((shots + 63) >> 6);
+}
+
+std::uint64_t low_bits_mask(int nbits) {
+    if (nbits <= 0) {
+        return 0;
+    }
+    if (nbits >= 64) {
+        return std::numeric_limits<std::uint64_t>::max();
+    }
+    return (std::uint64_t{1} << nbits) - 1;
+}
+
+std::uint64_t live_word_mask(int shots, std::size_t word) {
+    return low_bits_mask(shots - static_cast<int>(word << 6));
+}
+
+std::size_t measurement_offset(std::size_t stride_words, int record, std::size_t word) {
     if (record <= 0) {
         throw std::runtime_error("record ids must be positive");
     }
-    const int bit = record - 1;
-    return RecordBitRef{
-        static_cast<std::size_t>(bit >> 6),
-        std::uint64_t{1} << (bit & 63),
-    };
+    return static_cast<std::size_t>(record - 1) * stride_words + word;
 }
 
-std::vector<RecordBitRef> record_refs(const std::vector<int>& records) {
-    std::vector<RecordBitRef> out;
-    out.reserve(records.size());
+void xor_records_into(
+    std::vector<std::uint64_t>& out,
+    const std::vector<std::uint64_t>& measurements,
+    std::size_t stride_words,
+    std::size_t nwords,
+    const std::vector<int>& records) {
+    std::fill(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(nwords), 0);
     for (int record : records) {
-        out.push_back(record_ref(record));
+        for (std::size_t word = 0; word < nwords; ++word) {
+            out[word] ^= measurements[measurement_offset(stride_words, record, word)];
+        }
     }
-    return out;
 }
 
-bool parity_of_refs(const std::vector<std::uint64_t>& words, const std::vector<RecordBitRef>& refs) {
-    bool parity = false;
-    for (const auto& ref : refs) {
-        parity ^= ref.word < words.size() && (words[ref.word] & ref.mask) != 0;
+void accumulate_block_counts(
+    RateCounts& counts,
+    const symft::BatchFactoredExecutorState& runtime,
+    int block,
+    const std::vector<symft::StimDetector>& detectors,
+    const std::vector<std::vector<int>>& logical_records,
+    std::vector<std::uint64_t>& discard_bits,
+    std::vector<std::uint64_t>& logical_bits,
+    std::vector<std::uint64_t>& scratch) {
+    const std::size_t stride_words = runtime.batch_words;
+    const std::size_t nwords = batch_word_count(block);
+    std::fill(discard_bits.begin(), discard_bits.begin() + static_cast<std::ptrdiff_t>(nwords), 0);
+    std::fill(logical_bits.begin(), logical_bits.begin() + static_cast<std::ptrdiff_t>(nwords), 0);
+
+    for (const auto& detector : detectors) {
+        xor_records_into(scratch, runtime.measurement_words, stride_words, nwords, detector.records);
+        for (std::size_t word = 0; word < nwords; ++word) {
+            discard_bits[word] |= scratch[word];
+        }
     }
-    return parity;
+
+    for (const auto& records : logical_records) {
+        xor_records_into(scratch, runtime.measurement_words, stride_words, nwords, records);
+        for (std::size_t word = 0; word < nwords; ++word) {
+            logical_bits[word] ^= scratch[word];
+        }
+    }
+
+    for (std::size_t word = 0; word < nwords; ++word) {
+        const std::uint64_t live = live_word_mask(block, word);
+        const std::uint64_t discarded_word = discard_bits[word] & live;
+        const std::uint64_t accepted_word = (~discarded_word) & live;
+        counts.discarded += static_cast<std::uint64_t>(popcount64(discarded_word));
+        counts.accepted += static_cast<std::uint64_t>(popcount64(accepted_word));
+        counts.logical_errors += static_cast<std::uint64_t>(popcount64(logical_bits[word] & accepted_word));
+    }
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
     if (argc > 6 || (argc >= 2 && (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help"))) {
-        std::cerr << "usage: symft_rate_bench [circuit.stim=d3.stim] [shots=100000000] [block_shots=65536] [repeats=1] [observable=0]\n";
+        std::cerr << "usage: symft_rate_bench [circuit.stim=d3.stim] [shots=100000000] [block_shots=auto] [repeats=1] [observable=0]\n";
         return argc > 6 ? 2 : 0;
     }
 
     try {
         const std::string path = argc >= 2 ? argv[1] : "d3.stim";
         const std::uint64_t shots = argc >= 3 ? parse_u64(argv[2], "shots") : 100000000ULL;
-        const int block_shots = argc >= 4 ? parse_positive_int(argv[3], "block_shots") : 65536;
+        const int requested_block_shots = argc >= 4 ? parse_block_shots(argv[3]) : 0;
         const int repeats = argc >= 5 ? parse_positive_int(argv[4], "repeats") : 1;
         const int observable = argc >= 6 ? parse_nonnegative_int(argv[5], "observable") : 0;
 
@@ -107,10 +171,12 @@ int main(int argc, char** argv) {
         double plan_total = 0.0;
         double presample_total = 0.0;
         double execute_total = 0.0;
+        double accumulate_total = 0.0;
         RateCounts total_counts;
         int n = 0;
         int records = 0;
         int max_k = 0;
+        int block_shots = 0;
         int detectors_count = 0;
         int observable_includes_count = 0;
 
@@ -127,25 +193,26 @@ int main(int argc, char** argv) {
             n = parsed.state.n;
             records = program.nrecords;
             max_k = program.max_k;
+            block_shots = requested_block_shots > 0 ? requested_block_shots : symft::default_batch_count(program.max_k);
             detectors_count = static_cast<int>(parsed.detectors.size());
             observable_includes_count = static_cast<int>(parsed.observables.size());
 
-            std::vector<std::vector<RecordBitRef>> detector_refs;
-            detector_refs.reserve(parsed.detectors.size());
-            for (const auto& detector : parsed.detectors) {
-                detector_refs.push_back(record_refs(detector.records));
-            }
-
-            std::vector<std::vector<RecordBitRef>> logical_refs;
+            std::vector<std::vector<int>> logical_records;
             for (const auto& include : parsed.observables) {
                 if (include.index == observable) {
-                    logical_refs.push_back(record_refs(include.records));
+                    logical_records.push_back(include.records);
                 }
             }
 
             RateCounts counts;
             counts.shots = shots;
-            symft::FactoredExecutorState runtime(program, 0x5eed1234ULL + static_cast<std::uint64_t>(repeat));
+            symft::BatchFactoredExecutorState runtime(
+                program,
+                block_shots,
+                0x5eed1234ULL + static_cast<std::uint64_t>(repeat));
+            std::vector<std::uint64_t> discard_bits(runtime.batch_words, 0);
+            std::vector<std::uint64_t> logical_bits(runtime.batch_words, 0);
+            std::vector<std::uint64_t> scratch(runtime.batch_words, 0);
             std::uint64_t exogenous_seed = 0x7eed0000ULL + static_cast<std::uint64_t>(repeat);
             std::uint64_t offset = 0;
             while (offset < shots) {
@@ -158,32 +225,23 @@ int main(int argc, char** argv) {
                 const auto presample_stop = Clock::now();
                 exogenous_seed = samples.next_rng_state;
 
-                for (int shot = 0; shot < block; ++shot) {
-                    symft::reset_executor(runtime, program);
-                    symft::execute_in_place(runtime, program, samples, shot);
-
-                    bool discarded = false;
-                    for (const auto& detector : detector_refs) {
-                        discarded = discarded || parity_of_refs(runtime.measurement_words, detector);
-                    }
-                    if (discarded) {
-                        ++counts.discarded;
-                        continue;
-                    }
-
-                    ++counts.accepted;
-                    bool logical = false;
-                    for (const auto& include : logical_refs) {
-                        logical ^= parity_of_refs(runtime.measurement_words, include);
-                    }
-                    if (logical) {
-                        ++counts.logical_errors;
-                    }
-                }
+                symft::reset_batch_executor(runtime, program, block);
+                symft::execute_batch_in_place(runtime, program, samples);
                 const auto execute_stop = Clock::now();
+                accumulate_block_counts(
+                    counts,
+                    runtime,
+                    block,
+                    parsed.detectors,
+                    logical_records,
+                    discard_bits,
+                    logical_bits,
+                    scratch);
+                const auto accumulate_stop = Clock::now();
 
                 presample_total += seconds_between(presample_start, presample_stop);
                 execute_total += seconds_between(presample_stop, execute_stop);
+                accumulate_total += seconds_between(execute_stop, accumulate_stop);
                 offset += static_cast<std::uint64_t>(block);
             }
 
@@ -200,7 +258,8 @@ int main(int argc, char** argv) {
         const double plan_s = plan_total * inv_repeats;
         const double presample_s = presample_total * inv_repeats;
         const double execute_s = execute_total * inv_repeats;
-        const double sample_s = presample_s + execute_s;
+        const double accumulate_s = accumulate_total * inv_repeats;
+        const double sample_s = presample_s + execute_s + accumulate_s;
         const double shots_per_s = sample_s > 0.0 ? static_cast<double>(shots) / sample_s : 0.0;
         const double discard_rate = total_counts.shots == 0 ? std::numeric_limits<double>::quiet_NaN()
                                                             : static_cast<double>(total_counts.discarded) / static_cast<double>(total_counts.shots);
@@ -219,12 +278,15 @@ int main(int argc, char** argv) {
         std::cout << "sampled_shots " << total_counts.shots << "\n";
         std::cout << "block_shots " << block_shots << "\n";
         std::cout << "repeats " << repeats << "\n";
+        std::cout << "sampler batch\n";
+        std::cout << "active_layout basis_major_shots_contiguous\n";
         std::cout << "exogenous_mode presampled_streaming\n";
         std::cout << "rng_streams split_exogenous_branch\n";
         std::cout << "parse_s_avg " << parse_s << "\n";
         std::cout << "plan_s_avg " << plan_s << "\n";
         std::cout << "presample_s_avg " << presample_s << "\n";
         std::cout << "execute_s_avg " << execute_s << "\n";
+        std::cout << "accumulate_s_avg " << accumulate_s << "\n";
         std::cout << "sample_s_avg " << sample_s << "\n";
         std::cout << "sample_shots_per_s " << shots_per_s << "\n";
         std::cout << "discarded " << total_counts.discarded << "\n";

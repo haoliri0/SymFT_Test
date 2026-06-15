@@ -1,5 +1,7 @@
 #pragma once
 
+#include "symft/batch_sampler.hpp"
+
 #include <complex>
 #include <cstddef>
 #include <cstdint>
