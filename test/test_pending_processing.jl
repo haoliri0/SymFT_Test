@@ -142,16 +142,16 @@ end
     ]
 
     state = PendingFactoredState(2, 1)
-    before_alpha = copy(state.active.alpha)
     instruction = process_pending_measurement!(
         state,
         PendingPauliMeasurement(SymbolicPauliString(pauli_string("ZX"))),
     )
     @test factored_instructions(state) == FactoredInstruction[
+        ApplyActiveBasisChange(:H, 0),
         IntroduceDormantMeasurementBranch(1, symbolic_bool(1), 1),
     ]
     @test instruction == IntroduceDormantMeasurementBranch(1, symbolic_bool(1), 1)
-    @test state.active.alpha == before_alpha
+    @test state.active.alpha == ComplexF64[1.0 + 0.0im, 0.0 + 0.0im]
 
     full_state = FrameFactoredState(1, 0)
     apply_pauli_measurement!(full_state, pauli_z(1, 0))

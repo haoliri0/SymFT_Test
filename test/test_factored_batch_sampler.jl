@@ -73,6 +73,22 @@ end
     @test sample_measurements(program, 3; batches = 2, values) == falses(3, 1)
 end
 
+@testset "BatchFactoredExecutorState active basis change" begin
+    program = FactoredInstructionProgram(
+        1,
+        1,
+        ActiveState(1),
+        FactoredInstruction[ApplyActiveBasisChange(:H, 0)],
+        1,
+    )
+    runtime = BatchFactoredExecutorState(program; batches = 4)
+    execute!(runtime, program)
+
+    expected = ComplexF64[inv(sqrt(2.0)), inv(sqrt(2.0))]
+    @test runtime.active[1:4, 1] ≈ fill(expected[1], 4)
+    @test runtime.active[1:4, 2] ≈ fill(expected[2], 4)
+end
+
 @testset "BatchFactoredExecutorState active measurement branches by shot" begin
     program = FactoredInstructionProgram(
         1,

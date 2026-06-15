@@ -318,6 +318,11 @@ struct ApplyPrecomputedActivePauliRotation {
     SymbolicBoolEvaluationPlan sign_plan;
 };
 
+struct ApplyActiveBasisChange {
+    char kind = 'H';
+    int qubit = 0;
+};
+
 struct PromoteDormantRotation {
     double theta = 0.0;
     SymbolicBool sign;
@@ -359,6 +364,7 @@ struct IntroduceDormantMeasurementBranch {
 
 using FactoredInstruction = std::variant<
     ApplyPrecomputedActivePauliRotation,
+    ApplyActiveBasisChange,
     PromoteDormantRotation,
     RecordMeasurement,
     MeasureActiveLastZ,
@@ -366,6 +372,7 @@ using FactoredInstruction = std::variant<
     IntroduceDormantMeasurementBranch>;
 
 bool operator==(const ApplyPrecomputedActivePauliRotation& lhs, const ApplyPrecomputedActivePauliRotation& rhs);
+bool operator==(const ApplyActiveBasisChange& lhs, const ApplyActiveBasisChange& rhs);
 bool operator==(const PromoteDormantRotation& lhs, const PromoteDormantRotation& rhs);
 bool operator==(const RecordMeasurement& lhs, const RecordMeasurement& rhs);
 bool operator==(const MeasureActiveLastZ& lhs, const MeasureActiveLastZ& rhs);

@@ -105,12 +105,22 @@ function _transform_pending_operations_by_basis_changes!(state::PendingFactoredS
     return state
 end
 
+function _emit_active_basis_change_if_needed!(state::PendingFactoredState, change::Tuple)
+    kind = change[1]
+    (kind === :H || kind === :S) || return nothing
+    q = Int(change[2])
+    q < state.k || return nothing
+    _push_instruction!(state, ApplyActiveBasisChange(kind, q))
+    return nothing
+end
+
 function _rewrite_current_and_pending_by_basis_change!(
     state::PendingFactoredState,
     current::PendingFactoredOperation,
     change::Tuple,
 )
     changes = Tuple[change]
+    _emit_active_basis_change_if_needed!(state, change)
     current = _transform_pending_operation_by_basis_changes(current, changes)
     _transform_pending_operations_by_basis_changes!(state, changes)
     return current

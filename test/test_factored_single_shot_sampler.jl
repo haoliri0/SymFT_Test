@@ -113,6 +113,20 @@ end
     @test sample_measurements(program) == Bool[true]
 end
 
+@testset "FactoredInstructionProgram single-shot active basis change" begin
+    program = FactoredInstructionProgram(
+        1,
+        1,
+        ActiveState(1),
+        FactoredInstruction[ApplyActiveBasisChange(:H, 0)],
+        1,
+    )
+    runtime = FactoredExecutorState(program)
+    execute!(runtime, program)
+
+    @test runtime.active.alpha ≈ ComplexF64[inv(sqrt(2.0)), inv(sqrt(2.0))]
+end
+
 @testset "FactoredInstructionProgram single-shot precomputed active rotation" begin
     program = FactoredInstructionProgram(
         8,

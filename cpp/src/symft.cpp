@@ -304,6 +304,10 @@ int max_condition(const ApplyPrecomputedActivePauliRotation& instruction) {
     return instruction.sign.max_condition();
 }
 
+int max_condition(const ApplyActiveBasisChange&) {
+    return 0;
+}
+
 int max_condition(const PromoteDormantRotation& instruction) {
     return instruction.sign.max_condition();
 }
@@ -1418,6 +1422,10 @@ bool operator==(const ApplyPrecomputedActivePauliRotation& lhs, const ApplyPreco
     return lhs.pauli == rhs.pauli && lhs.theta == rhs.theta && lhs.sign == rhs.sign;
 }
 
+bool operator==(const ApplyActiveBasisChange& lhs, const ApplyActiveBasisChange& rhs) {
+    return lhs.kind == rhs.kind && lhs.qubit == rhs.qubit;
+}
+
 bool operator==(const PromoteDormantRotation& lhs, const PromoteDormantRotation& rhs) {
     return lhs.theta == rhs.theta && lhs.sign == rhs.sign;
 }
@@ -1727,11 +1735,23 @@ void transform_pending_operations_by_basis_changes(PendingFactoredState& state, 
     }
 }
 
+void emit_active_basis_change_if_needed(PendingFactoredState& state, const BasisChange& change) {
+    if (change.kind != BasisChange::H && change.kind != BasisChange::S) {
+        return;
+    }
+    if (change.a >= state.k) {
+        return;
+    }
+    const char kind = change.kind == BasisChange::H ? 'H' : 'S';
+    push_instruction(state, ApplyActiveBasisChange{kind, change.a});
+}
+
 PendingPauliRotation rewrite_current_and_pending_by_basis_change(
     PendingFactoredState& state,
     const PendingPauliRotation& current,
     BasisChange change) {
     const std::vector<BasisChange> changes{change};
+    emit_active_basis_change_if_needed(state, change);
     transform_pending_operations_by_basis_changes(state, changes);
     return transform_operation_by_basis_changes(current, changes);
 }
@@ -1741,6 +1761,7 @@ PendingPauliMeasurement rewrite_current_and_pending_by_basis_change(
     const PendingPauliMeasurement& current,
     BasisChange change) {
     const std::vector<BasisChange> changes{change};
+    emit_active_basis_change_if_needed(state, change);
     transform_pending_operations_by_basis_changes(state, changes);
     return transform_operation_by_basis_changes(current, changes);
 }
@@ -2176,6 +2197,8 @@ namespace {
 void refresh_instruction_plans(ApplyPrecomputedActivePauliRotation& instruction) {
     instruction.sign_plan = SymbolicBoolEvaluationPlan(instruction.sign);
 }
+
+void refresh_instruction_plans(ApplyActiveBasisChange&) {}
 
 void refresh_instruction_plans(PromoteDormantRotation& instruction) {
     instruction.sign_plan = SymbolicBoolEvaluationPlan(instruction.sign);
@@ -2840,6 +2863,35 @@ void promote_first_dormant_rotation(FactoredExecutorState& runtime, double theta
     runtime.active.k = runtime.k;
 }
 
+void apply_active_basis_change(ActiveState& active, char kind, int q) {
+    if (q < 0 || q >= active.k) {
+        fail("active basis-change qubit is out of range");
+    }
+    const std::size_t dim = active.dim();
+    const std::size_t mask = std::size_t{1} << q;
+    if (kind == 'H') {
+        const double inv_sqrt2 = 1.0 / std::sqrt(2.0);
+        for (std::size_t base = 0; base < dim; ++base) {
+            if ((base & mask) != 0) {
+                continue;
+            }
+            const std::size_t paired = base | mask;
+            const Complex a0 = active.alpha[base];
+            const Complex a1 = active.alpha[paired];
+            active.alpha[base] = (a0 + a1) * inv_sqrt2;
+            active.alpha[paired] = (a0 - a1) * inv_sqrt2;
+        }
+    } else if (kind == 'S') {
+        for (std::size_t basis = 0; basis < dim; ++basis) {
+            if ((basis & mask) != 0) {
+                active.alpha[basis] *= Complex(0.0, 1.0);
+            }
+        }
+    } else {
+        fail("unsupported active basis change");
+    }
+}
+
 double active_last_z_probability_one(const ActiveState& active) {
     if (active.k <= 0) {
         fail("cannot measure last active qubit when k == 0");
@@ -2945,6 +2997,10 @@ void project_active_pauli_measurement(
 void execute_instruction(FactoredExecutorState& runtime, const ApplyPrecomputedActivePauliRotation& instruction) {
     const bool sign = eval_symbolic_bool(instruction.sign_plan, runtime);
     rotate_pauli(runtime.active, instruction.rotation_kernel, sign);
+}
+
+void execute_instruction(FactoredExecutorState& runtime, const ApplyActiveBasisChange& instruction) {
+    apply_active_basis_change(runtime.active, instruction.kind, instruction.qubit);
 }
 
 void execute_instruction(FactoredExecutorState& runtime, const PromoteDormantRotation& instruction) {

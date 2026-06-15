@@ -109,6 +109,31 @@ Base.:(==)(lhs::ApplyPrecomputedActivePauliRotation, rhs::ApplyPrecomputedActive
     lhs.sign_plan == rhs.sign_plan
 
 """
+    ApplyActiveBasisChange(kind, qubit)
+
+Internal coordinate-basis change on an active qubit. These are emitted only by
+pending-operation lowering when the tableau rewrite changes the active basis;
+physical Clifford gates are still absorbed into the outer Clifford frame during
+Stim parsing.
+"""
+struct ApplyActiveBasisChange <: FactoredInstruction
+    kind::Symbol
+    qubit::Int
+
+    function ApplyActiveBasisChange(kind::Symbol, qubit::Integer)
+        kind in (:H, :S) || throw(ArgumentError("unsupported active basis change $kind"))
+        qi = Int(qubit)
+        qi >= 0 || throw(ArgumentError("active basis-change qubit must be nonnegative"))
+        return new(kind, qi)
+    end
+end
+
+Base.copy(instruction::ApplyActiveBasisChange) =
+    ApplyActiveBasisChange(instruction.kind, instruction.qubit)
+Base.:(==)(lhs::ApplyActiveBasisChange, rhs::ApplyActiveBasisChange) =
+    lhs.kind == rhs.kind && lhs.qubit == rhs.qubit
+
+"""
     PromoteDormantRotation(theta, sign)
 
 Runtime instruction emitted when a dormant X/Y rotation promotes the first
@@ -320,6 +345,7 @@ end
 
 const FactoredInstructionUnion = Union{
     ApplyPrecomputedActivePauliRotation,
+    ApplyActiveBasisChange,
     PromoteDormantRotation,
     RecordMeasurement,
     MeasureActiveLastZ,

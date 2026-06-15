@@ -188,6 +188,14 @@ end
 
 function execute_instruction!(
     runtime::SharedActiveBatchExecutorState,
+    instruction::ApplyActiveBasisChange,
+)
+    _shared_apply_active_basis_change!(runtime, instruction.kind, instruction.qubit)
+    return runtime
+end
+
+function execute_instruction!(
+    runtime::SharedActiveBatchExecutorState,
     instruction::PromoteDormantRotation,
 )
     sign_bits = _eval_symbolic_bool!(runtime.base.eval_scratch, instruction.sign_plan, runtime.base)
@@ -551,6 +559,40 @@ function _shared_rotate_packet!(
         a1 = runtime.active[i1, packet]
         runtime.active[i0, packet] = c * a0 + right_coefficients[idx] * a1
         runtime.active[i1, packet] = c * a1 + left_coefficients[idx] * a0
+    end
+    return runtime
+end
+
+function _shared_apply_active_basis_change!(
+    runtime::SharedActiveBatchExecutorState,
+    kind::Symbol,
+    q::Int,
+)
+    base = runtime.base
+    0 <= q < base.k || throw(ArgumentError("active basis-change qubit is out of range"))
+    dim = _check_shared_active_storage(runtime)
+    mask = 1 << q
+    if kind === :H
+        invsqrt2 = inv(sqrt(2.0))
+        @inbounds for packet in 1:runtime.npackets
+            for basis in 0:(dim - 1)
+                (basis & mask) == 0 || continue
+                i0 = basis + 1
+                i1 = (basis | mask) + 1
+                a0 = runtime.active[i0, packet]
+                a1 = runtime.active[i1, packet]
+                runtime.active[i0, packet] = (a0 + a1) * invsqrt2
+                runtime.active[i1, packet] = (a0 - a1) * invsqrt2
+            end
+        end
+    elseif kind === :S
+        @inbounds for packet in 1:runtime.npackets
+            for basis in 0:(dim - 1)
+                (basis & mask) != 0 && (runtime.active[basis + 1, packet] *= 1.0im)
+            end
+        end
+    else
+        throw(ArgumentError("unsupported active basis change $kind"))
     end
     return runtime
 end

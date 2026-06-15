@@ -177,6 +177,11 @@ function execute_instruction!(runtime::FactoredExecutorState, instruction::Apply
     return runtime
 end
 
+function execute_instruction!(runtime::FactoredExecutorState, instruction::ApplyActiveBasisChange)
+    _apply_active_basis_change!(runtime.active, instruction.kind, instruction.qubit)
+    return runtime
+end
+
 function execute_instruction!(runtime::FactoredExecutorState, instruction::PromoteDormantRotation)
     sign = _eval_symbolic_bool(instruction.sign_plan, runtime)
     theta = sign ? -instruction.theta : instruction.theta
@@ -982,6 +987,31 @@ function _promote_first_dormant_rotation!(runtime::FactoredExecutorState, theta:
     runtime.ndormant -= 1
     runtime.active.k = runtime.k
     return runtime
+end
+
+function _apply_active_basis_change!(active::ActiveState, kind::Symbol, q::Int)
+    0 <= q < active.k || throw(ArgumentError("active basis-change qubit is out of range"))
+    dim = _check_active_storage(active)
+    mask = 1 << q
+    if kind === :H
+        invsqrt2 = inv(sqrt(2.0))
+        @inbounds for base in 0:(dim - 1)
+            (base & mask) == 0 || continue
+            i0 = base + 1
+            i1 = (base | mask) + 1
+            a0 = active.alpha[i0]
+            a1 = active.alpha[i1]
+            active.alpha[i0] = (a0 + a1) * invsqrt2
+            active.alpha[i1] = (a0 - a1) * invsqrt2
+        end
+    elseif kind === :S
+        @inbounds for basis in 0:(dim - 1)
+            (basis & mask) != 0 && (active.alpha[basis + 1] *= 1.0im)
+        end
+    else
+        throw(ArgumentError("unsupported active basis change $kind"))
+    end
+    return active
 end
 
 function _active_last_z_probability_one(active::ActiveState)

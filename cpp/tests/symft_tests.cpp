@@ -105,6 +105,37 @@ void test_active_rotation() {
     }
 }
 
+void test_active_basis_change_instruction() {
+    using namespace symft;
+    const FactoredInstructionProgram program(
+        1,
+        1,
+        ActiveState(1),
+        {ApplyActiveBasisChange{'H', 0}},
+        1,
+        SymbolicContext());
+
+    FactoredExecutorState runtime(program, 5);
+    execute_in_place(runtime, program);
+    const double inv_sqrt2 = 1.0 / std::sqrt(2.0);
+    require(approx(runtime.active.alpha[0], {inv_sqrt2, 0.0}), "active basis H scalar amplitude 0");
+    require(approx(runtime.active.alpha[1], {inv_sqrt2, 0.0}), "active basis H scalar amplitude 1");
+
+    BatchFactoredExecutorState batch(program, 4, 7);
+    execute_batch_in_place(batch, program);
+    for (int shot = 0; shot < batch.active_shots; ++shot) {
+        require(std::abs(batch.active_re[static_cast<std::size_t>(shot)] - inv_sqrt2) < 1e-10,
+                "active basis H batch amplitude 0 re");
+        require(std::abs(batch.active_im[static_cast<std::size_t>(shot)]) < 1e-10,
+                "active basis H batch amplitude 0 im");
+        const std::size_t off1 = static_cast<std::size_t>(batch.batches + shot);
+        require(std::abs(batch.active_re[off1] - inv_sqrt2) < 1e-10,
+                "active basis H batch amplitude 1 re");
+        require(std::abs(batch.active_im[off1]) < 1e-10,
+                "active basis H batch amplitude 1 im");
+    }
+}
+
 void test_parser_feedback() {
     using namespace symft;
     const auto parsed = parse_stim_text("M !0\nCX rec[-1] 1\nM 1\n");
@@ -196,6 +227,7 @@ int main() {
     test_pauli_algebra();
     test_clifford_frame();
     test_active_rotation();
+    test_active_basis_change_instruction();
     test_parser_feedback();
     test_t_gate_exact_rotation();
     test_presampled_exogenous();

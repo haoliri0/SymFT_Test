@@ -381,6 +381,11 @@ function execute_instruction!(runtime::BatchFactoredExecutorState, instruction::
     return runtime
 end
 
+function execute_instruction!(runtime::BatchFactoredExecutorState, instruction::ApplyActiveBasisChange)
+    _batch_apply_active_basis_change!(runtime, instruction.kind, instruction.qubit)
+    return runtime
+end
+
 function execute_instruction!(runtime::BatchFactoredExecutorState, instruction::PromoteDormantRotation)
     sign_bits = _eval_symbolic_bool!(runtime.eval_scratch, instruction.sign_plan, runtime)
     _batch_promote_first_dormant_rotation!(runtime, instruction.theta, sign_bits)
@@ -1495,6 +1500,41 @@ function _copy_batch_active_scratch!(runtime::BatchFactoredExecutorState, dim::I
             1 + (basis - 1) * leading,
             runtime.active_shots,
         )
+    end
+    return runtime
+end
+
+function _batch_apply_active_basis_change!(
+    runtime::BatchFactoredExecutorState,
+    kind::Symbol,
+    q::Int,
+)
+    0 <= q < runtime.k || throw(ArgumentError("active basis-change qubit is out of range"))
+    dim = _check_batch_active_storage(runtime)
+    mask = 1 << q
+    if kind === :H
+        invsqrt2 = inv(sqrt(2.0))
+        @inbounds for base in 0:(dim - 1)
+            (base & mask) == 0 || continue
+            i0 = base + 1
+            i1 = (base | mask) + 1
+            @simd for shot in 1:runtime.active_shots
+                a0 = runtime.active[shot, i0]
+                a1 = runtime.active[shot, i1]
+                runtime.active[shot, i0] = (a0 + a1) * invsqrt2
+                runtime.active[shot, i1] = (a0 - a1) * invsqrt2
+            end
+        end
+    elseif kind === :S
+        @inbounds for basis in 0:(dim - 1)
+            (basis & mask) != 0 || continue
+            idx = basis + 1
+            @simd for shot in 1:runtime.active_shots
+                runtime.active[shot, idx] *= 1.0im
+            end
+        end
+    else
+        throw(ArgumentError("unsupported active basis change $kind"))
     end
     return runtime
 end
