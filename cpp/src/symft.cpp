@@ -1125,6 +1125,7 @@ PrecomputedActivePauliRotationKernel::PrecomputedActivePauliRotationKernel(const
     }
     uniform_imag_pairs = action.zmask == 0;
     real_pair_flip = can_rotate_real_pair_flip(action);
+    pair_bit = static_cast<unsigned>(trailing_zeros64(action.xmask));
     const std::size_t pair_selector = action.xmask & (~action.xmask + 1);
     for (std::size_t left = 0; left < dim; ++left) {
         if ((left & pair_selector) != 0) {
@@ -1133,6 +1134,10 @@ PrecomputedActivePauliRotationKernel::PrecomputedActivePauliRotationKernel(const
         const std::size_t right = left ^ action.xmask;
         pair_left_indices.push_back(left);
         pair_right_indices.push_back(right);
+        if (real_pair_flip) {
+            real_pair_flip_basis_phase_signs.push_back(
+                is_odd_popcount(static_cast<std::uint64_t>(left) & action.zmask) ? -1.0 : 1.0);
+        }
         const Complex left_phase = active_action_phase(action, left);
         const Complex right_phase = active_action_phase(action, right);
         pair_left_minus_coefficients.push_back(minus_i_s * left_phase);
@@ -1156,6 +1161,8 @@ PrecomputedActivePauliMeasurementKernel precomputed_nondiagonal_measurement_kern
     out.source1_false.reserve(out_dim);
     out.coeff0_false.reserve(out_dim);
     out.coeff1_false.reserve(out_dim);
+    out.coeff1_false_real.reserve(out_dim);
+    out.coeff1_false_imag.reserve(out_dim);
     out.source0_true.reserve(out_dim);
     out.source1_true.reserve(out_dim);
     out.coeff0_true.reserve(out_dim);
@@ -1169,6 +1176,8 @@ PrecomputedActivePauliMeasurementKernel precomputed_nondiagonal_measurement_kern
         out.source1_false.push_back(x1);
         out.coeff0_false.push_back(Complex(inv_sqrt2, 0.0));
         out.coeff1_false.push_back(coeff);
+        out.coeff1_false_real.push_back(coeff.real());
+        out.coeff1_false_imag.push_back(coeff.imag());
         out.source0_true.push_back(x0);
         out.source1_true.push_back(x1);
         out.coeff0_true.push_back(Complex(inv_sqrt2, 0.0));

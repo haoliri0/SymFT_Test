@@ -9,7 +9,8 @@ namespace symft {
 namespace {
 
 constexpr int kDefaultBatchShots = 2048;
-constexpr std::size_t kDefaultBatchActiveAmplitudes = std::size_t{1} << 17;
+constexpr std::size_t kDefaultBatchActiveAmplitudes = std::size_t{1} << 16;
+constexpr std::size_t kXmaskRotationPairThreshold = 64;
 
 #if defined(__clang__)
 #define SYMFT_BATCH_SIMD_LOOP _Pragma("clang loop vectorize(enable) interleave(enable)")
@@ -183,8 +184,12 @@ void fill_batch_bits(std::vector<std::uint64_t>& bits, const BatchFactoredExecut
 
 void mask_batch_bits(std::vector<std::uint64_t>& bits, const BatchFactoredExecutorState& runtime) {
     const std::size_t nwords = runtime_batch_word_count(runtime);
-    for (std::size_t word = 0; word < nwords; ++word) {
-        bits[word] &= batch_live_word_mask(runtime, word);
+    if (nwords == 0) {
+        return;
+    }
+    const int live_bits = runtime.active_shots & 63;
+    if (live_bits != 0) {
+        bits[nwords - 1] &= low_bits_mask(live_bits);
     }
 }
 
@@ -276,9 +281,16 @@ void copy_bits_to_batch_symbol_unchecked(
     if (bits.size() < nwords) {
         fail("batch bit vector is too short");
     }
-    for (std::size_t word = 0; word < runtime.batch_words; ++word) {
-        runtime.value_words[batch_condition_offset(runtime, condition, word)] =
-            word < nwords ? bits[word] & batch_live_word_mask(runtime, word) : 0;
+    const std::size_t base = batch_condition_offset(runtime, condition, 0);
+    if (nwords == runtime.batch_words && (runtime.active_shots & 63) == 0) {
+        std::copy_n(bits.data(), nwords, runtime.value_words.data() + base);
+        return;
+    }
+    for (std::size_t word = 0; word < nwords; ++word) {
+        runtime.value_words[base + word] = bits[word] & batch_live_word_mask(runtime, word);
+    }
+    for (std::size_t word = nwords; word < runtime.batch_words; ++word) {
+        runtime.value_words[base + word] = 0;
     }
 }
 
@@ -332,9 +344,32 @@ void eval_symbolic_bool_batch(
         }
     }
     const std::size_t nwords = runtime_batch_word_count(runtime);
+    if (nwords == 1) {
+        std::uint64_t out0 = out[0];
+        for (int condition : plan.conditions) {
+            out0 ^= runtime.value_words[batch_condition_offset(runtime, condition, 0)];
+        }
+        out[0] = out0;
+        mask_batch_bits(out, runtime);
+        return;
+    }
+    if (nwords == 2) {
+        std::uint64_t out0 = out[0];
+        std::uint64_t out1 = out[1];
+        for (int condition : plan.conditions) {
+            const std::size_t base = batch_condition_offset(runtime, condition, 0);
+            out0 ^= runtime.value_words[base];
+            out1 ^= runtime.value_words[base + 1];
+        }
+        out[0] = out0;
+        out[1] = out1;
+        mask_batch_bits(out, runtime);
+        return;
+    }
     for (int condition : plan.conditions) {
+        const std::size_t base = batch_condition_offset(runtime, condition, 0);
         for (std::size_t word = 0; word < nwords; ++word) {
-            out[word] ^= runtime.value_words[batch_condition_offset(runtime, condition, word)];
+            out[word] ^= runtime.value_words[base + word];
         }
     }
     mask_batch_bits(out, runtime);
@@ -368,9 +403,16 @@ void write_batch_measurement_record(
             fail("measurement record id must be positive");
         }
         ensure_batch_measurement_storage(runtime, *record);
-        for (std::size_t word = 0; word < runtime.batch_words; ++word) {
-            runtime.measurement_words[batch_record_offset(runtime, *record, word)] =
-                word < nwords ? outcome_bits[word] & batch_live_word_mask(runtime, word) : 0;
+        const std::size_t base = batch_record_offset(runtime, *record, 0);
+        if (nwords == runtime.batch_words && (runtime.active_shots & 63) == 0) {
+            std::copy_n(outcome_bits.data(), nwords, runtime.measurement_words.data() + base);
+        } else {
+            for (std::size_t word = 0; word < nwords; ++word) {
+                runtime.measurement_words[base + word] = outcome_bits[word] & batch_live_word_mask(runtime, word);
+            }
+            for (std::size_t word = nwords; word < runtime.batch_words; ++word) {
+                runtime.measurement_words[base + word] = 0;
+            }
         }
     }
     assign_batch_symbol(runtime, record_condition, outcome_bits);
@@ -601,6 +643,19 @@ void rotate_uniform_imag_pairs_batch(
         sign_bits,
         kernel.pair_left_minus_coefficients.front().imag(),
         kernel.pair_left_plus_coefficients.front().imag());
+    if (kernel.pair_left_indices.size() >= kXmaskRotationPairThreshold) {
+        batch_simd::scalar_table().rotate_uniform_imag_xmask(
+            runtime.active_re.data(),
+            runtime.active_im.data(),
+            static_cast<std::size_t>(runtime.batches),
+            runtime.active_shots,
+            kernel.action.xmask,
+            kernel.pair_bit,
+            kernel.pair_left_indices.size(),
+            kernel.cos_theta,
+            coeffs.data());
+        return;
+    }
     batch_simd::scalar_table().rotate_uniform_imag_pairs(
         runtime.active_re.data(),
         runtime.active_im.data(),
@@ -622,6 +677,20 @@ void rotate_real_pair_flip_batch(
         sign_bits,
         kernel.pair_left_minus_coefficients.front().real(),
         kernel.pair_left_plus_coefficients.front().real());
+    if (kernel.pair_left_indices.size() >= kXmaskRotationPairThreshold) {
+        batch_simd::scalar_table().rotate_real_pair_flip_xmask(
+            runtime.active_re.data(),
+            runtime.active_im.data(),
+            static_cast<std::size_t>(runtime.batches),
+            runtime.active_shots,
+            kernel.action.xmask,
+            kernel.pair_bit,
+            kernel.real_pair_flip_basis_phase_signs.data(),
+            kernel.pair_left_indices.size(),
+            kernel.cos_theta,
+            coeffs.data());
+        return;
+    }
     batch_simd::scalar_table().rotate_real_pair_flip(
         runtime.active_re.data(),
         runtime.active_im.data(),
@@ -629,10 +698,10 @@ void rotate_real_pair_flip_batch(
         runtime.active_shots,
         kernel.pair_left_indices.data(),
         kernel.pair_right_indices.data(),
+        kernel.real_pair_flip_basis_phase_signs.data(),
         kernel.pair_left_indices.size(),
         kernel.cos_theta,
-        coeffs.data(),
-        kernel.action.zmask);
+        coeffs.data());
 }
 
 void rotate_pauli_batch(
@@ -838,7 +907,8 @@ void measure_nondiagonal_active_pauli_batch(
         runtime.active_shots,
         kernel.source0_false.data(),
         kernel.source1_false.data(),
-        kernel.coeff1_false.data(),
+        kernel.coeff1_false_real.data(),
+        kernel.coeff1_false_imag.data(),
         out_dim,
         runtime.branch_prob_true.data());
     sample_batch_measurement_branches_from_true(
@@ -856,7 +926,8 @@ void measure_nondiagonal_active_pauli_batch(
         runtime.active_shots,
         kernel.source0_false.data(),
         kernel.source1_false.data(),
-        kernel.coeff1_false.data(),
+        kernel.coeff1_false_real.data(),
+        kernel.coeff1_false_imag.data(),
         out_dim,
         branch_bits.data(),
         runtime.branch_invnorms.data());

@@ -20,17 +20,11 @@ bool batch_bit(const std::uint64_t* bits, int shot) {
     return (bits[static_cast<std::size_t>(shot >> 6)] & (std::uint64_t{1} << (shot & 63))) != 0;
 }
 
-bool is_odd_popcount(std::uint64_t value) {
-#if defined(__GNUC__) || defined(__clang__)
-    return (__builtin_popcountll(value) & 1) != 0;
-#else
-    bool parity = false;
-    while (value != 0) {
-        parity = !parity;
-        value &= value - 1;
-    }
-    return parity;
-#endif
+std::size_t insert_zero_bit(std::size_t packed, unsigned bit) {
+    const std::size_t low_mask = (std::size_t{1} << bit) - std::size_t{1};
+    const std::size_t low = packed & low_mask;
+    const std::size_t high = packed & ~low_mask;
+    return low | (high << 1);
 }
 
 void scalar_rotate_uniform_imag_pairs(
@@ -63,6 +57,38 @@ void scalar_rotate_uniform_imag_pairs(
     }
 }
 
+void scalar_rotate_uniform_imag_xmask(
+    double* re,
+    double* im,
+    std::size_t leading_shots,
+    int active_shots,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    std::size_t npairs,
+    double c,
+    const double* q_by_shot) {
+    for (std::size_t idx = 0; idx < npairs; ++idx) {
+        const std::size_t i0 = insert_zero_bit(idx, pair_bit);
+        const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
+        double* r0p = re + i0 * leading_shots;
+        double* i0p = im + i0 * leading_shots;
+        double* r1p = re + i1 * leading_shots;
+        double* i1p = im + i1 * leading_shots;
+        SYMFT_BATCH_SIMD_LOOP
+        for (int shot = 0; shot < active_shots; ++shot) {
+            const double q = q_by_shot[static_cast<std::size_t>(shot)];
+            const double r0 = r0p[shot];
+            const double i0v = i0p[shot];
+            const double r1 = r1p[shot];
+            const double i1v = i1p[shot];
+            r0p[shot] = c * r0 - q * i1v;
+            i0p[shot] = c * i0v + q * r1;
+            r1p[shot] = c * r1 - q * i0v;
+            i1p[shot] = c * i1v + q * r0;
+        }
+    }
+}
+
 void scalar_rotate_real_pair_flip(
     double* re,
     double* im,
@@ -70,20 +96,20 @@ void scalar_rotate_real_pair_flip(
     int active_shots,
     const std::size_t* left_indices,
     const std::size_t* right_indices,
+    const double* basis_phase_signs,
     std::size_t npairs,
     double c,
-    const double* q_by_shot,
-    std::uint64_t zmask) {
+    const double* q_by_shot) {
     for (std::size_t idx = 0; idx < npairs; ++idx) {
         const std::size_t i0 = left_indices[idx];
-        const double phase_sign = is_odd_popcount(static_cast<std::uint64_t>(i0) & zmask) ? -1.0 : 1.0;
+        const double basis_phase_sign = basis_phase_signs[idx];
         double* r0p = re + i0 * leading_shots;
         double* i0p = im + i0 * leading_shots;
         double* r1p = re + right_indices[idx] * leading_shots;
         double* i1p = im + right_indices[idx] * leading_shots;
         SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < active_shots; ++shot) {
-            const double q = phase_sign * q_by_shot[static_cast<std::size_t>(shot)];
+            const double q = basis_phase_sign * q_by_shot[static_cast<std::size_t>(shot)];
             const double r0 = r0p[shot];
             const double i0v = i0p[shot];
             const double r1 = r1p[shot];
@@ -92,6 +118,40 @@ void scalar_rotate_real_pair_flip(
             i0p[shot] = c * i0v - q * i1;
             r1p[shot] = c * r1 + q * r0;
             i1p[shot] = c * i1 + q * i0v;
+        }
+    }
+}
+
+void scalar_rotate_real_pair_flip_xmask(
+    double* re,
+    double* im,
+    std::size_t leading_shots,
+    int active_shots,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    const double* basis_phase_signs,
+    std::size_t npairs,
+    double c,
+    const double* q_by_shot) {
+    for (std::size_t idx = 0; idx < npairs; ++idx) {
+        const std::size_t i0 = insert_zero_bit(idx, pair_bit);
+        const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
+        const double basis_phase_sign = basis_phase_signs[idx];
+        double* r0p = re + i0 * leading_shots;
+        double* i0p = im + i0 * leading_shots;
+        double* r1p = re + i1 * leading_shots;
+        double* i1p = im + i1 * leading_shots;
+        SYMFT_BATCH_SIMD_LOOP
+        for (int shot = 0; shot < active_shots; ++shot) {
+            const double q = basis_phase_sign * q_by_shot[static_cast<std::size_t>(shot)];
+            const double r0 = r0p[shot];
+            const double i0v = i0p[shot];
+            const double r1 = r1p[shot];
+            const double i1v = i1p[shot];
+            r0p[shot] = c * r0 - q * r1;
+            i0p[shot] = c * i0v - q * i1v;
+            r1p[shot] = c * r1 + q * r0;
+            i1p[shot] = c * i1v + q * i0v;
         }
     }
 }
@@ -222,7 +282,8 @@ void scalar_nondiagonal_measure_true_prob(
     int active_shots,
     const std::size_t* source0_false,
     const std::size_t* source1_false,
-    const Complex* coeff1_false,
+    const double* coeff1_false_real,
+    const double* coeff1_false_imag,
     std::size_t out_dim,
     double* prob_true) {
     std::fill(prob_true, prob_true + active_shots, 0.0);
@@ -231,8 +292,8 @@ void scalar_nondiagonal_measure_true_prob(
         const double* i0p = im + source0_false[idx] * leading_shots;
         const double* r1p = re + source1_false[idx] * leading_shots;
         const double* i1p = im + source1_false[idx] * leading_shots;
-        const double c1r = coeff1_false[idx].real();
-        const double c1i = coeff1_false[idx].imag();
+        const double c1r = coeff1_false_real[idx];
+        const double c1i = coeff1_false_imag[idx];
         SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < active_shots; ++shot) {
             const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
@@ -253,7 +314,8 @@ void scalar_nondiagonal_project(
     int active_shots,
     const std::size_t* source0_false,
     const std::size_t* source1_false,
-    const Complex* coeff1_false,
+    const double* coeff1_false_real,
+    const double* coeff1_false_imag,
     std::size_t out_dim,
     const std::uint64_t* branch_bits,
     const double* invnorms) {
@@ -264,8 +326,8 @@ void scalar_nondiagonal_project(
         const double* i1p = im + source1_false[idx] * leading_shots;
         double* dst_r = scratch_re + idx * leading_shots;
         double* dst_i = scratch_im + idx * leading_shots;
-        const double c1r = coeff1_false[idx].real();
-        const double c1i = coeff1_false[idx].imag();
+        const double c1r = coeff1_false_real[idx];
+        const double c1i = coeff1_false_imag[idx];
         SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < active_shots; ++shot) {
             const double branch_sign = batch_bit(branch_bits, shot) ? -1.0 : 1.0;
@@ -285,7 +347,9 @@ const KernelTable table = {
     "autovec",
 #endif
     scalar_rotate_uniform_imag_pairs,
+    scalar_rotate_uniform_imag_xmask,
     scalar_rotate_real_pair_flip,
+    scalar_rotate_real_pair_flip_xmask,
     scalar_promote_first_dormant_rotation,
     scalar_last_z_measure_true_prob,
     scalar_last_z_project,

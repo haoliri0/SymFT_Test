@@ -22,6 +22,17 @@ struct KernelTable {
         double c,
         const double* q_by_shot);
 
+    void (*rotate_uniform_imag_xmask)(
+        double* re,
+        double* im,
+        std::size_t leading_shots,
+        int active_shots,
+        std::uint64_t xmask,
+        unsigned pair_bit,
+        std::size_t npairs,
+        double c,
+        const double* q_by_shot);
+
     void (*rotate_real_pair_flip)(
         double* re,
         double* im,
@@ -29,10 +40,22 @@ struct KernelTable {
         int active_shots,
         const std::size_t* left_indices,
         const std::size_t* right_indices,
+        const double* basis_phase_signs,
         std::size_t npairs,
         double c,
-        const double* q_by_shot,
-        std::uint64_t zmask);
+        const double* q_by_shot);
+
+    void (*rotate_real_pair_flip_xmask)(
+        double* re,
+        double* im,
+        std::size_t leading_shots,
+        int active_shots,
+        std::uint64_t xmask,
+        unsigned pair_bit,
+        const double* basis_phase_signs,
+        std::size_t npairs,
+        double c,
+        const double* q_by_shot);
 
     void (*promote_first_dormant_rotation)(
         double* re,
@@ -87,7 +110,8 @@ struct KernelTable {
         int active_shots,
         const std::size_t* source0_false,
         const std::size_t* source1_false,
-        const Complex* coeff1_false,
+        const double* coeff1_false_real,
+        const double* coeff1_false_imag,
         std::size_t out_dim,
         double* prob_true);
 
@@ -100,7 +124,8 @@ struct KernelTable {
         int active_shots,
         const std::size_t* source0_false,
         const std::size_t* source1_false,
-        const Complex* coeff1_false,
+        const double* coeff1_false_real,
+        const double* coeff1_false_imag,
         std::size_t out_dim,
         const std::uint64_t* branch_bits,
         const double* invnorms);
