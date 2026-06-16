@@ -1,6 +1,6 @@
 #include "active_kernels.hpp"
 
-#include "symft/simd/simd.hpp"
+#include "simd/simd.hpp"
 
 #include <algorithm>
 #include <cmath>

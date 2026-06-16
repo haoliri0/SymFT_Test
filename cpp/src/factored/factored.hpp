@@ -1,7 +1,7 @@
 #pragma once
 
-#include "symft/core/frames.hpp"
-#include "symft/sampler/active.hpp"
+#include "core/frames.hpp"
+#include "sampler/active.hpp"
 
 #include <memory>
 #include <optional>

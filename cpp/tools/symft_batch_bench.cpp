@@ -1,4 +1,5 @@
-#include "symft/symft.hpp"
+#include "frontend/stim.hpp"
+#include "sampler/batch_sampler.hpp"
 
 #include <algorithm>
 #include <cerrno>

@@ -1,4 +1,4 @@
-#include "symft/simd/simd.hpp"
+#include "simd/simd.hpp"
 
 #if defined(__GNUC__) || defined(__clang__)
 #define SYMFT_GNU_CPU_SUPPORTS 1

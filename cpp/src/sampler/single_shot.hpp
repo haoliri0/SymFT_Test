@@ -1,7 +1,7 @@
 #pragma once
 
-#include "symft/factored/factored.hpp"
-#include "symft/sampler/batch_sampler.hpp"
+#include "factored/factored.hpp"
+#include "sampler/batch_sampler.hpp"
 
 #include <cstddef>
 #include <cstdint>

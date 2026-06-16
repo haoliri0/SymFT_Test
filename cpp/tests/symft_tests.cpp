@@ -1,4 +1,6 @@
-#include "symft/symft.hpp"
+#include "frontend/stim.hpp"
+#include "sampler/batch_sampler.hpp"
+#include "sampler/single_shot.hpp"
 
 #include <cmath>
 #include <complex>

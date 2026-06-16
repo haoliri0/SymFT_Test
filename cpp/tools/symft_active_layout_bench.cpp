@@ -1,5 +1,5 @@
-#include "symft/simd/simd.hpp"
-#include "symft/symft.hpp"
+#include "simd/simd.hpp"
+#include "sampler/active.hpp"
 
 #include <algorithm>
 #include <chrono>

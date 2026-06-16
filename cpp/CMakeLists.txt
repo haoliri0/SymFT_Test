@@ -32,7 +32,7 @@ add_library(symft_cpp
     src/simd/simd_scalar.cpp
 )
 
-target_include_directories(symft_cpp PUBLIC include)
+target_include_directories(symft_cpp PUBLIC src)
 target_compile_features(symft_cpp PUBLIC cxx_std_20)
 target_compile_options(symft_cpp PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic>

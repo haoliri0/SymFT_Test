@@ -1,6 +1,6 @@
 #pragma once
 
-#include "symft/core/pauli.hpp"
+#include "core/pauli.hpp"
 
 #include <cstddef>
 #include <cstdint>

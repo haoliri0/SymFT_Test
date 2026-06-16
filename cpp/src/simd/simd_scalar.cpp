@@ -1,4 +1,4 @@
-#include "symft/simd/simd.hpp"
+#include "simd/simd.hpp"
 
 #include <cmath>
 

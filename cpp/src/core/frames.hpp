@@ -1,7 +1,7 @@
 #pragma once
 
-#include "symft/core/pauli.hpp"
-#include "symft/core/symbolic.hpp"
+#include "core/pauli.hpp"
+#include "core/symbolic.hpp"
 
 #include <memory>
 

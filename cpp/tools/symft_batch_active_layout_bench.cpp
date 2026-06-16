@@ -1,5 +1,6 @@
-#include "symft/simd/batch_simd.hpp"
-#include "symft/symft.hpp"
+#include "simd/batch_simd.hpp"
+#include "sampler/active.hpp"
+#include "sampler/batch_sampler.hpp"
 
 #include <algorithm>
 #include <chrono>

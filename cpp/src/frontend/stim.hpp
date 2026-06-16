@@ -1,6 +1,6 @@
 #pragma once
 
-#include "symft/circuit/circuit.hpp"
+#include "circuit/circuit.hpp"
 
 #include <cstdint>
 #include <string>

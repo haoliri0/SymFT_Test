@@ -1,6 +1,7 @@
 #pragma once
 
-#include "symft/symft.hpp"
+#include "frontend/stim.hpp"
+#include "sampler/single_shot.hpp"
 
 #include <algorithm>
 #include <cmath>

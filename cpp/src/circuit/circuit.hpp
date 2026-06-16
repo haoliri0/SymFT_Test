@@ -1,6 +1,6 @@
 #pragma once
 
-#include "symft/factored/factored.hpp"
+#include "factored/factored.hpp"
 
 #include <vector>
 

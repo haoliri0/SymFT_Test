@@ -1,6 +1,6 @@
 #pragma once
 
-#include "symft/core/common.hpp"
+#include "core/common.hpp"
 
 #include <iosfwd>
 #include <string>

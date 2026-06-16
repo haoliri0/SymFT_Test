@@ -1,7 +1,7 @@
 #pragma once
 
-#include "symft/symft.hpp"
-#include "symft/simd/batch_simd.hpp"
+#include "sampler/single_shot.hpp"
+#include "simd/batch_simd.hpp"
 
 #include <algorithm>
 #include <cmath>
