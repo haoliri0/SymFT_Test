@@ -735,6 +735,4 @@ void right_SWAP(CliffordFrame& frame, int a, int b) {
     right_apply_left_gate(frame, [a, b](CliffordFrame& gate) { left_SWAP(gate, a, b); });
 }
 
-ActiveState::ActiveState() : k(0), alpha{Complex(1.0, 0.0)} {}
-
 } // namespace symft

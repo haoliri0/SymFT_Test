@@ -10,6 +10,8 @@
 namespace symft {
 using namespace detail;
 
+ActiveState::ActiveState() : k(0), alpha{Complex(1.0, 0.0)} {}
+
 ActiveState::ActiveState(int k_) : k(checked_nqubits(k_)), alpha(active_length(k), Complex(0.0, 0.0)) {
     alpha[0] = Complex(1.0, 0.0);
 }
