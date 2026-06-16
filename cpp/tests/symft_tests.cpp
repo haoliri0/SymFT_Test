@@ -147,6 +147,37 @@ void test_parser_feedback() {
     require(packed_bit(records, 0) && packed_bit(records, 1), "feedback deterministic records");
 }
 
+void test_stim_frontend_circuit_lowering() {
+    using namespace symft;
+    const auto circuit = parse_stim_circuit_text("REPEAT 2 {\nM !0\n}\nDETECTOR rec[-1] rec[-2]\n");
+    require(circuit.nqubits == 1, "circuit qubit count");
+    require(circuit.nrecords == 2, "circuit record count");
+    require(circuit.instructions.size() == 2, "circuit flattened repeat instructions");
+    require(circuit.instructions[0].kind == CircuitInstructionKind::MZ, "circuit measurement kind");
+    require(circuit.instructions[0].measurement_targets[0].inverted, "circuit inverted measurement target");
+    require(circuit.detectors.size() == 1, "circuit detector count");
+    require(circuit.detectors[0].records[0] == 2 && circuit.detectors[0].records[1] == 1, "circuit detector records resolved");
+
+    const auto lowered = lower_circuit_to_factored(circuit);
+    require(lowered.measurement_records.size() == 2, "lowered record count");
+    PendingFactoredState pending(lowered.state);
+    const auto program = plan_factored_updates(pending);
+    const auto records = sample_measurements(program);
+    require(packed_bit(records, 0) && packed_bit(records, 1), "lowered circuit deterministic records");
+
+    const auto cy_feedback = parse_stim_text("M !0\nCY rec[-1] 1\nM 1\n");
+    PendingFactoredState pending_cy(cy_feedback.state);
+    const auto cy_program = plan_factored_updates(pending_cy);
+    const auto cy_records = sample_measurements(cy_program);
+    require(packed_bit(cy_records, 0) && packed_bit(cy_records, 1), "CY feedback deterministic records");
+
+    const auto ordinary_cy = parse_stim_text("X 0\nCY 0 1\nM 1\n");
+    PendingFactoredState pending_ordinary_cy(ordinary_cy.state);
+    const auto ordinary_cy_program = plan_factored_updates(pending_ordinary_cy);
+    const auto ordinary_cy_records = sample_measurements(ordinary_cy_program);
+    require(packed_bit(ordinary_cy_records, 0), "ordinary CY deterministic target record");
+}
+
 void test_t_gate_exact_rotation() {
     using namespace symft;
     const auto parsed = parse_stim_text("H 0\nT 0\nM 0\n");
@@ -230,6 +261,7 @@ int main() {
     test_active_rotation();
     test_active_basis_change_instruction();
     test_parser_feedback();
+    test_stim_frontend_circuit_lowering();
     test_t_gate_exact_rotation();
     test_presampled_exogenous();
     test_batch_sampler();

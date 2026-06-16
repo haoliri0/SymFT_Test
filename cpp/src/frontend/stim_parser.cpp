@@ -224,10 +224,10 @@ int stim_record_index(const std::string& target, int nrecords) {
     return idx;
 }
 
-std::vector<int> stim_record_indices(const StimInstruction& inst, const std::vector<SymbolicBool>& records) {
+std::vector<int> stim_record_indices(const StimInstruction& inst, int nrecords) {
     std::vector<int> out;
     for (const auto& target : inst.targets) {
-        out.push_back(stim_record_index(target, static_cast<int>(records.size())));
+        out.push_back(stim_record_index(target, nrecords));
     }
     return out;
 }
@@ -361,20 +361,6 @@ std::vector<std::string> stim_mpp_targets(const StimInstruction& inst) {
     return groups;
 }
 
-std::pair<int, int> reserve_measurement_record(std::vector<SymbolicBool>& records, SymbolicContext& context) {
-    const int condition = context.fresh_condition();
-    records.push_back(symbolic_bool(condition));
-    return {static_cast<int>(records.size()), condition};
-}
-
-SymbolicBool measurement_sign_with_readout_error(SymbolicContext& context, bool inverted, double probability) {
-    SymbolicBool sign(inverted);
-    if (probability != 0.0) {
-        sign = xor_bool(sign, context.fresh_bernoulli_bool(probability));
-    }
-    return sign;
-}
-
 std::vector<double> coords_with_shift(const std::vector<double>& coords, const std::vector<double>& shift) {
     std::vector<double> out(std::max(coords.size(), shift.size()), 0.0);
     for (std::size_t i = 0; i < out.size(); ++i) {
@@ -388,261 +374,210 @@ std::vector<double> coords_with_shift(const std::vector<double>& coords, const s
     return out;
 }
 
-struct StimAccumulator {
-    FrameFactoredState state;
-    std::vector<SymbolicBool> records;
-    std::vector<StimDetector> detectors;
-    std::vector<StimObservableInclude> observables;
+struct StimCircuitBuilder {
+    QuantumCircuit circuit;
     std::vector<double> coord_shift;
 };
 
-void apply_depolarize1(FrameFactoredState& state, int q, double probability) {
-    const std::vector<std::vector<std::uint64_t>> assignments{
-        packed_bits({false, false}),
-        packed_bits({false, true}),
-        packed_bits({true, false}),
-        packed_bits({true, true}),
-    };
-    const auto bits = state.context->fresh_categorical_bools(2, assignments, {1.0 - probability, probability / 3.0, probability / 3.0, probability / 3.0});
-    apply_pauli(state, pauli_x(state.n, q), bits[0]);
-    apply_pauli(state, pauli_z(state.n, q), bits[1]);
+CircuitInstruction new_circuit_instruction(CircuitInstructionKind kind, int line) {
+    CircuitInstruction instruction;
+    instruction.kind = kind;
+    instruction.line = line;
+    return instruction;
 }
 
-void apply_depolarize2(FrameFactoredState& state, int q1, int q2, double probability) {
-    std::vector<std::vector<std::uint64_t>> assignments;
-    assignments.push_back(packed_bits({false, false, false, false}));
-    for (bool x1 : {false, true}) {
-        for (bool z1 : {false, true}) {
-            for (bool x2 : {false, true}) {
-                for (bool z2 : {false, true}) {
-                    if (x1 || z1 || x2 || z2) {
-                        assignments.push_back(packed_bits({x1, z1, x2, z2}));
-                    }
-                }
-            }
-        }
+std::vector<CircuitMeasurementTarget> circuit_measurement_targets(const StimInstruction& inst) {
+    std::vector<CircuitMeasurementTarget> out;
+    for (auto [q, inverted] : stim_measurement_targets(inst)) {
+        out.push_back({q, inverted});
     }
-    std::vector<double> probabilities(16, probability / 15.0);
-    probabilities[0] = 1.0 - probability;
-    const auto bits = state.context->fresh_categorical_bools(4, assignments, probabilities);
-    apply_pauli(state, pauli_x(state.n, q1), bits[0]);
-    apply_pauli(state, pauli_z(state.n, q1), bits[1]);
-    apply_pauli(state, pauli_x(state.n, q2), bits[2]);
-    apply_pauli(state, pauli_z(state.n, q2), bits[3]);
+    return out;
 }
 
-void apply_record_feedback(FrameFactoredState& state, const std::vector<SymbolicBool>& records, const StimInstruction& inst) {
+std::vector<CircuitPauliProduct> circuit_mpp_targets(int n, const StimInstruction& inst) {
+    std::vector<CircuitPauliProduct> out;
+    for (const auto& target : stim_mpp_targets(inst)) {
+        auto [pauli, inverted] = stim_mpp_pauli(n, target);
+        out.push_back({std::move(pauli), inverted});
+    }
+    return out;
+}
+
+void append_record_feedback(StimCircuitBuilder& builder, const StimInstruction& inst, CircuitInstructionKind kind) {
     if ((inst.targets.size() & 1u) != 0u) {
         fail("record-controlled feedback requires paired targets");
     }
+    CircuitInstruction instruction = new_circuit_instruction(kind, inst.line);
     for (std::size_t i = 0; i < inst.targets.size(); i += 2) {
-        const int record = stim_record_index(inst.targets[i], static_cast<int>(records.size()));
+        const int record = stim_record_index(inst.targets[i], builder.circuit.nrecords);
         auto [q, inverted] = stim_qubit_target(inst.targets[i + 1], inst.line);
         if (inverted) {
             fail("record-controlled feedback does not accept inverted qubit targets");
         }
-        const PauliString pauli = (inst.op == "CX" || inst.op == "CNOT") ? pauli_x(state.n, q) : pauli_z(state.n, q);
-        apply_pauli(state, pauli, records[static_cast<std::size_t>(record - 1)]);
+        instruction.feedback_targets.push_back({record, q});
     }
+    builder.circuit.instructions.push_back(std::move(instruction));
 }
 
-void apply_reset(FrameFactoredState& state, const PauliString& measurement_pauli, const PauliString& correction_pauli) {
-    const int condition = state.context->fresh_condition();
-    apply_pauli_measurement(state, measurement_pauli, SymbolicBool(false), std::nullopt, condition);
-    apply_pauli(state, correction_pauli, symbolic_bool(condition));
+void append_qubit_instruction(StimCircuitBuilder& builder, const StimInstruction& inst, CircuitInstructionKind kind) {
+    CircuitInstruction instruction = new_circuit_instruction(kind, inst.line);
+    instruction.qubits = stim_qubit_targets(inst);
+    builder.circuit.instructions.push_back(std::move(instruction));
 }
 
-void apply_measurement_reset(
-    FrameFactoredState& state,
-    std::vector<SymbolicBool>& records,
-    const PauliString& measurement_pauli,
-    const PauliString& correction_pauli,
-    bool inverted,
-    double probability) {
-    const SymbolicBool sign = measurement_sign_with_readout_error(*state.context, inverted, probability);
-    auto [record, record_condition] = reserve_measurement_record(records, *state.context);
-    apply_pauli_measurement(state, measurement_pauli, sign, record, record_condition);
-    apply_pauli(state, correction_pauli, xor_bool(symbolic_bool(record_condition), sign));
+void append_measurement_instruction(StimCircuitBuilder& builder, const StimInstruction& inst, CircuitInstructionKind kind) {
+    CircuitInstruction instruction = new_circuit_instruction(kind, inst.line);
+    instruction.probability = stim_paren_probability(inst);
+    instruction.measurement_targets = circuit_measurement_targets(inst);
+    builder.circuit.nrecords += static_cast<int>(instruction.measurement_targets.size());
+    builder.circuit.instructions.push_back(std::move(instruction));
 }
 
-void apply_instruction(StimAccumulator& acc, const StimInstruction& inst) {
-    FrameFactoredState& state = acc.state;
+void append_instruction(StimCircuitBuilder& builder, const StimInstruction& inst) {
     const std::string& op = inst.op;
-    if (op == "QUBIT_COORDS" || op == "TICK") {
+    if (op == "QUBIT_COORDS") {
+        return;
+    }
+    if (op == "TICK") {
+        builder.circuit.instructions.push_back(new_circuit_instruction(CircuitInstructionKind::Tick, inst.line));
         return;
     }
     if (op == "SHIFT_COORDS") {
-        if (acc.coord_shift.size() < inst.parens.size()) {
-            acc.coord_shift.resize(inst.parens.size(), 0.0);
+        if (builder.coord_shift.size() < inst.parens.size()) {
+            builder.coord_shift.resize(inst.parens.size(), 0.0);
         }
         for (std::size_t i = 0; i < inst.parens.size(); ++i) {
-            acc.coord_shift[i] += inst.parens[i];
+            builder.coord_shift[i] += inst.parens[i];
         }
         return;
     }
     if (op == "DETECTOR") {
-        acc.detectors.push_back({stim_record_indices(inst, acc.records), coords_with_shift(inst.parens, acc.coord_shift), inst.line});
+        builder.circuit.detectors.push_back(
+            {stim_record_indices(inst, builder.circuit.nrecords),
+             coords_with_shift(inst.parens, builder.coord_shift),
+             inst.line});
         return;
     }
     if (op == "OBSERVABLE_INCLUDE") {
         if (inst.parens.size() != 1 || inst.parens[0] < 0.0) {
             fail("OBSERVABLE_INCLUDE expects one nonnegative observable index");
         }
-        acc.observables.push_back({static_cast<int>(std::llround(inst.parens[0])), stim_record_indices(inst, acc.records), inst.line});
+        builder.circuit.observables.push_back(
+            {static_cast<int>(std::llround(inst.parens[0])),
+             stim_record_indices(inst, builder.circuit.nrecords),
+             inst.line});
         return;
     }
-    if ((op == "CX" || op == "CNOT" || op == "CZ") && !inst.targets.empty() && starts_with(inst.targets[0], "rec[")) {
-        apply_record_feedback(state, acc.records, inst);
+    if ((op == "CX" || op == "CNOT" || op == "CY" || op == "CZ") && !inst.targets.empty() && starts_with(inst.targets[0], "rec[")) {
+        const CircuitInstructionKind kind = (op == "CX" || op == "CNOT")
+                                                ? CircuitInstructionKind::FeedbackX
+                                                : (op == "CY" ? CircuitInstructionKind::FeedbackY
+                                                              : CircuitInstructionKind::FeedbackZ);
+        append_record_feedback(builder, inst, kind);
         return;
     }
     if (op == "CX" || op == "CNOT") {
-        const auto qs = stim_qubit_targets(inst);
-        if ((qs.size() & 1u) != 0u) {
-            fail("CX requires paired targets");
-        }
-        for (std::size_t i = 0; i < qs.size(); i += 2) {
-            left_CX(state, qs[i], qs[i + 1]);
-        }
+        append_qubit_instruction(builder, inst, CircuitInstructionKind::CX);
+    } else if (op == "CY") {
+        append_qubit_instruction(builder, inst, CircuitInstructionKind::CY);
     } else if (op == "CZ") {
-        const auto qs = stim_qubit_targets(inst);
-        if ((qs.size() & 1u) != 0u) {
-            fail("CZ requires paired targets");
-        }
-        for (std::size_t i = 0; i < qs.size(); i += 2) {
-            left_CZ(state, qs[i], qs[i + 1]);
-        }
+        append_qubit_instruction(builder, inst, CircuitInstructionKind::CZ);
     } else if (op == "SWAP") {
-        const auto qs = stim_qubit_targets(inst);
-        if ((qs.size() & 1u) != 0u) {
-            fail("SWAP requires paired targets");
-        }
-        for (std::size_t i = 0; i < qs.size(); i += 2) {
-            left_SWAP(state, qs[i], qs[i + 1]);
-        }
+        append_qubit_instruction(builder, inst, CircuitInstructionKind::SWAP);
     } else if (op == "H") {
-        for (int q : stim_qubit_targets(inst)) {
-            left_H(state, q);
-        }
+        append_qubit_instruction(builder, inst, CircuitInstructionKind::H);
     } else if (op == "S" || op == "SQRT_Z") {
-        for (int q : stim_qubit_targets(inst)) {
-            left_S(state, q);
-        }
+        append_qubit_instruction(builder, inst, CircuitInstructionKind::S);
     } else if (op == "S_DAG" || op == "SQRT_Z_DAG") {
-        for (int q : stim_qubit_targets(inst)) {
-            left_SDG(state, q);
-        }
-    } else if (op == "X" || op == "Y" || op == "Z") {
-        for (int q : stim_qubit_targets(inst)) {
-            if (op == "X") {
-                left_X(state, q);
-            } else if (op == "Z") {
-                left_Z(state, q);
-            } else {
-                left_X(state, q);
-                left_Z(state, q);
-            }
-        }
-    } else if (op == "T" || op == "T_DAG") {
-        const double theta = (op == "T") ? kPi / 8.0 : -kPi / 8.0;
-        for (int q : stim_qubit_targets(inst)) {
-            apply_pauli_rotation(state, pauli_z(state.n, q), theta);
-        }
+        append_qubit_instruction(builder, inst, CircuitInstructionKind::SDG);
+    } else if (op == "X") {
+        append_qubit_instruction(builder, inst, CircuitInstructionKind::X);
+    } else if (op == "Y") {
+        append_qubit_instruction(builder, inst, CircuitInstructionKind::Y);
+    } else if (op == "Z") {
+        append_qubit_instruction(builder, inst, CircuitInstructionKind::Z);
+    } else if (op == "T") {
+        append_qubit_instruction(builder, inst, CircuitInstructionKind::T);
+    } else if (op == "T_DAG") {
+        append_qubit_instruction(builder, inst, CircuitInstructionKind::TDag);
     } else if (op == "M" || op == "MZ" || op == "MX" || op == "MY") {
-        const double probability = stim_paren_probability(inst);
-        for (auto [q, inverted] : stim_measurement_targets(inst)) {
-            const SymbolicBool sign = measurement_sign_with_readout_error(*state.context, inverted, probability);
-            auto [record, record_condition] = reserve_measurement_record(acc.records, *state.context);
-            const PauliString pauli = op == "MX" ? pauli_x(state.n, q) : (op == "MY" ? pauli_y(state.n, q) : pauli_z(state.n, q));
-            apply_pauli_measurement(state, pauli, sign, record, record_condition);
-        }
+        append_measurement_instruction(
+            builder,
+            inst,
+            op == "MX" ? CircuitInstructionKind::MX : (op == "MY" ? CircuitInstructionKind::MY : CircuitInstructionKind::MZ));
     } else if (op == "MR" || op == "MRZ" || op == "MRX" || op == "MRY") {
-        const double probability = stim_paren_probability(inst);
-        for (auto [q, inverted] : stim_measurement_targets(inst)) {
-            if (op == "MRX") {
-                apply_measurement_reset(state, acc.records, pauli_x(state.n, q), pauli_z(state.n, q), inverted, probability);
-            } else if (op == "MRY") {
-                apply_measurement_reset(state, acc.records, pauli_y(state.n, q), pauli_x(state.n, q), inverted, probability);
-            } else {
-                apply_measurement_reset(state, acc.records, pauli_z(state.n, q), pauli_x(state.n, q), inverted, probability);
-            }
-        }
+        append_measurement_instruction(
+            builder,
+            inst,
+            op == "MRX" ? CircuitInstructionKind::MRX : (op == "MRY" ? CircuitInstructionKind::MRY : CircuitInstructionKind::MRZ));
     } else if (op == "R" || op == "RZ" || op == "RX" || op == "RY") {
-        for (int q : stim_qubit_targets(inst)) {
-            if (op == "RX") {
-                apply_reset(state, pauli_x(state.n, q), pauli_z(state.n, q));
-            } else if (op == "RY") {
-                apply_reset(state, pauli_y(state.n, q), pauli_x(state.n, q));
-            } else {
-                apply_reset(state, pauli_z(state.n, q), pauli_x(state.n, q));
-            }
-        }
+        append_qubit_instruction(
+            builder,
+            inst,
+            op == "RX" ? CircuitInstructionKind::RX : (op == "RY" ? CircuitInstructionKind::RY : CircuitInstructionKind::RZ));
     } else if (op == "MPP") {
-        const double probability = stim_paren_probability(inst);
-        for (const auto& target : stim_mpp_targets(inst)) {
-            auto [pauli, inverted] = stim_mpp_pauli(state.n, target);
-            const SymbolicBool sign = measurement_sign_with_readout_error(*state.context, inverted, probability);
-            auto [record, record_condition] = reserve_measurement_record(acc.records, *state.context);
-            apply_pauli_measurement(state, pauli, sign, record, record_condition);
-        }
+        CircuitInstruction instruction = new_circuit_instruction(CircuitInstructionKind::MPP, inst.line);
+        instruction.probability = stim_paren_probability(inst);
+        instruction.pauli_products = circuit_mpp_targets(builder.circuit.nqubits, inst);
+        builder.circuit.nrecords += static_cast<int>(instruction.pauli_products.size());
+        builder.circuit.instructions.push_back(std::move(instruction));
     } else if (op == "X_ERROR" || op == "Y_ERROR" || op == "Z_ERROR") {
-        const double probability = stim_required_probability(inst);
-        for (int q : stim_qubit_targets(inst)) {
-            const PauliString pauli = op == "X_ERROR" ? pauli_x(state.n, q) : (op == "Y_ERROR" ? pauli_y(state.n, q) : pauli_z(state.n, q));
-            apply_pauli(state, pauli, state.context->fresh_bernoulli_bool(probability));
-        }
+        CircuitInstruction instruction = new_circuit_instruction(
+            op == "X_ERROR" ? CircuitInstructionKind::XError
+                             : (op == "Y_ERROR" ? CircuitInstructionKind::YError : CircuitInstructionKind::ZError),
+            inst.line);
+        instruction.probability = stim_required_probability(inst);
+        instruction.qubits = stim_qubit_targets(inst);
+        builder.circuit.instructions.push_back(std::move(instruction));
     } else if (op == "DEPOLARIZE1") {
-        const double probability = stim_required_probability(inst);
-        for (int q : stim_qubit_targets(inst)) {
-            apply_depolarize1(state, q, probability);
-        }
+        CircuitInstruction instruction = new_circuit_instruction(CircuitInstructionKind::Depolarize1, inst.line);
+        instruction.probability = stim_required_probability(inst);
+        instruction.qubits = stim_qubit_targets(inst);
+        builder.circuit.instructions.push_back(std::move(instruction));
     } else if (op == "DEPOLARIZE2") {
-        const double probability = stim_required_probability(inst);
-        const auto qs = stim_qubit_targets(inst);
-        if ((qs.size() & 1u) != 0u) {
-            fail("DEPOLARIZE2 requires paired targets");
-        }
-        for (std::size_t i = 0; i < qs.size(); i += 2) {
-            apply_depolarize2(state, qs[i], qs[i + 1], probability);
-        }
+        CircuitInstruction instruction = new_circuit_instruction(CircuitInstructionKind::Depolarize2, inst.line);
+        instruction.probability = stim_required_probability(inst);
+        instruction.qubits = stim_qubit_targets(inst);
+        builder.circuit.instructions.push_back(std::move(instruction));
     } else {
         fail("unsupported Stim operation: " + op);
     }
 }
 
-void apply_nodes(StimAccumulator& acc, const std::vector<StimNode>& nodes) {
+void append_nodes(StimCircuitBuilder& builder, const std::vector<StimNode>& nodes) {
     for (const auto& node : nodes) {
         if (const auto* block = std::get_if<std::shared_ptr<StimRepeatBlock>>(&node)) {
             for (int i = 0; i < (*block)->count; ++i) {
-                apply_nodes(acc, (*block)->body);
+                append_nodes(builder, (*block)->body);
             }
         } else {
-            apply_instruction(acc, std::get<StimInstruction>(node));
+            append_instruction(builder, std::get<StimInstruction>(node));
         }
     }
 }
 
 } // namespace
 
-StimParseResult parse_stim_lines(const std::vector<std::string>& lines) {
+QuantumCircuit parse_stim_circuit_lines(const std::vector<std::string>& lines) {
     std::size_t pos = 0;
     const auto nodes = parse_nodes(lines, pos, false);
-    const int n = all_qubits(nodes);
-    StimAccumulator acc{FrameFactoredState(n, 0), {}, {}, {}, {}};
-    apply_nodes(acc, nodes);
-    return StimParseResult{acc.state, acc.records, acc.detectors, acc.observables};
+    StimCircuitBuilder builder;
+    builder.circuit.nqubits = all_qubits(nodes);
+    append_nodes(builder, nodes);
+    return builder.circuit;
 }
 
-StimParseResult parse_stim_text(const std::string& text) {
+QuantumCircuit parse_stim_circuit_text(const std::string& text) {
     std::istringstream stream(text);
     std::vector<std::string> lines;
     std::string line;
     while (std::getline(stream, line)) {
         lines.push_back(line);
     }
-    return parse_stim_lines(lines);
+    return parse_stim_circuit_lines(lines);
 }
 
-StimParseResult parse_stim_file(const std::string& path) {
+QuantumCircuit parse_stim_circuit_file(const std::string& path) {
     std::ifstream input(path);
     if (!input) {
         fail("failed to open Stim file: " + path);
@@ -652,7 +587,37 @@ StimParseResult parse_stim_file(const std::string& path) {
     while (std::getline(input, line)) {
         lines.push_back(line);
     }
-    return parse_stim_lines(lines);
+    return parse_stim_circuit_lines(lines);
+}
+
+StimParseResult parse_stim_lines(const std::vector<std::string>& lines) {
+    const QuantumCircuit circuit = parse_stim_circuit_lines(lines);
+    CircuitLoweringResult lowered = lower_circuit_to_factored(circuit);
+    return StimParseResult{
+        std::move(lowered.state),
+        std::move(lowered.measurement_records),
+        circuit.detectors,
+        circuit.observables};
+}
+
+StimParseResult parse_stim_text(const std::string& text) {
+    const QuantumCircuit circuit = parse_stim_circuit_text(text);
+    CircuitLoweringResult lowered = lower_circuit_to_factored(circuit);
+    return StimParseResult{
+        std::move(lowered.state),
+        std::move(lowered.measurement_records),
+        circuit.detectors,
+        circuit.observables};
+}
+
+StimParseResult parse_stim_file(const std::string& path) {
+    const QuantumCircuit circuit = parse_stim_circuit_file(path);
+    CircuitLoweringResult lowered = lower_circuit_to_factored(circuit);
+    return StimParseResult{
+        std::move(lowered.state),
+        std::move(lowered.measurement_records),
+        circuit.detectors,
+        circuit.observables};
 }
 
 StimSampleSummary estimate_stim_logical_error_rate(const StimParseResult& parsed, int shots, std::uint64_t seed) {
