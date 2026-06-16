@@ -1,6 +1,6 @@
 #pragma once
 
-#include "symft_internal.hpp"
+#include "../core/symft_internal.hpp"
 
 #include <cstddef>
 #include <cstdint>

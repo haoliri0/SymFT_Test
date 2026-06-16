@@ -1,4 +1,4 @@
-#include "symft_internal.hpp"
+#include "../core/symft_internal.hpp"
 
 #include <type_traits>
 #include <utility>
