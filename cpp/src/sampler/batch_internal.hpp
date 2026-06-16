@@ -8,48 +8,13 @@
 #include "simd/batch_simd.hpp"
 
 #include <algorithm>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <exception>
-#include <functional>
 #include <limits>
-#include <mutex>
 #include <optional>
-#include <thread>
-#include <utility>
 #include <vector>
 
 namespace symft {
-
-struct BatchThreadPool {
-    explicit BatchThreadPool(int threads);
-    ~BatchThreadPool();
-
-    BatchThreadPool(const BatchThreadPool&) = delete;
-    BatchThreadPool& operator=(const BatchThreadPool&) = delete;
-
-    int size() const;
-    void parallel_for(
-        int workers,
-        std::size_t items,
-        const std::function<void(int, std::size_t, std::size_t)>& fn);
-
-private:
-    void worker_loop(int worker_id);
-
-    int thread_count_ = 1;
-    std::vector<std::thread> workers_;
-    std::mutex mutex_;
-    std::condition_variable task_cv_;
-    std::condition_variable done_cv_;
-    std::function<void(int)> task_;
-    std::exception_ptr error_;
-    int generation_ = 0;
-    int completed_generation_ = 0;
-    int pending_ = 0;
-    bool stop_ = false;
-};
 
 inline constexpr int kDefaultBatchShots = 2048;
 inline constexpr std::size_t kDefaultBatchActiveAmplitudes = std::size_t{1} << 16;
@@ -76,84 +41,6 @@ using detail::symbol_bit_mask;
 using detail::symbol_word_count;
 using detail::symbol_word_index;
 using detail::trailing_zeros64;
-
-inline int normalized_batch_threads(int threads) {
-    return std::max(1, threads);
-}
-
-inline int batch_parallel_worker_count(
-    const BatchFactoredExecutorState& runtime,
-    std::size_t items,
-    std::size_t min_items_per_worker) {
-    const int requested = normalized_batch_threads(runtime.threads);
-    if (requested <= 1 || items == 0) {
-        return 1;
-    }
-    const std::size_t grain = std::max<std::size_t>(1, min_items_per_worker);
-    const std::size_t shots = static_cast<std::size_t>(std::max(1, runtime.active_shots));
-    const std::size_t work = items > std::numeric_limits<std::size_t>::max() / shots
-                                 ? std::numeric_limits<std::size_t>::max()
-                                 : items * shots;
-    const std::size_t item_limited = std::max<std::size_t>(1, work / grain);
-    return std::max(1, std::min<int>(requested, static_cast<int>(std::min<std::size_t>(item_limited, items))));
-}
-
-template <class Fn>
-void batch_parallel_for_workers(
-    const BatchFactoredExecutorState& runtime,
-    int workers,
-    std::size_t items,
-    Fn&& fn) {
-    if (workers <= 1 || items == 0) {
-        fn(0, std::size_t{0}, items);
-        return;
-    }
-    if (runtime.thread_pool) {
-        runtime.thread_pool->parallel_for(
-            workers,
-            items,
-            [&](int worker, std::size_t first, std::size_t last) {
-                fn(worker, first, last);
-            });
-        return;
-    }
-    std::vector<std::thread> threads;
-    threads.reserve(static_cast<std::size_t>(workers - 1));
-    std::exception_ptr error;
-    std::mutex error_mutex;
-    auto run_range = [&](int worker) {
-        const std::size_t first = items * static_cast<std::size_t>(worker) / static_cast<std::size_t>(workers);
-        const std::size_t last = items * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(workers);
-        try {
-            fn(worker, first, last);
-        } catch (...) {
-            std::lock_guard<std::mutex> lock(error_mutex);
-            if (!error) {
-                error = std::current_exception();
-            }
-        }
-    };
-    for (int worker = 1; worker < workers; ++worker) {
-        threads.emplace_back(run_range, worker);
-    }
-    run_range(0);
-    for (auto& thread : threads) {
-        thread.join();
-    }
-    if (error) {
-        std::rethrow_exception(error);
-    }
-}
-
-template <class Fn>
-void batch_parallel_for(
-    const BatchFactoredExecutorState& runtime,
-    std::size_t items,
-    std::size_t min_items_per_worker,
-    Fn&& fn) {
-    const int workers = batch_parallel_worker_count(runtime, items, min_items_per_worker);
-    batch_parallel_for_workers(runtime, workers, items, std::forward<Fn>(fn));
-}
 
 inline std::size_t batch_word_count(int shots) {
     if (shots <= 0) {
