@@ -33,6 +33,17 @@ struct KernelTable {
         double c,
         const double* q_by_shot);
 
+    void (*rotate_uniform_imag_xmask_const)(
+        double* re,
+        double* im,
+        std::size_t leading_shots,
+        int active_shots,
+        std::uint64_t xmask,
+        unsigned pair_bit,
+        std::size_t npairs,
+        double c,
+        double q);
+
     void (*rotate_real_pair_flip)(
         double* re,
         double* im,
@@ -56,6 +67,65 @@ struct KernelTable {
         std::size_t npairs,
         double c,
         const double* q_by_shot);
+
+    void (*rotate_real_pair_flip_xmask_const)(
+        double* re,
+        double* im,
+        std::size_t leading_shots,
+        int active_shots,
+        std::uint64_t xmask,
+        unsigned pair_bit,
+        const double* basis_phase_signs,
+        std::size_t npairs,
+        double c,
+        double q);
+
+    void (*rotate_diagonal_const)(
+        double* re,
+        double* im,
+        std::size_t leading_shots,
+        int active_shots,
+        std::size_t dim,
+        const Complex* coeff,
+        double c);
+
+    void (*rotate_diagonal_mixed)(
+        double* re,
+        double* im,
+        std::size_t leading_shots,
+        int active_shots,
+        std::size_t dim,
+        const Complex* minus_coeff,
+        const Complex* plus_coeff,
+        const std::uint64_t* sign_bits,
+        double c);
+
+    void (*rotate_general_xmask_const)(
+        double* re,
+        double* im,
+        std::size_t leading_shots,
+        int active_shots,
+        std::uint64_t xmask,
+        unsigned pair_bit,
+        std::size_t npairs,
+        const Complex* left_coeff,
+        const Complex* right_coeff,
+        double c);
+
+    void (*rotate_general_xmask_mixed)(
+        double* re,
+        double* im,
+        std::size_t leading_shots,
+        int active_shots,
+        std::uint64_t xmask,
+        unsigned pair_bit,
+        std::size_t npairs,
+        const Complex* left_minus_coeff,
+        const Complex* right_minus_coeff,
+        const Complex* left_plus_coeff,
+        const Complex* right_plus_coeff,
+        const std::uint64_t* sign_bits,
+        double c);
 
     void (*promote_first_dormant_rotation)(
         double* re,

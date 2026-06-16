@@ -20,11 +20,87 @@ bool batch_bit(const std::uint64_t* bits, int shot) {
     return (bits[static_cast<std::size_t>(shot >> 6)] & (std::uint64_t{1} << (shot & 63))) != 0;
 }
 
-std::size_t insert_zero_bit(std::size_t packed, unsigned bit) {
-    const std::size_t low_mask = (std::size_t{1} << bit) - std::size_t{1};
-    const std::size_t low = packed & low_mask;
-    const std::size_t high = packed & ~low_mask;
-    return low | (high << 1);
+std::uint64_t low_bits_mask(int nbits) {
+    if (nbits <= 0) {
+        return 0;
+    }
+    if (nbits >= 64) {
+        return ~std::uint64_t{0};
+    }
+    return (std::uint64_t{1} << nbits) - 1;
+}
+
+std::uint64_t live_word_mask(int active_shots, std::size_t word) {
+    return low_bits_mask(active_shots - static_cast<int>(word << 6));
+}
+
+void rotate_uniform_imag_pair_const(
+    double* r0p,
+    double* i0p,
+    double* r1p,
+    double* i1p,
+    int active_shots,
+    double c,
+    double q) {
+    SYMFT_BATCH_SIMD_LOOP
+    for (int shot = 0; shot < active_shots; ++shot) {
+        const double r0 = r0p[shot];
+        const double i0 = i0p[shot];
+        const double r1 = r1p[shot];
+        const double i1 = i1p[shot];
+        r0p[shot] = c * r0 - q * i1;
+        i0p[shot] = c * i0 + q * r1;
+        r1p[shot] = c * r1 - q * i0;
+        i1p[shot] = c * i1 + q * r0;
+    }
+}
+
+void rotate_real_pair_flip_const(
+    double* r0p,
+    double* i0p,
+    double* r1p,
+    double* i1p,
+    int active_shots,
+    double c,
+    double q) {
+    SYMFT_BATCH_SIMD_LOOP
+    for (int shot = 0; shot < active_shots; ++shot) {
+        const double r0 = r0p[shot];
+        const double i0 = i0p[shot];
+        const double r1 = r1p[shot];
+        const double i1 = i1p[shot];
+        r0p[shot] = c * r0 - q * r1;
+        i0p[shot] = c * i0 - q * i1;
+        r1p[shot] = c * r1 + q * r0;
+        i1p[shot] = c * i1 + q * i0;
+    }
+}
+
+void rotate_general_pair_const(
+    double* r0p,
+    double* i0p,
+    double* r1p,
+    double* i1p,
+    int first_shot,
+    int last_shot,
+    double c,
+    Complex left_coeff,
+    Complex right_coeff) {
+    const double lr = left_coeff.real();
+    const double li = left_coeff.imag();
+    const double rr = right_coeff.real();
+    const double ri = right_coeff.imag();
+    SYMFT_BATCH_SIMD_LOOP
+    for (int shot = first_shot; shot < last_shot; ++shot) {
+        const double r0 = r0p[shot];
+        const double im0 = i0p[shot];
+        const double r1 = r1p[shot];
+        const double im1 = i1p[shot];
+        r0p[shot] = c * r0 + rr * r1 - ri * im1;
+        i0p[shot] = c * im0 + rr * im1 + ri * r1;
+        r1p[shot] = c * r1 + lr * r0 - li * im0;
+        i1p[shot] = c * im1 + lr * im0 + li * r0;
+    }
 }
 
 void scalar_rotate_uniform_imag_pairs(
@@ -67,24 +143,60 @@ void scalar_rotate_uniform_imag_xmask(
     std::size_t npairs,
     double c,
     const double* q_by_shot) {
-    for (std::size_t idx = 0; idx < npairs; ++idx) {
-        const std::size_t i0 = insert_zero_bit(idx, pair_bit);
-        const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
-        double* r0p = re + i0 * leading_shots;
-        double* i0p = im + i0 * leading_shots;
-        double* r1p = re + i1 * leading_shots;
-        double* i1p = im + i1 * leading_shots;
-        SYMFT_BATCH_SIMD_LOOP
-        for (int shot = 0; shot < active_shots; ++shot) {
-            const double q = q_by_shot[static_cast<std::size_t>(shot)];
-            const double r0 = r0p[shot];
-            const double i0v = i0p[shot];
-            const double r1 = r1p[shot];
-            const double i1v = i1p[shot];
-            r0p[shot] = c * r0 - q * i1v;
-            i0p[shot] = c * i0v + q * r1;
-            r1p[shot] = c * r1 - q * i0v;
-            i1p[shot] = c * i1v + q * r0;
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t dim = npairs << 1;
+    const std::size_t step = selector << 1;
+    for (std::size_t block = 0; block < dim; block += step) {
+        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
+        for (std::size_t offset = 0; offset < selector; ++offset) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = right_base + offset;
+            double* r0p = re + i0 * leading_shots;
+            double* i0p = im + i0 * leading_shots;
+            double* r1p = re + i1 * leading_shots;
+            double* i1p = im + i1 * leading_shots;
+            SYMFT_BATCH_SIMD_LOOP
+            for (int shot = 0; shot < active_shots; ++shot) {
+                const double q = q_by_shot[static_cast<std::size_t>(shot)];
+                const double r0 = r0p[shot];
+                const double i0v = i0p[shot];
+                const double r1 = r1p[shot];
+                const double i1v = i1p[shot];
+                r0p[shot] = c * r0 - q * i1v;
+                i0p[shot] = c * i0v + q * r1;
+                r1p[shot] = c * r1 - q * i0v;
+                i1p[shot] = c * i1v + q * r0;
+            }
+        }
+    }
+}
+
+void scalar_rotate_uniform_imag_xmask_const(
+    double* re,
+    double* im,
+    std::size_t leading_shots,
+    int active_shots,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    std::size_t npairs,
+    double c,
+    double q) {
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t dim = npairs << 1;
+    const std::size_t step = selector << 1;
+    for (std::size_t block = 0; block < dim; block += step) {
+        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
+        for (std::size_t offset = 0; offset < selector; ++offset) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = right_base + offset;
+            rotate_uniform_imag_pair_const(
+                re + i0 * leading_shots,
+                im + i0 * leading_shots,
+                re + i1 * leading_shots,
+                im + i1 * leading_shots,
+                active_shots,
+                c,
+                q);
         }
     }
 }
@@ -133,25 +245,252 @@ void scalar_rotate_real_pair_flip_xmask(
     std::size_t npairs,
     double c,
     const double* q_by_shot) {
-    for (std::size_t idx = 0; idx < npairs; ++idx) {
-        const std::size_t i0 = insert_zero_bit(idx, pair_bit);
-        const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
-        const double basis_phase_sign = basis_phase_signs[idx];
-        double* r0p = re + i0 * leading_shots;
-        double* i0p = im + i0 * leading_shots;
-        double* r1p = re + i1 * leading_shots;
-        double* i1p = im + i1 * leading_shots;
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t dim = npairs << 1;
+    const std::size_t step = selector << 1;
+    std::size_t pair_idx = 0;
+    for (std::size_t block = 0; block < dim; block += step) {
+        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
+        for (std::size_t offset = 0; offset < selector; ++offset) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = right_base + offset;
+            const double basis_phase_sign = basis_phase_signs[pair_idx++];
+            double* r0p = re + i0 * leading_shots;
+            double* i0p = im + i0 * leading_shots;
+            double* r1p = re + i1 * leading_shots;
+            double* i1p = im + i1 * leading_shots;
+            SYMFT_BATCH_SIMD_LOOP
+            for (int shot = 0; shot < active_shots; ++shot) {
+                const double q = basis_phase_sign * q_by_shot[static_cast<std::size_t>(shot)];
+                const double r0 = r0p[shot];
+                const double i0v = i0p[shot];
+                const double r1 = r1p[shot];
+                const double i1v = i1p[shot];
+                r0p[shot] = c * r0 - q * r1;
+                i0p[shot] = c * i0v - q * i1v;
+                r1p[shot] = c * r1 + q * r0;
+                i1p[shot] = c * i1v + q * i0v;
+            }
+        }
+    }
+}
+
+void scalar_rotate_real_pair_flip_xmask_const(
+    double* re,
+    double* im,
+    std::size_t leading_shots,
+    int active_shots,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    const double* basis_phase_signs,
+    std::size_t npairs,
+    double c,
+    double q) {
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t dim = npairs << 1;
+    const std::size_t step = selector << 1;
+    std::size_t pair_idx = 0;
+    for (std::size_t block = 0; block < dim; block += step) {
+        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
+        for (std::size_t offset = 0; offset < selector; ++offset) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = right_base + offset;
+            rotate_real_pair_flip_const(
+                re + i0 * leading_shots,
+                im + i0 * leading_shots,
+                re + i1 * leading_shots,
+                im + i1 * leading_shots,
+                active_shots,
+                c,
+                basis_phase_signs[pair_idx++] * q);
+        }
+    }
+}
+
+void scalar_rotate_diagonal_const(
+    double* re,
+    double* im,
+    std::size_t leading_shots,
+    int active_shots,
+    std::size_t dim,
+    const Complex* coeff,
+    double c) {
+    for (std::size_t basis = 0; basis < dim; ++basis) {
+        const double fr = c + coeff[basis].real();
+        const double fi = coeff[basis].imag();
+        double* rp = re + basis * leading_shots;
+        double* ip = im + basis * leading_shots;
         SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < active_shots; ++shot) {
-            const double q = basis_phase_sign * q_by_shot[static_cast<std::size_t>(shot)];
-            const double r0 = r0p[shot];
-            const double i0v = i0p[shot];
-            const double r1 = r1p[shot];
-            const double i1v = i1p[shot];
-            r0p[shot] = c * r0 - q * r1;
-            i0p[shot] = c * i0v - q * i1v;
-            r1p[shot] = c * r1 + q * r0;
-            i1p[shot] = c * i1v + q * i0v;
+            const double r = rp[shot];
+            const double v = ip[shot];
+            rp[shot] = fr * r - fi * v;
+            ip[shot] = fr * v + fi * r;
+        }
+    }
+}
+
+void rotate_diagonal_range_const(
+    double* rp,
+    double* ip,
+    int first_shot,
+    int last_shot,
+    double fr,
+    double fi) {
+    SYMFT_BATCH_SIMD_LOOP
+    for (int shot = first_shot; shot < last_shot; ++shot) {
+        const double r = rp[shot];
+        const double v = ip[shot];
+        rp[shot] = fr * r - fi * v;
+        ip[shot] = fr * v + fi * r;
+    }
+}
+
+void scalar_rotate_diagonal_mixed(
+    double* re,
+    double* im,
+    std::size_t leading_shots,
+    int active_shots,
+    std::size_t dim,
+    const Complex* minus_coeff,
+    const Complex* plus_coeff,
+    const std::uint64_t* sign_bits,
+    double c) {
+    const std::size_t nwords = static_cast<std::size_t>((active_shots + 63) >> 6);
+    for (std::size_t basis = 0; basis < dim; ++basis) {
+        const double minus_fr = c + minus_coeff[basis].real();
+        const double minus_fi = minus_coeff[basis].imag();
+        const double plus_fr = c + plus_coeff[basis].real();
+        const double plus_fi = plus_coeff[basis].imag();
+        double* rp = re + basis * leading_shots;
+        double* ip = im + basis * leading_shots;
+        for (std::size_t word = 0; word < nwords; ++word) {
+            const int first = static_cast<int>(word << 6);
+            const int last = std::min(active_shots, first + 64);
+            const std::uint64_t live = live_word_mask(active_shots, word);
+            const std::uint64_t bits = sign_bits[word] & live;
+            if (bits == 0) {
+                rotate_diagonal_range_const(rp, ip, first, last, minus_fr, minus_fi);
+            } else if (bits == live) {
+                rotate_diagonal_range_const(rp, ip, first, last, plus_fr, plus_fi);
+            } else {
+                SYMFT_BATCH_SIMD_LOOP
+                for (int shot = first; shot < last; ++shot) {
+                    const bool sign = ((bits >> (shot - first)) & 1ULL) != 0;
+                    const double fr = sign ? plus_fr : minus_fr;
+                    const double fi = sign ? plus_fi : minus_fi;
+                    const double r = rp[shot];
+                    const double v = ip[shot];
+                    rp[shot] = fr * r - fi * v;
+                    ip[shot] = fr * v + fi * r;
+                }
+            }
+        }
+    }
+}
+
+void scalar_rotate_general_xmask_const(
+    double* re,
+    double* im,
+    std::size_t leading_shots,
+    int active_shots,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    std::size_t npairs,
+    const Complex* left_coeff,
+    const Complex* right_coeff,
+    double c) {
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t dim = npairs << 1;
+    const std::size_t step = selector << 1;
+    std::size_t pair_idx = 0;
+    for (std::size_t block = 0; block < dim; block += step) {
+        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
+        for (std::size_t offset = 0; offset < selector; ++offset) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = right_base + offset;
+            rotate_general_pair_const(
+                re + i0 * leading_shots,
+                im + i0 * leading_shots,
+                re + i1 * leading_shots,
+                im + i1 * leading_shots,
+                0,
+                active_shots,
+                c,
+                left_coeff[pair_idx],
+                right_coeff[pair_idx]);
+            ++pair_idx;
+        }
+    }
+}
+
+void scalar_rotate_general_xmask_mixed(
+    double* re,
+    double* im,
+    std::size_t leading_shots,
+    int active_shots,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    std::size_t npairs,
+    const Complex* left_minus_coeff,
+    const Complex* right_minus_coeff,
+    const Complex* left_plus_coeff,
+    const Complex* right_plus_coeff,
+    const std::uint64_t* sign_bits,
+    double c) {
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t dim = npairs << 1;
+    const std::size_t step = selector << 1;
+    const std::size_t nwords = static_cast<std::size_t>((active_shots + 63) >> 6);
+    std::size_t pair_idx = 0;
+    for (std::size_t block = 0; block < dim; block += step) {
+        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
+        for (std::size_t offset = 0; offset < selector; ++offset) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = right_base + offset;
+            double* r0p = re + i0 * leading_shots;
+            double* i0p = im + i0 * leading_shots;
+            double* r1p = re + i1 * leading_shots;
+            double* i1p = im + i1 * leading_shots;
+            for (std::size_t word = 0; word < nwords; ++word) {
+                const int first = static_cast<int>(word << 6);
+                const int last = std::min(active_shots, first + 64);
+                const std::uint64_t live = live_word_mask(active_shots, word);
+                const std::uint64_t bits = sign_bits[word] & live;
+                if (bits == 0) {
+                    rotate_general_pair_const(
+                        r0p, i0p, r1p, i1p, first, last, c, left_minus_coeff[pair_idx], right_minus_coeff[pair_idx]);
+                } else if (bits == live) {
+                    rotate_general_pair_const(
+                        r0p, i0p, r1p, i1p, first, last, c, left_plus_coeff[pair_idx], right_plus_coeff[pair_idx]);
+                } else {
+                    const double lmr = left_minus_coeff[pair_idx].real();
+                    const double lmi = left_minus_coeff[pair_idx].imag();
+                    const double rmr = right_minus_coeff[pair_idx].real();
+                    const double rmi = right_minus_coeff[pair_idx].imag();
+                    const double lpr = left_plus_coeff[pair_idx].real();
+                    const double lpi = left_plus_coeff[pair_idx].imag();
+                    const double rpr = right_plus_coeff[pair_idx].real();
+                    const double rpi = right_plus_coeff[pair_idx].imag();
+                    SYMFT_BATCH_SIMD_LOOP
+                    for (int shot = first; shot < last; ++shot) {
+                        const bool sign = ((bits >> (shot - first)) & 1ULL) != 0;
+                        const double lr = sign ? lpr : lmr;
+                        const double li = sign ? lpi : lmi;
+                        const double rr = sign ? rpr : rmr;
+                        const double ri = sign ? rpi : rmi;
+                        const double r0 = r0p[shot];
+                        const double im0 = i0p[shot];
+                        const double r1 = r1p[shot];
+                        const double im1 = i1p[shot];
+                        r0p[shot] = c * r0 + rr * r1 - ri * im1;
+                        i0p[shot] = c * im0 + rr * im1 + ri * r1;
+                        r1p[shot] = c * r1 + lr * r0 - li * im0;
+                        i1p[shot] = c * im1 + lr * im0 + li * r0;
+                    }
+                }
+            }
+            ++pair_idx;
         }
     }
 }
@@ -348,8 +687,14 @@ const KernelTable table = {
 #endif
     scalar_rotate_uniform_imag_pairs,
     scalar_rotate_uniform_imag_xmask,
+    scalar_rotate_uniform_imag_xmask_const,
     scalar_rotate_real_pair_flip,
     scalar_rotate_real_pair_flip_xmask,
+    scalar_rotate_real_pair_flip_xmask_const,
+    scalar_rotate_diagonal_const,
+    scalar_rotate_diagonal_mixed,
+    scalar_rotate_general_xmask_const,
+    scalar_rotate_general_xmask_mixed,
     scalar_promote_first_dormant_rotation,
     scalar_last_z_measure_true_prob,
     scalar_last_z_project,

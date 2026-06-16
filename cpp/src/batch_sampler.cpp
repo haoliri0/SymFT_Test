@@ -21,6 +21,12 @@ constexpr std::size_t kBatchScalarSymbolicEvalThreshold = 32;
 #define SYMFT_BATCH_SIMD_LOOP
 #endif
 
+enum class BatchSignMode {
+    AllMinus,
+    AllPlus,
+    Mixed,
+};
+
 [[noreturn]] void fail(const std::string& message) {
     throw Error(message);
 }
@@ -148,11 +154,6 @@ std::uint64_t batch_shot_mask(int shot) {
 
 std::size_t batch_shot_word(int shot) {
     return static_cast<std::size_t>(shot >> 6);
-}
-
-bool batch_bit(const std::vector<std::uint64_t>& bits, int shot) {
-    const std::size_t word = batch_shot_word(shot);
-    return word < bits.size() && (bits[word] & batch_shot_mask(shot)) != 0;
 }
 
 void set_batch_bit(std::vector<std::uint64_t>& bits, int shot) {
@@ -708,10 +709,43 @@ const std::vector<double>& fill_rotation_coefficients(
     return runtime.rotation_coefficients;
 }
 
+BatchSignMode batch_sign_mode(const BatchFactoredExecutorState& runtime, const std::vector<std::uint64_t>& sign_bits) {
+    bool saw_zero = false;
+    bool saw_one = false;
+    const std::size_t nwords = runtime_batch_word_count(runtime);
+    for (std::size_t word = 0; word < nwords; ++word) {
+        const std::uint64_t live = batch_live_word_mask(runtime, word);
+        const std::uint64_t bits = (word < sign_bits.size() ? sign_bits[word] : 0) & live;
+        saw_one = saw_one || bits != 0;
+        saw_zero = saw_zero || bits != live;
+        if (saw_one && saw_zero) {
+            return BatchSignMode::Mixed;
+        }
+    }
+    return saw_one ? BatchSignMode::AllPlus : BatchSignMode::AllMinus;
+}
+
 void rotate_uniform_imag_pairs_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliRotationKernel& kernel,
     const std::vector<std::uint64_t>& sign_bits) {
+    const BatchSignMode mode = batch_sign_mode(runtime, sign_bits);
+    if (mode != BatchSignMode::Mixed) {
+        const double q = mode == BatchSignMode::AllPlus
+                             ? kernel.pair_left_plus_coefficients.front().imag()
+                             : kernel.pair_left_minus_coefficients.front().imag();
+        batch_simd::scalar_table().rotate_uniform_imag_xmask_const(
+            runtime.active_re.data(),
+            runtime.active_im.data(),
+            static_cast<std::size_t>(runtime.batches),
+            runtime.active_shots,
+            kernel.action.xmask,
+            kernel.pair_bit,
+            kernel.pair_left_indices.size(),
+            kernel.cos_theta,
+            q);
+        return;
+    }
     const auto& coeffs = fill_rotation_coefficients(
         runtime,
         sign_bits,
@@ -746,6 +780,24 @@ void rotate_real_pair_flip_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliRotationKernel& kernel,
     const std::vector<std::uint64_t>& sign_bits) {
+    const BatchSignMode mode = batch_sign_mode(runtime, sign_bits);
+    if (mode != BatchSignMode::Mixed) {
+        const double q = mode == BatchSignMode::AllPlus
+                             ? kernel.pair_left_plus_coefficients.front().real()
+                             : kernel.pair_left_minus_coefficients.front().real();
+        batch_simd::scalar_table().rotate_real_pair_flip_xmask_const(
+            runtime.active_re.data(),
+            runtime.active_im.data(),
+            static_cast<std::size_t>(runtime.batches),
+            runtime.active_shots,
+            kernel.action.xmask,
+            kernel.pair_bit,
+            kernel.real_pair_flip_basis_phase_signs.data(),
+            kernel.pair_left_indices.size(),
+            kernel.cos_theta,
+            q);
+        return;
+    }
     const auto& coeffs = fill_rotation_coefficients(
         runtime,
         sign_bits,
@@ -788,20 +840,36 @@ void rotate_pauli_batch(
     const double c = kernel.cos_theta;
     if (kernel.is_diagonal) {
         const std::size_t dim = active_length(runtime.k);
-        for (std::size_t basis = 0; basis < dim; ++basis) {
-            const Complex plus = kernel.diagonal_plus_coefficients[basis];
-            const Complex minus = kernel.diagonal_minus_coefficients[basis];
-            SYMFT_BATCH_SIMD_LOOP
-            for (int shot = 0; shot < runtime.active_shots; ++shot) {
-                const Complex coeff = batch_bit(sign_bits, shot) ? plus : minus;
-                const double fr = c + coeff.real();
-                const double fi = coeff.imag();
-                const std::size_t off = batch_active_offset(runtime, basis, shot);
-                const double r = runtime.active_re[off];
-                const double i = runtime.active_im[off];
-                runtime.active_re[off] = fr * r - fi * i;
-                runtime.active_im[off] = fr * i + fi * r;
-            }
+        const BatchSignMode mode = batch_sign_mode(runtime, sign_bits);
+        if (mode == BatchSignMode::AllMinus) {
+            batch_simd::scalar_table().rotate_diagonal_const(
+                runtime.active_re.data(),
+                runtime.active_im.data(),
+                static_cast<std::size_t>(runtime.batches),
+                runtime.active_shots,
+                dim,
+                kernel.diagonal_minus_coefficients.data(),
+                c);
+        } else if (mode == BatchSignMode::AllPlus) {
+            batch_simd::scalar_table().rotate_diagonal_const(
+                runtime.active_re.data(),
+                runtime.active_im.data(),
+                static_cast<std::size_t>(runtime.batches),
+                runtime.active_shots,
+                dim,
+                kernel.diagonal_plus_coefficients.data(),
+                c);
+        } else {
+            batch_simd::scalar_table().rotate_diagonal_mixed(
+                runtime.active_re.data(),
+                runtime.active_im.data(),
+                static_cast<std::size_t>(runtime.batches),
+                runtime.active_shots,
+                dim,
+                kernel.diagonal_minus_coefficients.data(),
+                kernel.diagonal_plus_coefficients.data(),
+                sign_bits.data(),
+                c);
         }
         return;
     }
@@ -813,29 +881,46 @@ void rotate_pauli_batch(
         rotate_real_pair_flip_batch(runtime, kernel, sign_bits);
         return;
     }
-    for (std::size_t idx = 0; idx < kernel.pair_left_indices.size(); ++idx) {
-        const std::size_t i0 = kernel.pair_left_indices[idx];
-        const std::size_t i1 = kernel.pair_right_indices[idx];
-        const Complex left_plus = kernel.pair_left_plus_coefficients[idx];
-        const Complex right_plus = kernel.pair_right_plus_coefficients[idx];
-        const Complex left_minus = kernel.pair_left_minus_coefficients[idx];
-        const Complex right_minus = kernel.pair_right_minus_coefficients[idx];
-        SYMFT_BATCH_SIMD_LOOP
-        for (int shot = 0; shot < runtime.active_shots; ++shot) {
-            const bool sign = batch_bit(sign_bits, shot);
-            const Complex left_coeff = sign ? left_plus : left_minus;
-            const Complex right_coeff = sign ? right_plus : right_minus;
-            const std::size_t off0 = batch_active_offset(runtime, i0, shot);
-            const std::size_t off1 = batch_active_offset(runtime, i1, shot);
-            const double r0 = runtime.active_re[off0];
-            const double im0 = runtime.active_im[off0];
-            const double r1 = runtime.active_re[off1];
-            const double im1 = runtime.active_im[off1];
-            runtime.active_re[off0] = c * r0 + right_coeff.real() * r1 - right_coeff.imag() * im1;
-            runtime.active_im[off0] = c * im0 + right_coeff.real() * im1 + right_coeff.imag() * r1;
-            runtime.active_re[off1] = c * r1 + left_coeff.real() * r0 - left_coeff.imag() * im0;
-            runtime.active_im[off1] = c * im1 + left_coeff.real() * im0 + left_coeff.imag() * r0;
-        }
+    const BatchSignMode mode = batch_sign_mode(runtime, sign_bits);
+    if (mode == BatchSignMode::AllMinus) {
+        batch_simd::scalar_table().rotate_general_xmask_const(
+            runtime.active_re.data(),
+            runtime.active_im.data(),
+            static_cast<std::size_t>(runtime.batches),
+            runtime.active_shots,
+            kernel.action.xmask,
+            kernel.pair_bit,
+            kernel.pair_left_indices.size(),
+            kernel.pair_left_minus_coefficients.data(),
+            kernel.pair_right_minus_coefficients.data(),
+            c);
+    } else if (mode == BatchSignMode::AllPlus) {
+        batch_simd::scalar_table().rotate_general_xmask_const(
+            runtime.active_re.data(),
+            runtime.active_im.data(),
+            static_cast<std::size_t>(runtime.batches),
+            runtime.active_shots,
+            kernel.action.xmask,
+            kernel.pair_bit,
+            kernel.pair_left_indices.size(),
+            kernel.pair_left_plus_coefficients.data(),
+            kernel.pair_right_plus_coefficients.data(),
+            c);
+    } else {
+        batch_simd::scalar_table().rotate_general_xmask_mixed(
+            runtime.active_re.data(),
+            runtime.active_im.data(),
+            static_cast<std::size_t>(runtime.batches),
+            runtime.active_shots,
+            kernel.action.xmask,
+            kernel.pair_bit,
+            kernel.pair_left_indices.size(),
+            kernel.pair_left_minus_coefficients.data(),
+            kernel.pair_right_minus_coefficients.data(),
+            kernel.pair_left_plus_coefficients.data(),
+            kernel.pair_right_plus_coefficients.data(),
+            sign_bits.data(),
+            c);
     }
 }
 
