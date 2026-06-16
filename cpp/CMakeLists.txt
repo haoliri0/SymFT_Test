@@ -20,13 +20,13 @@ add_library(symft_cpp
     src/active/active_state.cpp
     src/factored/factored_state.cpp
     src/factored/factored_planner.cpp
-    src/factored/factored_executor.cpp
+    src/sampler/single_shot.cpp
     src/stim/stim_parser.cpp
-    src/batch/batch_sampler.cpp
-    src/batch/batch_symbols.cpp
-    src/batch/batch_active.cpp
-    src/batch/batch_runtime.cpp
-    src/batch/batch_simd_scalar.cpp
+    src/sampler/batch_sampler.cpp
+    src/sampler/batch_symbols.cpp
+    src/sampler/batch_active.cpp
+    src/sampler/batch_runtime.cpp
+    src/sampler/batch_simd_scalar.cpp
     src/simd/simd_dispatch.cpp
     src/simd/simd_scalar.cpp
 )
