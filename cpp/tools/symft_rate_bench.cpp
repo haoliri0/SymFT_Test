@@ -169,7 +169,7 @@ void print_usage(const char* argv0) {
         << "  --repeats N                       Number of repeats\n"
         << "  --observable N                    Observable index\n"
         << "  --threads N|auto                  Parallel worker threads over independent batches\n"
-        << "  --postselect-detectors            Abort and compact shots after fired detectors\n"
+        << "  --postselect-detectors            Stop discarded single shots or compact discarded batch shots after fired detectors\n"
         << "  --no-postselect-detectors         Disable detector postselection abort\n";
 }
 
@@ -890,10 +890,21 @@ void accumulate_single_counts(
     }
 }
 
+bool any_detector_fires(
+    const std::vector<std::uint64_t>& measurement_words,
+    const std::vector<std::vector<int>>& detectors) {
+    for (const auto& records : detectors) {
+        if (record_parity(measurement_words, records)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 BenchResult run_single_sampler(const Options& options) {
     BenchResult result;
     result.path = options.path;
-    result.sampler = "single";
+    result.sampler = options.postselect_detectors ? "single_postselected" : "single";
     result.requested_shots = options.shots;
     result.repeats = options.repeats;
     result.observable = options.observable;
@@ -928,6 +939,8 @@ BenchResult run_single_sampler(const Options& options) {
         result.block_shots = options.block_shots > 0 ? options.block_shots : symft::default_batch_count(program.max_k);
 
         const auto logical_records = logical_records_for_observable(parsed.observables, options.observable);
+        const auto postselection_detectors_by_record = detectors_by_max_record(parsed.detectors, program.nrecords);
+        const auto instruction_records_by_index = instruction_records(program);
         const std::uint64_t nblocks =
             (options.shots + static_cast<std::uint64_t>(result.block_shots) - 1) /
             static_cast<std::uint64_t>(result.block_shots);
@@ -952,9 +965,31 @@ BenchResult run_single_sampler(const Options& options) {
             for (int shot = 0; shot < block; ++shot) {
                 const auto execute_start = Clock::now();
                 symft::reset_executor(runtime, program);
-                symft::execute_in_place(runtime, program, samples, shot);
+                bool discarded = false;
+                if (options.postselect_detectors) {
+                    symft::assign_presampled_exogenous_in_place(runtime, samples, shot);
+                    for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+                        symft::execute_instruction_in_place(runtime, program.instructions[idx]);
+                        const int record = instruction_records_by_index[idx];
+                        if (record <= 0 || record >= static_cast<int>(postselection_detectors_by_record.size())) {
+                            continue;
+                        }
+                        if (any_detector_fires(
+                                runtime.measurement_words,
+                                postselection_detectors_by_record[static_cast<std::size_t>(record)])) {
+                            discarded = true;
+                            break;
+                        }
+                    }
+                } else {
+                    symft::execute_in_place(runtime, program, samples, shot);
+                }
                 const auto execute_stop = Clock::now();
-                accumulate_single_counts(counts, runtime.measurement_words, parsed.detectors, logical_records);
+                if (discarded) {
+                    ++counts.discarded;
+                } else {
+                    accumulate_single_counts(counts, runtime.measurement_words, parsed.detectors, logical_records);
+                }
                 const auto accumulate_stop = Clock::now();
                 execute_total += seconds_between(execute_start, execute_stop);
                 accumulate_total += seconds_between(execute_stop, accumulate_stop);

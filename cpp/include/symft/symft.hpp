@@ -520,6 +520,13 @@ void execute_in_place(
 std::vector<std::uint64_t> execute(FactoredExecutorState& runtime, const FactoredInstructionProgram& program);
 std::vector<std::uint64_t> sample_measurements(const FactoredInstructionProgram& program, std::uint64_t seed = 1);
 std::vector<std::vector<std::uint64_t>> sample_measurements(const FactoredInstructionProgram& program, int shots, std::uint64_t seed = 1);
+void assign_presampled_exogenous_in_place(
+    FactoredExecutorState& runtime,
+    const PresampledExogenous& samples,
+    int shot_index);
+void execute_instruction_in_place(
+    FactoredExecutorState& runtime,
+    const FactoredInstruction& instruction);
 void assign_presampled_exogenous_batch_in_place(
     BatchFactoredExecutorState& runtime,
     const PresampledExogenous& samples);

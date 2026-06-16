@@ -3679,6 +3679,19 @@ void execute_in_place(
     }
 }
 
+void assign_presampled_exogenous_in_place(
+    FactoredExecutorState& runtime,
+    const PresampledExogenous& samples,
+    int shot_index) {
+    assign_presampled_exogenous(runtime, samples, shot_index);
+}
+
+void execute_instruction_in_place(
+    FactoredExecutorState& runtime,
+    const FactoredInstruction& instruction) {
+    std::visit([&](const auto& inst) { execute_instruction(runtime, inst); }, instruction);
+}
+
 std::vector<std::uint64_t> execute(FactoredExecutorState& runtime, const FactoredInstructionProgram& program) {
     execute_in_place(runtime, program);
     return runtime.measurement_words;

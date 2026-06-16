@@ -220,6 +220,7 @@ and streaming presampled exogenous symbols:
 ```bash
 ./build/cpp/cpp/symft_rate_bench d3.stim 100000000
 ./build/cpp/cpp/symft_rate_bench --sampler both --circuit d3.stim --shots 1000000 --batch-size auto --threads 1
+./build/cpp/cpp/symft_rate_bench --sampler single --circuit d3.stim --shots 1000000 --postselect-detectors
 ```
 
 The C++ batch active layout stores real and imaginary arrays as
