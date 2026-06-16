@@ -140,6 +140,34 @@ void test_active_basis_change_instruction() {
     }
 }
 
+void test_threaded_batch_active_basis_change() {
+    using namespace symft;
+    const FactoredInstructionProgram program(
+        10,
+        10,
+        {ApplyActiveBasisChange{'H', 0}},
+        10,
+        SymbolicContext());
+
+    BatchFactoredExecutorState batch(program, 512, 7, 2);
+    execute_batch_in_place(batch, program);
+    const double inv_sqrt2 = 1.0 / std::sqrt(2.0);
+    for (int shot = 0; shot < batch.active_shots; ++shot) {
+        require(std::abs(batch.active_re[static_cast<std::size_t>(shot)] - inv_sqrt2) < 1e-10,
+                "threaded batch H amplitude 0 re");
+        require(std::abs(batch.active_im[static_cast<std::size_t>(shot)]) < 1e-10,
+                "threaded batch H amplitude 0 im");
+        const std::size_t off1 = static_cast<std::size_t>(batch.batches + shot);
+        require(std::abs(batch.active_re[off1] - inv_sqrt2) < 1e-10,
+                "threaded batch H amplitude 1 re");
+        require(std::abs(batch.active_im[off1]) < 1e-10,
+                "threaded batch H amplitude 1 im");
+        const std::size_t off2 = static_cast<std::size_t>(2 * batch.batches + shot);
+        require(std::abs(batch.active_re[off2]) < 1e-10 && std::abs(batch.active_im[off2]) < 1e-10,
+                "threaded batch H leaves other amplitude zero");
+    }
+}
+
 void test_parser_feedback() {
     using namespace symft;
     const auto parsed = parse_stim_text("M !0\nCX rec[-1] 1\nM 1\n");
@@ -263,6 +291,7 @@ int main() {
     test_clifford_frame();
     test_active_rotation();
     test_active_basis_change_instruction();
+    test_threaded_batch_active_basis_change();
     test_parser_feedback();
     test_stim_frontend_circuit_lowering();
     test_t_gate_exact_rotation();

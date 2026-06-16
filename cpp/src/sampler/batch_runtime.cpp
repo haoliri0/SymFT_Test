@@ -1,9 +1,108 @@
 #include "batch_internal.hpp"
 
 #include <algorithm>
+#include <memory>
 #include <utility>
 
 namespace symft {
+
+BatchThreadPool::BatchThreadPool(int threads) : thread_count_(normalized_batch_threads(threads)) {
+    workers_.reserve(static_cast<std::size_t>(std::max(0, thread_count_ - 1)));
+    for (int worker = 1; worker < thread_count_; ++worker) {
+        workers_.emplace_back([this, worker] { worker_loop(worker); });
+    }
+}
+
+BatchThreadPool::~BatchThreadPool() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stop_ = true;
+        ++generation_;
+    }
+    task_cv_.notify_all();
+    for (auto& worker : workers_) {
+        if (worker.joinable()) {
+            worker.join();
+        }
+    }
+}
+
+int BatchThreadPool::size() const {
+    return thread_count_;
+}
+
+void BatchThreadPool::worker_loop(int worker_id) {
+    int seen_generation = 0;
+    while (true) {
+        std::function<void(int)> task;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            task_cv_.wait(lock, [&] { return stop_ || generation_ != seen_generation; });
+            if (stop_) {
+                return;
+            }
+            seen_generation = generation_;
+            task = task_;
+        }
+        try {
+            task(worker_id);
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!error_) {
+                error_ = std::current_exception();
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            --pending_;
+            if (pending_ == 0) {
+                completed_generation_ = seen_generation;
+            }
+        }
+        done_cv_.notify_one();
+    }
+}
+
+void BatchThreadPool::parallel_for(
+    int workers,
+    std::size_t items,
+    const std::function<void(int, std::size_t, std::size_t)>& fn) {
+    const int active_workers = std::max(1, std::min(normalized_batch_threads(workers), thread_count_));
+    if (active_workers <= 1 || items == 0) {
+        fn(0, std::size_t{0}, items);
+        return;
+    }
+    auto run_worker = [=, &fn](int worker) {
+        const std::size_t first = items * static_cast<std::size_t>(worker) / static_cast<std::size_t>(active_workers);
+        const std::size_t last = items * static_cast<std::size_t>(worker + 1) / static_cast<std::size_t>(active_workers);
+        fn(worker, first, last);
+    };
+    int task_generation = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        error_ = nullptr;
+        task_ = run_worker;
+        pending_ = active_workers - 1;
+        task_generation = ++generation_;
+    }
+    task_cv_.notify_all();
+    try {
+        run_worker(0);
+    } catch (...) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!error_) {
+            error_ = std::current_exception();
+        }
+    }
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        done_cv_.wait(lock, [&] { return completed_generation_ == task_generation || pending_ == 0; });
+        task_ = nullptr;
+        if (error_) {
+            std::rethrow_exception(error_);
+        }
+    }
+}
 
 void execute_batch_instruction(BatchFactoredExecutorState& runtime, const ApplyPrecomputedActivePauliRotation& instruction) {
     eval_symbolic_bool_batch(runtime.eval_scratch, instruction.sign_plan, runtime);
@@ -91,10 +190,29 @@ void execute_batch_instruction_in_place(
 BatchFactoredExecutorState::BatchFactoredExecutorState(
     const FactoredInstructionProgram& program,
     int batches_,
-    std::uint64_t seed)
+    std::uint64_t seed,
+    int threads_)
     : batches(batches_ > 0 ? batches_ : default_batch_count(program.max_k)),
-      rng_state(seed) {
+      rng_state(seed),
+      threads(normalized_batch_threads(threads_)) {
+    if (threads > 1) {
+        thread_pool = std::make_shared<BatchThreadPool>(threads);
+    }
     reset_batch_executor(*this, program, batches);
+}
+
+void set_batch_executor_threads(BatchFactoredExecutorState& runtime, int threads) {
+    const int normalized = normalized_batch_threads(threads);
+    if (runtime.threads == normalized && ((normalized <= 1 && !runtime.thread_pool) ||
+                                          (runtime.thread_pool && runtime.thread_pool->size() == normalized))) {
+        return;
+    }
+    runtime.threads = normalized;
+    if (normalized <= 1) {
+        runtime.thread_pool.reset();
+    } else {
+        runtime.thread_pool = std::make_shared<BatchThreadPool>(normalized);
+    }
 }
 
 void reset_batch_executor(BatchFactoredExecutorState& runtime, const FactoredInstructionProgram& program, int shots) {
@@ -198,11 +316,12 @@ std::vector<std::vector<std::uint64_t>> sample_measurements_batch(
     const FactoredInstructionProgram& program,
     int shots,
     int batches,
-    std::uint64_t seed) {
+    std::uint64_t seed,
+    int threads) {
     if (shots < 0) {
         fail("shot count must be nonnegative");
     }
-    BatchFactoredExecutorState runtime(program, batches, seed);
+    BatchFactoredExecutorState runtime(program, batches, seed, threads);
     std::vector<std::vector<std::uint64_t>> out(
         static_cast<std::size_t>(shots),
         std::vector<std::uint64_t>(symbol_word_count(program.nrecords), 0));
