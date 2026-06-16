@@ -1,5 +1,6 @@
 #include "active_kernels.hpp"
 
+#include "sampler/exogenous.hpp"
 #include "sampler/random.hpp"
 #include "sampler/single_shot.hpp"
 #include "simd/simd.hpp"

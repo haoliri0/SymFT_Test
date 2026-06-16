@@ -1,4 +1,5 @@
 #include "frontend/stim.hpp"
+#include "sampler/exogenous.hpp"
 #include "sampler/single_shot.hpp"
 
 #include <chrono>

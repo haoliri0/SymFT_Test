@@ -1,4 +1,4 @@
-#include "sampler/single_shot.hpp"
+#include "sampler/exogenous.hpp"
 
 #include "core/internal.hpp"
 #include "sampler/random.hpp"
