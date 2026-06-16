@@ -83,15 +83,8 @@ target_link_libraries(symft_active_layout_bench PRIVATE symft_cpp)
 add_executable(symft_batch_active_layout_bench tools/symft_batch_active_layout_bench.cpp)
 target_link_libraries(symft_batch_active_layout_bench PRIVATE symft_cpp)
 
-add_executable(symft_rate_bench
-    tools/symft_rate_bench.cpp
-    tools/rate_bench/options.cpp
-    tools/rate_bench/accumulation.cpp
-    tools/rate_bench/runner.cpp
-    tools/rate_bench/output.cpp
-)
+add_executable(symft_rate_bench tools/symft_rate_bench.cpp)
 target_link_libraries(symft_rate_bench PRIVATE symft_cpp Threads::Threads)
-target_include_directories(symft_rate_bench PRIVATE tools)
 
 if(SYMFT_CPP_NATIVE)
     target_compile_options(symft_active_layout_bench PRIVATE
