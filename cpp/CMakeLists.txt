@@ -64,8 +64,17 @@ target_link_libraries(symft_bench PRIVATE symft_cpp)
 add_executable(symft_batch_bench tools/symft_batch_bench.cpp)
 target_link_libraries(symft_batch_bench PRIVATE symft_cpp)
 
+add_executable(symft_active_layout_bench tools/symft_active_layout_bench.cpp)
+target_link_libraries(symft_active_layout_bench PRIVATE symft_cpp)
+
 add_executable(symft_rate_bench tools/symft_rate_bench.cpp)
 target_link_libraries(symft_rate_bench PRIVATE symft_cpp Threads::Threads)
+
+if(SYMFT_CPP_NATIVE)
+    target_compile_options(symft_active_layout_bench PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-march=native>
+    )
+endif()
 
 if(SYMFT_CPP_BUILD_TESTS)
     enable_testing()

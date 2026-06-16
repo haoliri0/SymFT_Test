@@ -95,12 +95,135 @@ void scalar_rotate_real_pair_flip(
     }
 }
 
+void scalar_mul_assign_soa(double* re, double* im, const Complex* coeff, double c, std::size_t n) {
+    const auto* cr = reinterpret_cast<const double*>(coeff);
+    SYMFT_SIMD_LOOP
+    for (std::size_t i = 0; i < n; ++i) {
+        const double fr = c + cr[2 * i];
+        const double fi = cr[2 * i + 1];
+        const double r = re[i];
+        const double v = im[i];
+        re[i] = fr * r - fi * v;
+        im[i] = fr * v + fi * r;
+    }
+}
+
+double scalar_norm_sum_soa(const double* re, const double* im, const std::size_t* indices, std::size_t n) {
+    double out = 0.0;
+    SYMFT_SIMD_LOOP
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::size_t src = indices[i];
+        const double r = re[src];
+        const double v = im[src];
+        out += r * r + v * v;
+    }
+    return out;
+}
+
+void scalar_rotate_uniform_imag_pairs_soa(
+    double* re,
+    double* im,
+    std::size_t dim,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    double c,
+    double q) {
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t step = selector << 1;
+    for (std::size_t block = 0; block < dim; block += step) {
+        SYMFT_SIMD_LOOP
+        for (std::size_t offset = 0; offset < selector; ++offset) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
+            const double r0 = re[i0];
+            const double im0 = im[i0];
+            const double r1 = re[i1];
+            const double im1 = im[i1];
+            re[i0] = c * r0 - q * im1;
+            im[i0] = c * im0 + q * r1;
+            re[i1] = c * r1 - q * im0;
+            im[i1] = c * im1 + q * r0;
+        }
+    }
+}
+
+void scalar_rotate_real_pair_flip_soa(
+    double* re,
+    double* im,
+    std::size_t dim,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    const double* phase_signs,
+    double c,
+    double base_coeff) {
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t step = selector << 1;
+    std::size_t pair_idx = 0;
+    for (std::size_t block = 0; block < dim; block += step) {
+        SYMFT_SIMD_LOOP
+        for (std::size_t offset = 0; offset < selector; ++offset) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
+            const double q = phase_signs[pair_idx++] * base_coeff;
+            const double r0 = re[i0];
+            const double im0 = im[i0];
+            const double r1 = re[i1];
+            const double im1 = im[i1];
+            re[i0] = c * r0 - q * r1;
+            im[i0] = c * im0 - q * im1;
+            re[i1] = c * r1 + q * r0;
+            im[i1] = c * im1 + q * im0;
+        }
+    }
+}
+
+void scalar_rotate_general_pairs_soa(
+    double* re,
+    double* im,
+    std::size_t dim,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    const Complex* left_coeff,
+    const Complex* right_coeff,
+    double c) {
+    const auto* left = reinterpret_cast<const double*>(left_coeff);
+    const auto* right = reinterpret_cast<const double*>(right_coeff);
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t step = selector << 1;
+    std::size_t pair_idx = 0;
+    for (std::size_t block = 0; block < dim; block += step) {
+        SYMFT_SIMD_LOOP
+        for (std::size_t offset = 0; offset < selector; ++offset) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
+            const double r0 = re[i0];
+            const double im0 = im[i0];
+            const double r1 = re[i1];
+            const double im1 = im[i1];
+            const double lr = left[2 * pair_idx];
+            const double li = left[2 * pair_idx + 1];
+            const double rr = right[2 * pair_idx];
+            const double ri = right[2 * pair_idx + 1];
+            re[i0] = c * r0 + rr * r1 - ri * im1;
+            im[i0] = c * im0 + rr * im1 + ri * r1;
+            re[i1] = c * r1 + lr * r0 - li * im0;
+            im[i1] = c * im1 + lr * im0 + li * r0;
+            ++pair_idx;
+        }
+    }
+}
+
 const KernelTable table = {
     "scalar",
     scalar_mul_assign,
     scalar_norm_sum,
     scalar_rotate_uniform_imag_pairs,
     scalar_rotate_real_pair_flip,
+    scalar_mul_assign_soa,
+    scalar_norm_sum_soa,
+    scalar_rotate_uniform_imag_pairs_soa,
+    scalar_rotate_real_pair_flip_soa,
+    scalar_rotate_general_pairs_soa,
 };
 
 } // namespace

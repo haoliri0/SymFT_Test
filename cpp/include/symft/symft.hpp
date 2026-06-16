@@ -497,8 +497,10 @@ struct FactoredExecutorState {
     int ndormant = 0;
     int nsymbols = 0;
     int nrecords = 0;
-    ActiveState active;
-    std::vector<Complex> active_scratch;
+    std::vector<double> active_re;
+    std::vector<double> active_im;
+    std::vector<double> active_scratch_re;
+    std::vector<double> active_scratch_im;
     std::vector<std::uint64_t> value_words;
     std::vector<std::uint64_t> assigned_words;
     std::vector<std::uint64_t> measurement_words;

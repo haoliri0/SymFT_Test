@@ -95,12 +95,168 @@ void avx512_rotate_real_pair_flip(
     }
 }
 
+void avx512_mul_assign_soa(double* re, double* im, const Complex* coeff, double c, std::size_t n) {
+    const auto* cr = reinterpret_cast<const double*>(coeff);
+    SYMFT_SIMD_LOOP
+    for (std::size_t i = 0; i < n; ++i) {
+        const double fr = c + cr[2 * i];
+        const double fi = cr[2 * i + 1];
+        const double r = re[i];
+        const double v = im[i];
+        re[i] = fr * r - fi * v;
+        im[i] = fr * v + fi * r;
+    }
+}
+
+double avx512_norm_sum_soa(const double* re, const double* im, const std::size_t* indices, std::size_t n) {
+    double out = 0.0;
+    SYMFT_SIMD_LOOP
+    for (std::size_t i = 0; i < n; ++i) {
+        const std::size_t src = indices[i];
+        const double r = re[src];
+        const double v = im[src];
+        out += r * r + v * v;
+    }
+    return out;
+}
+
+void avx512_rotate_uniform_imag_pairs_soa(
+    double* re,
+    double* im,
+    std::size_t dim,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    double c,
+    double q) {
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t step = selector << 1;
+    const __m512d vc = _mm512_set1_pd(c);
+    const __m512d vq = _mm512_set1_pd(q);
+    for (std::size_t block = 0; block < dim; block += step) {
+        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
+        std::size_t offset = 0;
+        for (; offset + 8 <= selector; offset += 8) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = right_base + offset;
+            const __m512d r0 = _mm512_loadu_pd(re + i0);
+            const __m512d im0 = _mm512_loadu_pd(im + i0);
+            const __m512d r1 = _mm512_loadu_pd(re + i1);
+            const __m512d im1 = _mm512_loadu_pd(im + i1);
+            _mm512_storeu_pd(re + i0, _mm512_fnmadd_pd(vq, im1, _mm512_mul_pd(vc, r0)));
+            _mm512_storeu_pd(im + i0, _mm512_fmadd_pd(vq, r1, _mm512_mul_pd(vc, im0)));
+            _mm512_storeu_pd(re + i1, _mm512_fnmadd_pd(vq, im0, _mm512_mul_pd(vc, r1)));
+            _mm512_storeu_pd(im + i1, _mm512_fmadd_pd(vq, r0, _mm512_mul_pd(vc, im1)));
+        }
+        for (; offset < selector; ++offset) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = right_base + offset;
+            const double r0 = re[i0];
+            const double im0 = im[i0];
+            const double r1 = re[i1];
+            const double im1 = im[i1];
+            re[i0] = c * r0 - q * im1;
+            im[i0] = c * im0 + q * r1;
+            re[i1] = c * r1 - q * im0;
+            im[i1] = c * im1 + q * r0;
+        }
+    }
+}
+
+void avx512_rotate_real_pair_flip_soa(
+    double* re,
+    double* im,
+    std::size_t dim,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    const double* phase_signs,
+    double c,
+    double base_coeff) {
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t step = selector << 1;
+    const __m512d vc = _mm512_set1_pd(c);
+    const __m512d vbase = _mm512_set1_pd(base_coeff);
+    std::size_t pair_idx = 0;
+    for (std::size_t block = 0; block < dim; block += step) {
+        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
+        std::size_t offset = 0;
+        for (; offset + 8 <= selector; offset += 8) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = right_base + offset;
+            const __m512d q = _mm512_mul_pd(_mm512_loadu_pd(phase_signs + pair_idx), vbase);
+            const __m512d r0 = _mm512_loadu_pd(re + i0);
+            const __m512d im0 = _mm512_loadu_pd(im + i0);
+            const __m512d r1 = _mm512_loadu_pd(re + i1);
+            const __m512d im1 = _mm512_loadu_pd(im + i1);
+            _mm512_storeu_pd(re + i0, _mm512_fnmadd_pd(q, r1, _mm512_mul_pd(vc, r0)));
+            _mm512_storeu_pd(im + i0, _mm512_fnmadd_pd(q, im1, _mm512_mul_pd(vc, im0)));
+            _mm512_storeu_pd(re + i1, _mm512_fmadd_pd(q, r0, _mm512_mul_pd(vc, r1)));
+            _mm512_storeu_pd(im + i1, _mm512_fmadd_pd(q, im0, _mm512_mul_pd(vc, im1)));
+            pair_idx += 8;
+        }
+        for (; offset < selector; ++offset) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = right_base + offset;
+            const double q = phase_signs[pair_idx++] * base_coeff;
+            const double r0 = re[i0];
+            const double im0 = im[i0];
+            const double r1 = re[i1];
+            const double im1 = im[i1];
+            re[i0] = c * r0 - q * r1;
+            im[i0] = c * im0 - q * im1;
+            re[i1] = c * r1 + q * r0;
+            im[i1] = c * im1 + q * im0;
+        }
+    }
+}
+
+void avx512_rotate_general_pairs_soa(
+    double* re,
+    double* im,
+    std::size_t dim,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    const Complex* left_coeff,
+    const Complex* right_coeff,
+    double c) {
+    const auto* left = reinterpret_cast<const double*>(left_coeff);
+    const auto* right = reinterpret_cast<const double*>(right_coeff);
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t step = selector << 1;
+    std::size_t pair_idx = 0;
+    for (std::size_t block = 0; block < dim; block += step) {
+        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
+        SYMFT_SIMD_LOOP
+        for (std::size_t offset = 0; offset < selector; ++offset) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = right_base + offset;
+            const double r0 = re[i0];
+            const double im0 = im[i0];
+            const double r1 = re[i1];
+            const double im1 = im[i1];
+            const double lr = left[2 * pair_idx];
+            const double li = left[2 * pair_idx + 1];
+            const double rr = right[2 * pair_idx];
+            const double ri = right[2 * pair_idx + 1];
+            re[i0] = c * r0 + rr * r1 - ri * im1;
+            im[i0] = c * im0 + rr * im1 + ri * r1;
+            re[i1] = c * r1 + lr * r0 - li * im0;
+            im[i1] = c * im1 + lr * im0 + li * r0;
+            ++pair_idx;
+        }
+    }
+}
+
 const KernelTable table = {
     "avx512",
     avx512_mul_assign,
     avx512_norm_sum,
     avx512_rotate_uniform_imag_pairs,
     avx512_rotate_real_pair_flip,
+    avx512_mul_assign_soa,
+    avx512_norm_sum_soa,
+    avx512_rotate_uniform_imag_pairs_soa,
+    avx512_rotate_real_pair_flip_soa,
+    avx512_rotate_general_pairs_soa,
 };
 
 } // namespace

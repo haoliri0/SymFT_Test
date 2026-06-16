@@ -8,6 +8,7 @@
 #include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <immintrin.h>
 #include <limits>
 #include <numeric>
 #include <sstream>
@@ -28,6 +29,14 @@ constexpr std::size_t kSimdPairRotationThreshold = 4096;
 #define SYMFT_SINGLE_SIMD_LOOP _Pragma("GCC ivdep")
 #else
 #define SYMFT_SINGLE_SIMD_LOOP
+#endif
+
+#define SYMFT_RESTRICT
+
+#if defined(__AVX2__) && defined(__FMA__)
+#define SYMFT_INLINE_AVX2 1
+#else
+#define SYMFT_INLINE_AVX2 0
 #endif
 
 [[noreturn]] void fail(const std::string& message) {
@@ -237,6 +246,311 @@ inline void rotate_real_pair_flip_scalar(
         a0[1] = c * i0v - q * i1v;
         a1[0] = c * r1 + q * r0;
         a1[1] = c * i1v + q * i0v;
+    }
+}
+
+#if SYMFT_INLINE_AVX2
+inline __m256d load_complex_re4_inline(const double* coeff) {
+    const __m256d c0 = _mm256_loadu_pd(coeff);
+    const __m256d c1 = _mm256_loadu_pd(coeff + 4);
+    return _mm256_permute4x64_pd(_mm256_unpacklo_pd(c0, c1), 0xd8);
+}
+
+inline __m256d load_complex_im4_inline(const double* coeff) {
+    const __m256d c0 = _mm256_loadu_pd(coeff);
+    const __m256d c1 = _mm256_loadu_pd(coeff + 4);
+    return _mm256_permute4x64_pd(_mm256_unpackhi_pd(c0, c1), 0xd8);
+}
+#endif
+
+inline void mul_assign_soa_inline(double* re, double* im, const Complex* coefficients, double c, std::size_t dim) {
+    const auto* coeff = reinterpret_cast<const double*>(coefficients);
+    std::size_t basis = 0;
+#if SYMFT_INLINE_AVX2
+    const __m256d vc = _mm256_set1_pd(c);
+    for (; basis + 4 <= dim; basis += 4) {
+        const __m256d r = _mm256_loadu_pd(re + basis);
+        const __m256d i = _mm256_loadu_pd(im + basis);
+        const __m256d fr = _mm256_add_pd(vc, load_complex_re4_inline(coeff + 2 * basis));
+        const __m256d fi = load_complex_im4_inline(coeff + 2 * basis);
+        _mm256_storeu_pd(re + basis, _mm256_fnmadd_pd(fi, i, _mm256_mul_pd(fr, r)));
+        _mm256_storeu_pd(im + basis, _mm256_fmadd_pd(fi, r, _mm256_mul_pd(fr, i)));
+    }
+#endif
+    SYMFT_SINGLE_SIMD_LOOP
+    for (; basis < dim; ++basis) {
+        const double fr = c + coeff[2 * basis];
+        const double fi = coeff[2 * basis + 1];
+        const double r = re[basis];
+        const double i = im[basis];
+        re[basis] = fr * r - fi * i;
+        im[basis] = fr * i + fi * r;
+    }
+}
+
+inline double norm_sum_soa_inline(const double* re, const double* im, const std::size_t* sources, std::size_t n) {
+    double probability = 0.0;
+    SYMFT_SINGLE_SIMD_LOOP
+    for (std::size_t idx = 0; idx < n; ++idx) {
+        const std::size_t source = sources[idx];
+        const double r = re[source];
+        const double i = im[source];
+        probability += r * r + i * i;
+    }
+    return probability;
+}
+
+inline void rotate_uniform_imag_pairs_soa_inline(
+    double* re,
+    double* im,
+    std::size_t dim,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    double c,
+    double q) {
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t step = selector << 1;
+#if SYMFT_INLINE_AVX2
+    const __m256d vc = _mm256_set1_pd(c);
+    const __m256d vq = _mm256_set1_pd(q);
+    if (selector == 1 && xmask == 1 && dim >= 4) {
+        std::size_t basis = 0;
+        for (; basis + 4 <= dim; basis += 4) {
+            const __m256d r = _mm256_loadu_pd(re + basis);
+            const __m256d v = _mm256_loadu_pd(im + basis);
+            const __m256d swapped_r = _mm256_permute_pd(r, 0b0101);
+            const __m256d swapped_v = _mm256_permute_pd(v, 0b0101);
+            _mm256_storeu_pd(re + basis, _mm256_fnmadd_pd(vq, swapped_v, _mm256_mul_pd(vc, r)));
+            _mm256_storeu_pd(im + basis, _mm256_fmadd_pd(vq, swapped_r, _mm256_mul_pd(vc, v)));
+        }
+        for (; basis < dim; basis += 2) {
+            const double r0 = re[basis];
+            const double im0 = im[basis];
+            const double r1 = re[basis + 1];
+            const double im1 = im[basis + 1];
+            re[basis] = c * r0 - q * im1;
+            im[basis] = c * im0 + q * r1;
+            re[basis + 1] = c * r1 - q * im0;
+            im[basis + 1] = c * im1 + q * r0;
+        }
+        return;
+    }
+#endif
+    for (std::size_t block = 0; block < dim; block += step) {
+        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
+        std::size_t offset = 0;
+#if SYMFT_INLINE_AVX2
+        for (; offset + 4 <= selector; offset += 4) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = right_base + offset;
+            const __m256d r0 = _mm256_loadu_pd(re + i0);
+            const __m256d im0 = _mm256_loadu_pd(im + i0);
+            const __m256d r1 = _mm256_loadu_pd(re + i1);
+            const __m256d im1 = _mm256_loadu_pd(im + i1);
+            _mm256_storeu_pd(re + i0, _mm256_fnmadd_pd(vq, im1, _mm256_mul_pd(vc, r0)));
+            _mm256_storeu_pd(im + i0, _mm256_fmadd_pd(vq, r1, _mm256_mul_pd(vc, im0)));
+            _mm256_storeu_pd(re + i1, _mm256_fnmadd_pd(vq, im0, _mm256_mul_pd(vc, r1)));
+            _mm256_storeu_pd(im + i1, _mm256_fmadd_pd(vq, r0, _mm256_mul_pd(vc, im1)));
+        }
+#endif
+        SYMFT_SINGLE_SIMD_LOOP
+        for (; offset < selector; ++offset) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = right_base + offset;
+            const double r0 = re[i0];
+            const double im0 = im[i0];
+            const double r1 = re[i1];
+            const double im1 = im[i1];
+            re[i0] = c * r0 - q * im1;
+            im[i0] = c * im0 + q * r1;
+            re[i1] = c * r1 - q * im0;
+            im[i1] = c * im1 + q * r0;
+        }
+    }
+}
+
+inline void rotate_real_pair_flip_soa_inline(
+    double* re,
+    double* im,
+    std::size_t dim,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    const double* phase_signs,
+    double c,
+    double base_coeff) {
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t step = selector << 1;
+#if SYMFT_INLINE_AVX2
+    const __m256d vc = _mm256_set1_pd(c);
+    const __m256d vbase = _mm256_set1_pd(base_coeff);
+    if (selector == 1 && xmask == 1 && dim >= 4) {
+        std::size_t basis = 0;
+        for (; basis + 4 <= dim; basis += 4) {
+            const double q0 = phase_signs[basis >> 1] * base_coeff;
+            const double q1 = phase_signs[(basis >> 1) + 1] * base_coeff;
+            const __m256d signed_q = _mm256_set_pd(q1, -q1, q0, -q0);
+            const __m256d r = _mm256_loadu_pd(re + basis);
+            const __m256d v = _mm256_loadu_pd(im + basis);
+            const __m256d swapped_r = _mm256_permute_pd(r, 0b0101);
+            const __m256d swapped_v = _mm256_permute_pd(v, 0b0101);
+            _mm256_storeu_pd(re + basis, _mm256_fmadd_pd(signed_q, swapped_r, _mm256_mul_pd(vc, r)));
+            _mm256_storeu_pd(im + basis, _mm256_fmadd_pd(signed_q, swapped_v, _mm256_mul_pd(vc, v)));
+        }
+        for (; basis < dim; basis += 2) {
+            const double q = phase_signs[basis >> 1] * base_coeff;
+            const double r0 = re[basis];
+            const double im0 = im[basis];
+            const double r1 = re[basis + 1];
+            const double im1 = im[basis + 1];
+            re[basis] = c * r0 - q * r1;
+            im[basis] = c * im0 - q * im1;
+            re[basis + 1] = c * r1 + q * r0;
+            im[basis + 1] = c * im1 + q * im0;
+        }
+        return;
+    }
+#endif
+    std::size_t pair_idx = 0;
+    for (std::size_t block = 0; block < dim; block += step) {
+        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
+        std::size_t offset = 0;
+#if SYMFT_INLINE_AVX2
+        for (; offset + 4 <= selector; offset += 4) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = right_base + offset;
+            const __m256d q = _mm256_mul_pd(_mm256_loadu_pd(phase_signs + pair_idx), vbase);
+            const __m256d r0 = _mm256_loadu_pd(re + i0);
+            const __m256d im0 = _mm256_loadu_pd(im + i0);
+            const __m256d r1 = _mm256_loadu_pd(re + i1);
+            const __m256d im1 = _mm256_loadu_pd(im + i1);
+            _mm256_storeu_pd(re + i0, _mm256_fnmadd_pd(q, r1, _mm256_mul_pd(vc, r0)));
+            _mm256_storeu_pd(im + i0, _mm256_fnmadd_pd(q, im1, _mm256_mul_pd(vc, im0)));
+            _mm256_storeu_pd(re + i1, _mm256_fmadd_pd(q, r0, _mm256_mul_pd(vc, r1)));
+            _mm256_storeu_pd(im + i1, _mm256_fmadd_pd(q, im0, _mm256_mul_pd(vc, im1)));
+            pair_idx += 4;
+        }
+#endif
+        SYMFT_SINGLE_SIMD_LOOP
+        for (; offset < selector; ++offset) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = right_base + offset;
+            const double q = phase_signs[pair_idx++] * base_coeff;
+            const double r0 = re[i0];
+            const double im0 = im[i0];
+            const double r1 = re[i1];
+            const double im1 = im[i1];
+            re[i0] = c * r0 - q * r1;
+            im[i0] = c * im0 - q * im1;
+            re[i1] = c * r1 + q * r0;
+            im[i1] = c * im1 + q * im0;
+        }
+    }
+}
+
+inline void rotate_general_pairs_soa_inline(
+    double* re,
+    double* im,
+    std::size_t dim,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    const Complex* left_coeff,
+    const Complex* right_coeff,
+    double c) {
+    const auto* left = reinterpret_cast<const double*>(left_coeff);
+    const auto* right = reinterpret_cast<const double*>(right_coeff);
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t step = selector << 1;
+#if SYMFT_INLINE_AVX2
+    const __m256d vc = _mm256_set1_pd(c);
+    if (selector == 1 && xmask == 1 && dim >= 4) {
+        std::size_t basis = 0;
+        for (; basis + 4 <= dim; basis += 4) {
+            const std::size_t pair_idx = basis >> 1;
+            const __m256d coeff_r =
+                _mm256_set_pd(left[2 * (pair_idx + 1)], right[2 * (pair_idx + 1)], left[2 * pair_idx], right[2 * pair_idx]);
+            const __m256d coeff_i = _mm256_set_pd(
+                left[2 * (pair_idx + 1) + 1],
+                right[2 * (pair_idx + 1) + 1],
+                left[2 * pair_idx + 1],
+                right[2 * pair_idx + 1]);
+            const __m256d r = _mm256_loadu_pd(re + basis);
+            const __m256d v = _mm256_loadu_pd(im + basis);
+            const __m256d swapped_r = _mm256_permute_pd(r, 0b0101);
+            const __m256d swapped_v = _mm256_permute_pd(v, 0b0101);
+            __m256d out_r = _mm256_fmadd_pd(vc, r, _mm256_mul_pd(coeff_r, swapped_r));
+            out_r = _mm256_fnmadd_pd(coeff_i, swapped_v, out_r);
+            __m256d out_i = _mm256_fmadd_pd(vc, v, _mm256_mul_pd(coeff_r, swapped_v));
+            out_i = _mm256_fmadd_pd(coeff_i, swapped_r, out_i);
+            _mm256_storeu_pd(re + basis, out_r);
+            _mm256_storeu_pd(im + basis, out_i);
+        }
+        for (; basis < dim; basis += 2) {
+            const std::size_t pair_idx = basis >> 1;
+            const double r0 = re[basis];
+            const double im0 = im[basis];
+            const double r1 = re[basis + 1];
+            const double im1 = im[basis + 1];
+            const double lr = left[2 * pair_idx];
+            const double li = left[2 * pair_idx + 1];
+            const double rr = right[2 * pair_idx];
+            const double ri = right[2 * pair_idx + 1];
+            re[basis] = c * r0 + rr * r1 - ri * im1;
+            im[basis] = c * im0 + rr * im1 + ri * r1;
+            re[basis + 1] = c * r1 + lr * r0 - li * im0;
+            im[basis + 1] = c * im1 + lr * im0 + li * r0;
+        }
+        return;
+    }
+#endif
+    std::size_t pair_idx = 0;
+    for (std::size_t block = 0; block < dim; block += step) {
+        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
+        std::size_t offset = 0;
+#if SYMFT_INLINE_AVX2
+        for (; offset + 4 <= selector; offset += 4) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = right_base + offset;
+            const __m256d r0 = _mm256_loadu_pd(re + i0);
+            const __m256d im0 = _mm256_loadu_pd(im + i0);
+            const __m256d r1 = _mm256_loadu_pd(re + i1);
+            const __m256d im1 = _mm256_loadu_pd(im + i1);
+            const __m256d lr = load_complex_re4_inline(left + 2 * pair_idx);
+            const __m256d li = load_complex_im4_inline(left + 2 * pair_idx);
+            const __m256d rr = load_complex_re4_inline(right + 2 * pair_idx);
+            const __m256d ri = load_complex_im4_inline(right + 2 * pair_idx);
+            __m256d out_r0 = _mm256_fmadd_pd(vc, r0, _mm256_mul_pd(rr, r1));
+            out_r0 = _mm256_fnmadd_pd(ri, im1, out_r0);
+            __m256d out_i0 = _mm256_fmadd_pd(vc, im0, _mm256_mul_pd(rr, im1));
+            out_i0 = _mm256_fmadd_pd(ri, r1, out_i0);
+            __m256d out_r1 = _mm256_fmadd_pd(vc, r1, _mm256_mul_pd(lr, r0));
+            out_r1 = _mm256_fnmadd_pd(li, im0, out_r1);
+            __m256d out_i1 = _mm256_fmadd_pd(vc, im1, _mm256_mul_pd(lr, im0));
+            out_i1 = _mm256_fmadd_pd(li, r0, out_i1);
+            _mm256_storeu_pd(re + i0, out_r0);
+            _mm256_storeu_pd(im + i0, out_i0);
+            _mm256_storeu_pd(re + i1, out_r1);
+            _mm256_storeu_pd(im + i1, out_i1);
+            pair_idx += 4;
+        }
+#endif
+        SYMFT_SINGLE_SIMD_LOOP
+        for (; offset < selector; ++offset) {
+            const std::size_t i0 = block + offset;
+            const std::size_t i1 = right_base + offset;
+            const double r0 = re[i0];
+            const double im0 = im[i0];
+            const double r1 = re[i1];
+            const double im1 = im[i1];
+            const double lr = left[2 * pair_idx];
+            const double li = left[2 * pair_idx + 1];
+            const double rr = right[2 * pair_idx];
+            const double ri = right[2 * pair_idx + 1];
+            re[i0] = c * r0 + rr * r1 - ri * im1;
+            im[i0] = c * im0 + rr * im1 + ri * r1;
+            re[i1] = c * r1 + lr * r0 - li * im0;
+            im[i1] = c * im1 + lr * im0 + li * r0;
+            ++pair_idx;
+        }
     }
 }
 
@@ -2884,52 +3198,93 @@ void assign_presampled_exogenous(FactoredExecutorState& runtime, const Presample
     }
 }
 
+std::size_t runtime_active_dim(const FactoredExecutorState& runtime) {
+    return active_length(runtime.k);
+}
+
+void ensure_runtime_active_capacity(FactoredExecutorState& runtime, int max_k) {
+    const std::size_t max_dim = active_length(max_k);
+    if (runtime.active_re.size() < max_dim) {
+        runtime.active_re.resize(max_dim, 0.0);
+    }
+    if (runtime.active_im.size() < max_dim) {
+        runtime.active_im.resize(max_dim, 0.0);
+    }
+    if (runtime.active_scratch_re.size() < max_dim) {
+        runtime.active_scratch_re.resize(max_dim, 0.0);
+    }
+    if (runtime.active_scratch_im.size() < max_dim) {
+        runtime.active_scratch_im.resize(max_dim, 0.0);
+    }
+}
+
 void promote_first_dormant_rotation(FactoredExecutorState& runtime, double theta) {
     if (runtime.ndormant <= 0) {
         fail("cannot promote a dormant qubit when none remain");
     }
-    const std::size_t dim = runtime.active.dim();
+    const std::size_t dim = runtime_active_dim(runtime);
     const std::size_t promoted_dim = 2 * dim;
-    if (runtime.active.alpha.size() < promoted_dim) {
-        runtime.active.alpha.resize(promoted_dim, Complex(0.0, 0.0));
+    if (runtime.active_re.size() < promoted_dim) {
+        runtime.active_re.resize(promoted_dim, 0.0);
     }
-    if (runtime.active_scratch.size() < promoted_dim) {
-        runtime.active_scratch.resize(promoted_dim, Complex(0.0, 0.0));
+    if (runtime.active_im.size() < promoted_dim) {
+        runtime.active_im.resize(promoted_dim, 0.0);
+    }
+    if (runtime.active_scratch_re.size() < promoted_dim) {
+        runtime.active_scratch_re.resize(promoted_dim, 0.0);
+    }
+    if (runtime.active_scratch_im.size() < promoted_dim) {
+        runtime.active_scratch_im.resize(promoted_dim, 0.0);
     }
     const double c = std::cos(theta);
-    const Complex minus_i_s(0.0, -std::sin(theta));
+    const double s = std::sin(theta);
+    SYMFT_SINGLE_SIMD_LOOP
     for (std::size_t basis = 0; basis < dim; ++basis) {
-        const Complex amp = runtime.active.alpha[basis];
-        runtime.active.alpha[basis] = c * amp;
-        runtime.active.alpha[dim + basis] = minus_i_s * amp;
+        const double r = runtime.active_re[basis];
+        const double i = runtime.active_im[basis];
+        runtime.active_re[basis] = c * r;
+        runtime.active_im[basis] = c * i;
+        runtime.active_re[dim + basis] = s * i;
+        runtime.active_im[dim + basis] = -s * r;
     }
     ++runtime.k;
     --runtime.ndormant;
-    runtime.active.k = runtime.k;
 }
 
-void apply_active_basis_change(ActiveState& active, char kind, int q) {
-    if (q < 0 || q >= active.k) {
+void apply_active_basis_change(FactoredExecutorState& runtime, char kind, int q) {
+    if (q < 0 || q >= runtime.k) {
         fail("active basis-change qubit is out of range");
     }
-    const std::size_t dim = active.dim();
+    const std::size_t dim = runtime_active_dim(runtime);
     const std::size_t mask = std::size_t{1} << q;
     if (kind == 'H') {
         const double inv_sqrt2 = 1.0 / std::sqrt(2.0);
-        for (std::size_t base = 0; base < dim; ++base) {
-            if ((base & mask) != 0) {
-                continue;
+        const std::size_t step = mask << 1;
+        for (std::size_t block = 0; block < dim; block += step) {
+            SYMFT_SINGLE_SIMD_LOOP
+            for (std::size_t offset = 0; offset < mask; ++offset) {
+                const std::size_t base = block + offset;
+                const std::size_t paired = base | mask;
+                const double r0 = runtime.active_re[base];
+                const double i0 = runtime.active_im[base];
+                const double r1 = runtime.active_re[paired];
+                const double i1 = runtime.active_im[paired];
+                runtime.active_re[base] = (r0 + r1) * inv_sqrt2;
+                runtime.active_im[base] = (i0 + i1) * inv_sqrt2;
+                runtime.active_re[paired] = (r0 - r1) * inv_sqrt2;
+                runtime.active_im[paired] = (i0 - i1) * inv_sqrt2;
             }
-            const std::size_t paired = base | mask;
-            const Complex a0 = active.alpha[base];
-            const Complex a1 = active.alpha[paired];
-            active.alpha[base] = (a0 + a1) * inv_sqrt2;
-            active.alpha[paired] = (a0 - a1) * inv_sqrt2;
         }
     } else if (kind == 'S') {
-        for (std::size_t basis = 0; basis < dim; ++basis) {
-            if ((basis & mask) != 0) {
-                active.alpha[basis] *= Complex(0.0, 1.0);
+        const std::size_t step = mask << 1;
+        for (std::size_t block = mask; block < dim; block += step) {
+            SYMFT_SINGLE_SIMD_LOOP
+            for (std::size_t offset = 0; offset < mask; ++offset) {
+                const std::size_t basis = block + offset;
+                const double r = runtime.active_re[basis];
+                const double i = runtime.active_im[basis];
+                runtime.active_re[basis] = -i;
+                runtime.active_im[basis] = r;
             }
         }
     } else {
@@ -2937,23 +3292,102 @@ void apply_active_basis_change(ActiveState& active, char kind, int q) {
     }
 }
 
-double active_last_z_probability_one(const ActiveState& active) {
-    if (active.k <= 0) {
+void rotate_pauli(FactoredExecutorState& runtime, const PrecomputedActivePauliRotationKernel& kernel, bool sign) {
+    if (kernel.action.nqubits != runtime.k) {
+        fail("rotation kernel dimension does not match active state");
+    }
+    const double c = kernel.cos_theta;
+    auto& simd_table = simd::dispatch_table();
+    double* active_re = runtime.active_re.data();
+    double* active_im = runtime.active_im.data();
+    if (kernel.is_diagonal) {
+        const auto& coefficients = sign ? kernel.diagonal_plus_coefficients : kernel.diagonal_minus_coefficients;
+        if (coefficients.size() < kSimdPairRotationThreshold) {
+            mul_assign_soa_inline(active_re, active_im, coefficients.data(), c, coefficients.size());
+        } else {
+            simd_table.mul_assign_soa(active_re, active_im, coefficients.data(), c, coefficients.size());
+        }
+        return;
+    }
+    const std::size_t dim = runtime_active_dim(runtime);
+    const std::size_t npairs = kernel.pair_left_indices.size();
+    if (kernel.uniform_imag_pairs) {
+        const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
+        if (npairs < kSimdPairRotationThreshold) {
+            rotate_uniform_imag_pairs_soa_inline(active_re, active_im, dim, kernel.action.xmask, kernel.pair_bit, c, coefficient.imag());
+        } else {
+            simd_table.rotate_uniform_imag_pairs_soa(
+                active_re,
+                active_im,
+                dim,
+                kernel.action.xmask,
+                kernel.pair_bit,
+                c,
+                coefficient.imag());
+        }
+        return;
+    }
+    if (kernel.real_pair_flip) {
+        const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
+        if (npairs < kSimdPairRotationThreshold) {
+            rotate_real_pair_flip_soa_inline(
+                active_re,
+                active_im,
+                dim,
+                kernel.action.xmask,
+                kernel.pair_bit,
+                kernel.real_pair_flip_basis_phase_signs.data(),
+                c,
+                coefficient.real());
+        } else {
+            simd_table.rotate_real_pair_flip_soa(
+                active_re,
+                active_im,
+                dim,
+                kernel.action.xmask,
+                kernel.pair_bit,
+                kernel.real_pair_flip_basis_phase_signs.data(),
+                c,
+                coefficient.real());
+        }
+        return;
+    }
+    const auto& left_coeff = sign ? kernel.pair_left_plus_coefficients : kernel.pair_left_minus_coefficients;
+    const auto& right_coeff = sign ? kernel.pair_right_plus_coefficients : kernel.pair_right_minus_coefficients;
+    if (npairs < kSimdPairRotationThreshold) {
+        rotate_general_pairs_soa_inline(
+            active_re, active_im, dim, kernel.action.xmask, kernel.pair_bit, left_coeff.data(), right_coeff.data(), c);
+    } else {
+        simd_table.rotate_general_pairs_soa(
+            active_re,
+            active_im,
+            dim,
+            kernel.action.xmask,
+            kernel.pair_bit,
+            left_coeff.data(),
+            right_coeff.data(),
+            c);
+    }
+}
+
+double active_last_z_probability_one(const FactoredExecutorState& runtime) {
+    if (runtime.k <= 0) {
         fail("cannot measure last active qubit when k == 0");
     }
-    const std::size_t mask = std::size_t{1} << (active.k - 1);
-    const std::size_t dim = active.dim();
+    const std::size_t mask = std::size_t{1} << (runtime.k - 1);
+    const std::size_t dim = runtime_active_dim(runtime);
     double probability = 0.0;
-    for (std::size_t basis = 0; basis < dim; ++basis) {
-        if ((basis & mask) != 0) {
-            probability += std::norm(active.alpha[basis]);
-        }
+    SYMFT_SINGLE_SIMD_LOOP
+    for (std::size_t basis = mask; basis < dim; ++basis) {
+        const double r = runtime.active_re[basis];
+        const double i = runtime.active_im[basis];
+        probability += r * r + i * i;
     }
     return std::clamp(probability, 0.0, 1.0);
 }
 
-void project_active_last_z(ActiveState& active, bool branch, double prob1) {
-    const int new_k = active.k - 1;
+void project_active_last_z(FactoredExecutorState& runtime, bool branch, double prob1) {
+    const int new_k = runtime.k - 1;
     const std::size_t dim = active_length(new_k);
     const double probability = branch ? prob1 : 1.0 - prob1;
     if (probability <= 0.0) {
@@ -2961,42 +3395,60 @@ void project_active_last_z(ActiveState& active, bool branch, double prob1) {
     }
     const double invnorm = 1.0 / std::sqrt(probability);
     const std::size_t branch_offset = branch ? dim : 0;
+    SYMFT_SINGLE_SIMD_LOOP
     for (std::size_t basis = 0; basis < dim; ++basis) {
-        active.alpha[basis] = active.alpha[branch_offset + basis] * invnorm;
+        const std::size_t source = branch_offset + basis;
+        runtime.active_re[basis] = runtime.active_re[source] * invnorm;
+        runtime.active_im[basis] = runtime.active_im[source] * invnorm;
     }
-    active.k = new_k;
+    runtime.k = new_k;
 }
 
 double active_diagonal_measurement_branch_probability(
-    const ActiveState& active,
+    const FactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
     bool branch) {
     const auto& sources = branch ? kernel.source0_true : kernel.source0_false;
-    double probability = simd::dispatch_table().norm_sum(active.alpha.data(), sources.data(), sources.size());
+    const double probability = sources.size() < kSimdPairRotationThreshold
+                                   ? norm_sum_soa_inline(
+                                         runtime.active_re.data(), runtime.active_im.data(), sources.data(), sources.size())
+                                   : simd::dispatch_table().norm_sum_soa(
+                                         runtime.active_re.data(), runtime.active_im.data(), sources.data(), sources.size());
     return std::clamp(probability, 0.0, 1.0);
 }
 
 double active_measurement_branch_probability(
-    const ActiveState& active,
+    const FactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
     bool branch) {
     const auto& sources0 = branch ? kernel.source0_true : kernel.source0_false;
     const auto& sources1 = branch ? kernel.source1_true : kernel.source1_false;
     const auto& coeffs0 = branch ? kernel.coeff0_true : kernel.coeff0_false;
     const auto& coeffs1 = branch ? kernel.coeff1_true : kernel.coeff1_false;
+    const auto* coeff0 = reinterpret_cast<const double*>(coeffs0.data());
+    const auto* coeff1 = reinterpret_cast<const double*>(coeffs1.data());
     double probability = 0.0;
+    SYMFT_SINGLE_SIMD_LOOP
     for (std::size_t idx = 0; idx < sources0.size(); ++idx) {
-        Complex amp = coeffs0[idx] * active.alpha[sources0[idx]];
-        if (sources1[idx] != kNoSource) {
-            amp += coeffs1[idx] * active.alpha[sources1[idx]];
+        const std::size_t source0 = sources0[idx];
+        const double c0r = coeff0[2 * idx];
+        const double c0i = coeff0[2 * idx + 1];
+        double ar = c0r * runtime.active_re[source0] - c0i * runtime.active_im[source0];
+        double ai = c0r * runtime.active_im[source0] + c0i * runtime.active_re[source0];
+        const std::size_t source1 = sources1[idx];
+        if (source1 != kNoSource) {
+            const double c1r = coeff1[2 * idx];
+            const double c1i = coeff1[2 * idx + 1];
+            ar += c1r * runtime.active_re[source1] - c1i * runtime.active_im[source1];
+            ai += c1r * runtime.active_im[source1] + c1i * runtime.active_re[source1];
         }
-        probability += std::norm(amp);
+        probability += ar * ar + ai * ai;
     }
     return std::clamp(probability, 0.0, 1.0);
 }
 
 void project_diagonal_active_pauli_measurement(
-    ActiveState& active,
+    FactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
     bool branch,
     double probability) {
@@ -3005,15 +3457,17 @@ void project_diagonal_active_pauli_measurement(
     }
     const auto& sources = branch ? kernel.source0_true : kernel.source0_false;
     const double invnorm = 1.0 / std::sqrt(probability);
+    SYMFT_SINGLE_SIMD_LOOP
     for (std::size_t idx = 0; idx < sources.size(); ++idx) {
-        active.alpha[idx] = active.alpha[sources[idx]] * invnorm;
+        const std::size_t source = sources[idx];
+        runtime.active_re[idx] = runtime.active_re[source] * invnorm;
+        runtime.active_im[idx] = runtime.active_im[source] * invnorm;
     }
-    --active.k;
+    --runtime.k;
 }
 
 void project_active_pauli_measurement(
-    ActiveState& active,
-    std::vector<Complex>& scratch,
+    FactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
     bool branch,
     double probability) {
@@ -3024,28 +3478,44 @@ void project_active_pauli_measurement(
     const auto& sources1 = branch ? kernel.source1_true : kernel.source1_false;
     const auto& coeffs0 = branch ? kernel.coeff0_true : kernel.coeff0_false;
     const auto& coeffs1 = branch ? kernel.coeff1_true : kernel.coeff1_false;
-    if (scratch.size() < sources0.size()) {
-        scratch.resize(sources0.size());
+    if (runtime.active_scratch_re.size() < sources0.size()) {
+        runtime.active_scratch_re.resize(sources0.size(), 0.0);
+    }
+    if (runtime.active_scratch_im.size() < sources0.size()) {
+        runtime.active_scratch_im.resize(sources0.size(), 0.0);
     }
     const double invnorm = 1.0 / std::sqrt(probability);
+    const auto* coeff0 = reinterpret_cast<const double*>(coeffs0.data());
+    const auto* coeff1 = reinterpret_cast<const double*>(coeffs1.data());
+    SYMFT_SINGLE_SIMD_LOOP
     for (std::size_t idx = 0; idx < sources0.size(); ++idx) {
-        Complex amp = coeffs0[idx] * active.alpha[sources0[idx]];
-        if (sources1[idx] != kNoSource) {
-            amp += coeffs1[idx] * active.alpha[sources1[idx]];
+        const std::size_t source0 = sources0[idx];
+        const double c0r = coeff0[2 * idx];
+        const double c0i = coeff0[2 * idx + 1];
+        double ar = c0r * runtime.active_re[source0] - c0i * runtime.active_im[source0];
+        double ai = c0r * runtime.active_im[source0] + c0i * runtime.active_re[source0];
+        const std::size_t source1 = sources1[idx];
+        if (source1 != kNoSource) {
+            const double c1r = coeff1[2 * idx];
+            const double c1i = coeff1[2 * idx + 1];
+            ar += c1r * runtime.active_re[source1] - c1i * runtime.active_im[source1];
+            ai += c1r * runtime.active_im[source1] + c1i * runtime.active_re[source1];
         }
-        scratch[idx] = amp * invnorm;
+        runtime.active_scratch_re[idx] = ar * invnorm;
+        runtime.active_scratch_im[idx] = ai * invnorm;
     }
-    std::copy(scratch.begin(), scratch.begin() + static_cast<std::ptrdiff_t>(sources0.size()), active.alpha.begin());
-    --active.k;
+    std::copy_n(runtime.active_scratch_re.data(), sources0.size(), runtime.active_re.data());
+    std::copy_n(runtime.active_scratch_im.data(), sources0.size(), runtime.active_im.data());
+    --runtime.k;
 }
 
 void execute_instruction(FactoredExecutorState& runtime, const ApplyPrecomputedActivePauliRotation& instruction) {
     const bool sign = eval_symbolic_bool_unchecked(instruction.sign_plan, runtime);
-    rotate_pauli(runtime.active, instruction.rotation_kernel, sign);
+    rotate_pauli(runtime, instruction.rotation_kernel, sign);
 }
 
 void execute_instruction(FactoredExecutorState& runtime, const ApplyActiveBasisChange& instruction) {
-    apply_active_basis_change(runtime.active, instruction.kind, instruction.qubit);
+    apply_active_basis_change(runtime, instruction.kind, instruction.qubit);
 }
 
 void execute_instruction(FactoredExecutorState& runtime, const PromoteDormantRotation& instruction) {
@@ -3059,11 +3529,10 @@ void execute_instruction(FactoredExecutorState& runtime, const RecordMeasurement
 }
 
 void execute_instruction(FactoredExecutorState& runtime, const MeasureActiveLastZ& instruction) {
-    const double prob1 = active_last_z_probability_one(runtime.active);
+    const double prob1 = active_last_z_probability_one(runtime);
     const bool branch = sample_bernoulli(runtime.rng_state, prob1);
     assign_symbol(runtime, instruction.branch, branch);
-    project_active_last_z(runtime.active, branch, prob1);
-    runtime.k = runtime.active.k;
+    project_active_last_z(runtime, branch, prob1);
     ++runtime.ndormant;
     const bool outcome = eval_symbolic_bool_unchecked(instruction.outcome_plan, runtime);
     write_measurement_record(runtime, instruction.record, outcome, instruction.record_condition);
@@ -3074,19 +3543,18 @@ void execute_instruction(FactoredExecutorState& runtime, const MeasurePrecompute
         fail("cannot measure an active Pauli when k == 0");
     }
     double prob_true = instruction.kernel.is_diagonal
-                           ? active_diagonal_measurement_branch_probability(runtime.active, instruction.kernel, true)
-                           : active_measurement_branch_probability(runtime.active, instruction.kernel, true);
+                           ? active_diagonal_measurement_branch_probability(runtime, instruction.kernel, true)
+                           : active_measurement_branch_probability(runtime, instruction.kernel, true);
     prob_true = std::clamp(prob_true, 0.0, 1.0);
     const double prob_false = 1.0 - prob_true;
     const bool branch = sample_bernoulli(runtime.rng_state, prob_true);
     const double probability = branch ? prob_true : prob_false;
     assign_symbol(runtime, instruction.branch, branch);
     if (instruction.kernel.is_diagonal) {
-        project_diagonal_active_pauli_measurement(runtime.active, instruction.kernel, branch, probability);
+        project_diagonal_active_pauli_measurement(runtime, instruction.kernel, branch, probability);
     } else {
-        project_active_pauli_measurement(runtime.active, runtime.active_scratch, instruction.kernel, branch, probability);
+        project_active_pauli_measurement(runtime, instruction.kernel, branch, probability);
     }
-    runtime.k = runtime.active.k;
     ++runtime.ndormant;
     const bool outcome = eval_symbolic_bool_unchecked(instruction.outcome_plan, runtime);
     write_measurement_record(runtime, instruction.record, outcome, instruction.record_condition);
@@ -3107,13 +3575,19 @@ FactoredExecutorState::FactoredExecutorState(const FactoredInstructionProgram& p
       ndormant(program.n - program.initial_k),
       nsymbols(program.nsymbols),
       nrecords(program.nrecords),
-      active(program.initial_active),
-      active_scratch(active_length(program.max_k), Complex(0.0, 0.0)),
+      active_re(active_length(program.max_k), 0.0),
+      active_im(active_length(program.max_k), 0.0),
+      active_scratch_re(active_length(program.max_k), 0.0),
+      active_scratch_im(active_length(program.max_k), 0.0),
       value_words(symbol_word_count(program.nsymbols), 0),
       assigned_words(symbol_word_count(program.nsymbols), 0),
       measurement_words(symbol_word_count(program.nrecords), 0),
       rng_state(seed) {
-    active.reserve_for_k(program.max_k);
+    const std::size_t dim = program.initial_active.dim();
+    for (std::size_t basis = 0; basis < dim; ++basis) {
+        active_re[basis] = program.initial_active.alpha[basis].real();
+        active_im[basis] = program.initial_active.alpha[basis].imag();
+    }
 }
 
 void reset_executor(FactoredExecutorState& runtime, const FactoredInstructionProgram& program) {
@@ -3122,13 +3596,11 @@ void reset_executor(FactoredExecutorState& runtime, const FactoredInstructionPro
     runtime.ndormant = program.n - program.initial_k;
     runtime.nsymbols = program.nsymbols;
     runtime.nrecords = program.nrecords;
-    runtime.active.k = program.initial_active.k;
-    runtime.active.reserve_for_k(program.max_k);
+    ensure_runtime_active_capacity(runtime, program.max_k);
     const std::size_t dim = program.initial_active.dim();
-    std::copy(program.initial_active.alpha.begin(), program.initial_active.alpha.begin() + static_cast<std::ptrdiff_t>(dim), runtime.active.alpha.begin());
-    const std::size_t max_dim = active_length(program.max_k);
-    if (runtime.active_scratch.size() < max_dim) {
-        runtime.active_scratch.resize(max_dim);
+    for (std::size_t basis = 0; basis < dim; ++basis) {
+        runtime.active_re[basis] = program.initial_active.alpha[basis].real();
+        runtime.active_im[basis] = program.initial_active.alpha[basis].imag();
     }
     const std::size_t nwords = symbol_word_count(program.nsymbols);
     if (runtime.value_words.size() != nwords) {
@@ -3181,7 +3653,7 @@ PresampledExogenous presample_exogenous(const FactoredInstructionProgram& progra
 }
 
 void execute_in_place(FactoredExecutorState& runtime, const FactoredInstructionProgram& program) {
-    if (runtime.n != program.n || runtime.k != runtime.active.k || runtime.k + runtime.ndormant != runtime.n) {
+    if (runtime.n != program.n || runtime.k + runtime.ndormant != runtime.n) {
         fail("executor state does not match program");
     }
     sample_exogenous_symbols(runtime, program);
@@ -3195,7 +3667,7 @@ void execute_in_place(
     const FactoredInstructionProgram& program,
     const PresampledExogenous& samples,
     int shot_index) {
-    if (runtime.n != program.n || runtime.k != runtime.active.k || runtime.k + runtime.ndormant != runtime.n) {
+    if (runtime.n != program.n || runtime.k + runtime.ndormant != runtime.n) {
         fail("executor state does not match program");
     }
     if (program.nsymbols != samples.nsymbols) {

@@ -118,8 +118,10 @@ void test_active_basis_change_instruction() {
     FactoredExecutorState runtime(program, 5);
     execute_in_place(runtime, program);
     const double inv_sqrt2 = 1.0 / std::sqrt(2.0);
-    require(approx(runtime.active.alpha[0], {inv_sqrt2, 0.0}), "active basis H scalar amplitude 0");
-    require(approx(runtime.active.alpha[1], {inv_sqrt2, 0.0}), "active basis H scalar amplitude 1");
+    require(std::abs(runtime.active_re[0] - inv_sqrt2) < 1e-10, "active basis H scalar amplitude 0 re");
+    require(std::abs(runtime.active_im[0]) < 1e-10, "active basis H scalar amplitude 0 im");
+    require(std::abs(runtime.active_re[1] - inv_sqrt2) < 1e-10, "active basis H scalar amplitude 1 re");
+    require(std::abs(runtime.active_im[1]) < 1e-10, "active basis H scalar amplitude 1 im");
 
     BatchFactoredExecutorState batch(program, 4, 7);
     execute_batch_in_place(batch, program);
