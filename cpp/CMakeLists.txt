@@ -15,7 +15,10 @@ option(SYMFT_CPP_ENABLE_AVX512 "Build AVX512 active kernels when the compiler su
 option(SYMFT_CPP_NATIVE "Build host-vectorized kernels with -march=native" ON)
 
 add_library(symft_cpp
-    src/core/symft_common.cpp
+    src/core/common.cpp
+    src/core/pauli.cpp
+    src/core/symbolic.cpp
+    src/core/frames.cpp
     src/circuit/circuit_lowering.cpp
     src/sampler/active_state.cpp
     src/factored/factored_state.cpp
