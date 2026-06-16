@@ -20,7 +20,7 @@ add_library(symft_cpp
     src/active/active_state.cpp
     src/factored/factored_state.cpp
     src/factored/factored_planner.cpp
-    src/sampler/single_shot.cpp
+    src/sampler/single_shot_sampler.cpp
     src/stim/stim_parser.cpp
     src/sampler/batch_sampler.cpp
     src/sampler/batch_symbols.cpp

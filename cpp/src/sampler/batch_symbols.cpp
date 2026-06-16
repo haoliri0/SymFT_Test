@@ -1,4 +1,4 @@
-#include "batch_sampler_internal.hpp"
+#include "batch_internal.hpp"
 
 namespace symft {
 
