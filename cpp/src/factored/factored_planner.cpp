@@ -713,17 +713,15 @@ void build_categorical_sample_plan(
 FactoredInstructionProgram::FactoredInstructionProgram(
     int n_,
     int initial_k_,
-    ActiveState initial_active_,
     std::vector<FactoredInstruction> instructions_,
     int max_k_,
     SymbolicContext context_)
     : n(checked_nqubits(n_)),
       initial_k(checked_nqubits(initial_k_)),
       max_k(checked_nqubits(max_k_)),
-      initial_active(std::move(initial_active_)),
       instructions(std::move(instructions_)),
       context(std::move(context_)) {
-    if (initial_k > n || max_k > n || initial_k > max_k || initial_active.k != initial_k) {
+    if (initial_k > n || max_k > n || initial_k > max_k) {
         fail("invalid factored instruction program dimensions");
     }
     int record_count = 0;
@@ -757,7 +755,12 @@ FactoredInstructionProgram::FactoredInstructionProgram(
 }
 
 FactoredInstructionProgram factored_instruction_program(const PendingFactoredState& state) {
-    return FactoredInstructionProgram(state.n, state.active.k, state.active, state.instructions, state.max_k, *state.context);
+    return FactoredInstructionProgram(
+        state.n,
+        state.initial_k,
+        state.instructions,
+        state.max_k,
+        *state.context);
 }
 
 FactoredInstructionProgram plan_factored_updates(PendingFactoredState& state) {

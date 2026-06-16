@@ -399,7 +399,6 @@ struct FrameFactoredState {
     int n = 0;
     int k = 0;
     CliffordFrame clifford;
-    ActiveState active;
     ActivePauliFrame active_frame;
     DormantState dormant;
     std::shared_ptr<SymbolicContext> context;
@@ -433,9 +432,9 @@ struct FactoredInstructionProgram;
 
 struct PendingFactoredState {
     int n = 0;
+    int initial_k = 0;
     int k = 0;
     int max_k = 0;
-    ActiveState active;
     DormantState dormant;
     std::shared_ptr<SymbolicContext> context;
     std::vector<PendingOperation> pending_operations;
@@ -458,7 +457,6 @@ struct FactoredInstructionProgram {
     int n = 0;
     int initial_k = 0;
     int max_k = 0;
-    ActiveState initial_active;
     std::vector<FactoredInstruction> instructions;
     SymbolicContext context;
     int nsymbols = 0;
@@ -473,7 +471,6 @@ struct FactoredInstructionProgram {
     FactoredInstructionProgram(
         int n,
         int initial_k,
-        ActiveState initial_active,
         std::vector<FactoredInstruction> instructions,
         int max_k,
         SymbolicContext context = SymbolicContext());

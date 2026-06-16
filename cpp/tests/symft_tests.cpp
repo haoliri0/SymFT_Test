@@ -110,7 +110,6 @@ void test_active_basis_change_instruction() {
     const FactoredInstructionProgram program(
         1,
         1,
-        ActiveState(1),
         {ApplyActiveBasisChange{'H', 0}},
         1,
         SymbolicContext());

@@ -154,16 +154,13 @@ void reset_batch_executor(BatchFactoredExecutorState& runtime, const FactoredIns
         runtime.branch_invnorms.resize(static_cast<std::size_t>(runtime.batches), 0.0);
     }
 
-    if (program.initial_active.k != program.initial_k) {
-        fail("program initial active state dimension mismatch");
-    }
-    const std::size_t dim = program.initial_active.dim();
+    const std::size_t dim = active_length(program.initial_k);
     for (std::size_t basis = 0; basis < dim; ++basis) {
-        const Complex amp = program.initial_active.alpha[basis];
         const std::size_t base = basis * static_cast<std::size_t>(runtime.batches);
+        const double re = basis == 0 ? 1.0 : 0.0;
         for (int shot = 0; shot < runtime.active_shots; ++shot) {
-            runtime.active_re[base + static_cast<std::size_t>(shot)] = amp.real();
-            runtime.active_im[base + static_cast<std::size_t>(shot)] = amp.imag();
+            runtime.active_re[base + static_cast<std::size_t>(shot)] = re;
+            runtime.active_im[base + static_cast<std::size_t>(shot)] = 0.0;
         }
     }
 }

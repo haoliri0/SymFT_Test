@@ -899,11 +899,10 @@ FactoredExecutorState::FactoredExecutorState(const FactoredInstructionProgram& p
       assigned_words(symbol_word_count(program.nsymbols), 0),
       measurement_words(symbol_word_count(program.nrecords), 0),
       rng_state(seed) {
-    const std::size_t dim = program.initial_active.dim();
-    for (std::size_t basis = 0; basis < dim; ++basis) {
-        active_re[basis] = program.initial_active.alpha[basis].real();
-        active_im[basis] = program.initial_active.alpha[basis].imag();
-    }
+    const std::size_t dim = active_length(program.initial_k);
+    std::fill_n(active_re.data(), dim, 0.0);
+    std::fill_n(active_im.data(), dim, 0.0);
+    active_re[0] = 1.0;
 }
 
 void reset_executor(FactoredExecutorState& runtime, const FactoredInstructionProgram& program) {
@@ -913,11 +912,10 @@ void reset_executor(FactoredExecutorState& runtime, const FactoredInstructionPro
     runtime.nsymbols = program.nsymbols;
     runtime.nrecords = program.nrecords;
     ensure_runtime_active_capacity(runtime, program.max_k);
-    const std::size_t dim = program.initial_active.dim();
-    for (std::size_t basis = 0; basis < dim; ++basis) {
-        runtime.active_re[basis] = program.initial_active.alpha[basis].real();
-        runtime.active_im[basis] = program.initial_active.alpha[basis].imag();
-    }
+    const std::size_t dim = active_length(program.initial_k);
+    std::fill_n(runtime.active_re.data(), dim, 0.0);
+    std::fill_n(runtime.active_im.data(), dim, 0.0);
+    runtime.active_re[0] = 1.0;
     const std::size_t nwords = symbol_word_count(program.nsymbols);
     if (runtime.value_words.size() != nwords) {
         runtime.value_words.resize(nwords);

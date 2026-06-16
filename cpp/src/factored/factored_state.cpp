@@ -84,7 +84,6 @@ FrameFactoredState::FrameFactoredState(int n_, int k_, std::shared_ptr<SymbolicC
     : n(checked_nqubits(n_)),
       k(checked_nqubits(k_)),
       clifford(n),
-      active(k),
       context(std::move(context_)) {
     if (k > n) {
         fail("active qubit count exceeds total qubit count");
@@ -197,9 +196,9 @@ PendingFactoredState::PendingFactoredState(int n_, int k_)
 
 PendingFactoredState::PendingFactoredState(int n_, int k_, std::shared_ptr<SymbolicContext> context_)
     : n(checked_nqubits(n_)),
+      initial_k(checked_nqubits(k_)),
       k(checked_nqubits(k_)),
       max_k(k),
-      active(k),
       context(std::move(context_)) {
     if (k > n) {
         fail("active qubit count exceeds total qubit count");
@@ -212,9 +211,9 @@ PendingFactoredState::PendingFactoredState(int n_, int k_, std::shared_ptr<Symbo
 
 PendingFactoredState::PendingFactoredState(const FrameFactoredState& state)
     : n(state.n),
+      initial_k(state.k),
       k(state.k),
       max_k(state.k),
-      active(state.active),
       dormant(state.dormant.bits, state.context),
       context(state.context),
       pending_operations(state.pending_operations) {
