@@ -214,11 +214,12 @@ Run the C++ CLI on a Stim fixture:
 ./build/cpp/cpp/symft_cli d3.stim 1000
 ```
 
-Benchmark d3 logical error and discard rates with the C++ batch sampler and
-streaming presampled exogenous symbols:
+Benchmark d3 logical error and discard rates with the unified C++ rate bench
+and streaming presampled exogenous symbols:
 
 ```bash
 ./build/cpp/cpp/symft_rate_bench d3.stim 100000000
+./build/cpp/cpp/symft_rate_bench --sampler both --circuit d3.stim --shots 1000000 --batch-size auto --threads 1
 ```
 
 The C++ batch active layout stores real and imaginary arrays as
