@@ -1,7 +1,6 @@
 #pragma once
 
 #include "factored/factored.hpp"
-#include "sampler/batch_sampler.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -54,11 +53,4 @@ void assign_presampled_exogenous_in_place(
 void execute_instruction_in_place(
     FactoredExecutorState& runtime,
     const FactoredInstruction& instruction);
-void assign_presampled_exogenous_batch_in_place(
-    BatchFactoredExecutorState& runtime,
-    const PresampledExogenous& samples);
-void execute_batch_instruction_in_place(
-    BatchFactoredExecutorState& runtime,
-    const FactoredInstruction& instruction);
-
 } // namespace symft

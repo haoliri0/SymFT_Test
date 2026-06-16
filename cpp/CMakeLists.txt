@@ -24,6 +24,7 @@ add_library(symft_cpp
     src/factored/factored_state.cpp
     src/factored/factored_planner.cpp
     src/sampler/single_shot_sampler.cpp
+    src/sampler/single_shot_presample.cpp
     src/frontend/stim_parser.cpp
     src/frontend/stim_sampling.cpp
     src/sampler/batch_symbols.cpp

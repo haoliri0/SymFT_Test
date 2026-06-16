@@ -1,12 +1,13 @@
 #pragma once
 
+#include "factored/factored.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <vector>
 
 namespace symft {
 
-struct FactoredInstructionProgram;
 struct PresampledExogenous;
 
 // Active storage is a Julia-column-major equivalent SoA layout:
@@ -54,5 +55,11 @@ std::vector<std::vector<std::uint64_t>> sample_measurements_batch(
     int shots,
     int batches = 0,
     std::uint64_t seed = 1);
+void assign_presampled_exogenous_batch_in_place(
+    BatchFactoredExecutorState& runtime,
+    const PresampledExogenous& samples);
+void execute_batch_instruction_in_place(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstruction& instruction);
 
 } // namespace symft

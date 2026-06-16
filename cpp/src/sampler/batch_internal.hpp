@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sampler/active_internal.hpp"
+#include "sampler/batch_sampler.hpp"
 #include "sampler/random.hpp"
 #include "sampler/single_shot.hpp"
 #include "simd/batch_simd.hpp"
