@@ -1,4 +1,4 @@
-#include "symft/batch_simd.hpp"
+#include "symft/simd/batch_simd.hpp"
 
 #include <algorithm>
 #include <cmath>
