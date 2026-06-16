@@ -37,7 +37,6 @@ add_library(symft_cpp
 
 target_include_directories(symft_cpp PUBLIC src)
 target_compile_features(symft_cpp PUBLIC cxx_std_20)
-target_link_libraries(symft_cpp PUBLIC Threads::Threads)
 target_compile_options(symft_cpp PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic>
 )

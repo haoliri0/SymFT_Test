@@ -72,14 +72,6 @@ int default_batch_count(int max_k) {
     return static_cast<int>(count);
 }
 
-int normalize_batch_threads(int threads) {
-    return normalized_batch_thread_count(threads);
-}
-
-void set_batch_executor_threads(BatchFactoredExecutorState& runtime, int threads) {
-    runtime.threads = normalize_batch_threads(threads);
-}
-
 const char* active_batch_backend() {
     return batch_simd::scalar_table().name;
 }
@@ -99,10 +91,8 @@ void execute_batch_instruction_in_place(
 BatchFactoredExecutorState::BatchFactoredExecutorState(
     const FactoredInstructionProgram& program,
     int batches_,
-    std::uint64_t seed,
-    int threads_)
+    std::uint64_t seed)
     : batches(batches_ > 0 ? batches_ : default_batch_count(program.max_k)),
-      threads(normalize_batch_threads(threads_)),
       rng_state(seed) {
     reset_batch_executor(*this, program, batches);
 }
@@ -160,11 +150,6 @@ void reset_batch_executor(BatchFactoredExecutorState& runtime, const FactoredIns
     if (runtime.branch_prob_true.size() < static_cast<std::size_t>(runtime.batches)) {
         runtime.branch_prob_true.resize(static_cast<std::size_t>(runtime.batches), 0.0);
     }
-    const std::size_t branch_partial_size =
-        static_cast<std::size_t>(runtime.threads) * static_cast<std::size_t>(runtime.batches);
-    if (runtime.branch_prob_partials.size() < branch_partial_size) {
-        runtime.branch_prob_partials.resize(branch_partial_size, 0.0);
-    }
     if (runtime.branch_invnorms.size() < static_cast<std::size_t>(runtime.batches)) {
         runtime.branch_invnorms.resize(static_cast<std::size_t>(runtime.batches), 0.0);
     }
@@ -213,12 +198,11 @@ std::vector<std::vector<std::uint64_t>> sample_measurements_batch(
     const FactoredInstructionProgram& program,
     int shots,
     int batches,
-    std::uint64_t seed,
-    int threads) {
+    std::uint64_t seed) {
     if (shots < 0) {
         fail("shot count must be nonnegative");
     }
-    BatchFactoredExecutorState runtime(program, batches, seed, threads);
+    BatchFactoredExecutorState runtime(program, batches, seed);
     std::vector<std::vector<std::uint64_t>> out(
         static_cast<std::size_t>(shots),
         std::vector<std::uint64_t>(symbol_word_count(program.nrecords), 0));
