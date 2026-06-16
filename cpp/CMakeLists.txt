@@ -17,7 +17,7 @@ option(SYMFT_CPP_NATIVE "Build host-vectorized kernels with -march=native" ON)
 add_library(symft_cpp
     src/core/symft.cpp
     src/core/symft_common.cpp
-    src/active/active_state.cpp
+    src/sampler/active_state.cpp
     src/factored/factored_state.cpp
     src/factored/factored_planner.cpp
     src/sampler/single_shot_sampler.cpp

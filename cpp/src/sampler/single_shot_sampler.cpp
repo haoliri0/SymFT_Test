@@ -1,4 +1,4 @@
-#include "../active/active_kernels.hpp"
+#include "active_kernels.hpp"
 
 #include "symft/simd.hpp"
 
