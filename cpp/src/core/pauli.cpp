@@ -1,6 +1,6 @@
 #include "core/pauli.hpp"
 
-#include "core/symft_internal.hpp"
+#include "core/internal.hpp"
 
 #include <cctype>
 #include <ostream>

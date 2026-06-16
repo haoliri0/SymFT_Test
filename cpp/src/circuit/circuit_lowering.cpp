@@ -1,4 +1,4 @@
-#include "../core/symft_internal.hpp"
+#include "core/internal.hpp"
 
 #include "circuit/circuit.hpp"
 

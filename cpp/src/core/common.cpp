@@ -1,6 +1,6 @@
 #include "core/common.hpp"
 
-#include "core/symft_internal.hpp"
+#include "core/internal.hpp"
 
 namespace symft {
 using namespace detail;

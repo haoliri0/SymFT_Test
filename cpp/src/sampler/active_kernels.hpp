@@ -1,20 +1,12 @@
 #pragma once
 
-#include "../core/symft_internal.hpp"
+#include "sampler/active_internal.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <immintrin.h>
 
 namespace symft::detail {
-
-#if defined(__clang__)
-#define SYMFT_SINGLE_SIMD_LOOP _Pragma("clang loop vectorize(enable) interleave(enable)")
-#elif defined(__GNUC__)
-#define SYMFT_SINGLE_SIMD_LOOP _Pragma("GCC ivdep")
-#else
-#define SYMFT_SINGLE_SIMD_LOOP
-#endif
 
 #if defined(__AVX2__) && defined(__FMA__)
 #define SYMFT_INLINE_AVX2 1

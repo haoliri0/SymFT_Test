@@ -1,4 +1,4 @@
-#include "../core/symft_internal.hpp"
+#include "core/internal.hpp"
 
 #include "frontend/stim.hpp"
 #include "sampler/single_shot.hpp"

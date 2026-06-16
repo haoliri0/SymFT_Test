@@ -1,6 +1,6 @@
 #include "core/symbolic.hpp"
 
-#include "core/symft_internal.hpp"
+#include "core/internal.hpp"
 
 #include <algorithm>
 #include <cmath>

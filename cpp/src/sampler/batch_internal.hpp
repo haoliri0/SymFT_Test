@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../core/symft_internal.hpp"
+#include "sampler/active_internal.hpp"
 #include "sampler/random.hpp"
 #include "sampler/single_shot.hpp"
 #include "simd/batch_simd.hpp"
