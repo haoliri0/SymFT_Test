@@ -1,5 +1,8 @@
 #include "../core/symft_internal.hpp"
 
+#include "frontend/stim.hpp"
+#include "sampler/single_shot.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>

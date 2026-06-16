@@ -1,6 +1,7 @@
 #include "../core/symft_internal.hpp"
 
-#include <array>
+#include "circuit/circuit.hpp"
+
 #include <utility>
 
 namespace symft {

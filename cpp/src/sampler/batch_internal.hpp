@@ -1,10 +1,11 @@
 #pragma once
 
+#include "../core/symft_internal.hpp"
+#include "sampler/random.hpp"
 #include "sampler/single_shot.hpp"
 #include "simd/batch_simd.hpp"
 
 #include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -32,100 +33,12 @@ enum class BatchSignMode {
     Mixed,
 };
 
-[[noreturn]] inline void fail(const std::string& message) {
-    throw Error(message);
-}
-
-inline int trailing_zeros64(std::uint64_t value) {
-    if (value == 0) {
-        fail("trailing_zeros64 called with zero");
-    }
-#if defined(__GNUC__) || defined(__clang__)
-    return __builtin_ctzll(value);
-#else
-    int count = 0;
-    while ((value & 1u) == 0u) {
-        value >>= 1;
-        ++count;
-    }
-    return count;
-#endif
-}
-
-inline std::size_t active_length(int k) {
-    if (k < 0 || k >= 62) {
-        fail("active qubit count is too large for machine basis indices");
-    }
-    return std::size_t{1} << k;
-}
-
-inline std::uint64_t symbol_bit_mask(int condition) {
-    if (condition <= 0) {
-        fail("condition id must be positive");
-    }
-    return std::uint64_t{1} << ((condition - 1) & 63);
-}
-
-inline std::size_t symbol_word_index(int condition) {
-    if (condition <= 0) {
-        fail("condition id must be positive");
-    }
-    return static_cast<std::size_t>((condition - 1) >> 6);
-}
-
-inline std::size_t symbol_word_count(int nsymbols) {
-    if (nsymbols <= 0) {
-        return 0;
-    }
-    return static_cast<std::size_t>((nsymbols + 63) >> 6);
-}
-
-inline std::uint64_t next_random_u64(std::uint64_t& state) {
-    state += 0x9e3779b97f4a7c15ULL;
-    std::uint64_t z = state;
-    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
-    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
-    return z ^ (z >> 31);
-}
-
-inline double rand_float(std::uint64_t& state) {
-    return static_cast<double>(next_random_u64(state) >> 11) * 0x1.0p-53;
-}
-
-inline bool sample_bernoulli(std::uint64_t& rng_state, double probability) {
-    const double p = std::clamp(probability, 0.0, 1.0);
-    if (p <= 0.0) {
-        return false;
-    }
-    if (p >= 1.0) {
-        return true;
-    }
-    return rand_float(rng_state) < p;
-}
-
-inline double sample_geometric_gap(std::uint64_t& rng_state, double probability) {
-    if (!(probability > 0.0 && probability < 1.0)) {
-        fail("geometric gap probability must be in (0, 1)");
-    }
-    const double u = std::max(rand_float(rng_state), std::numeric_limits<double>::min());
-    const double gap = std::floor(std::log(u) / std::log1p(-probability));
-    if (!std::isfinite(gap) || gap >= static_cast<double>(std::numeric_limits<std::int64_t>::max())) {
-        return static_cast<double>(std::numeric_limits<std::int64_t>::max());
-    }
-    return gap;
-}
-
-inline int sample_categorical_row(std::uint64_t& rng_state, const std::vector<double>& probabilities) {
-    const double r = rand_float(rng_state);
-    double cumulative = 0.0;
-    for (std::size_t i = 0; i < probabilities.size(); ++i) {
-        cumulative += probabilities[i];
-        if (r <= cumulative) {
-            return static_cast<int>(i);
-        }
-    }
-    return static_cast<int>(probabilities.size() - 1);
-}
+using detail::active_length;
+using detail::fail;
+using detail::symbol_bit_mask;
+using detail::symbol_word_count;
+using detail::symbol_word_index;
+using detail::trailing_zeros64;
 
 inline std::size_t batch_word_count(int shots) {
     if (shots <= 0) {

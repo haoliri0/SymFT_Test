@@ -1,7 +1,6 @@
 #pragma once
 
-#include "frontend/stim.hpp"
-#include "sampler/single_shot.hpp"
+#include "factored/factored.hpp"
 
 #include <algorithm>
 #include <cmath>
