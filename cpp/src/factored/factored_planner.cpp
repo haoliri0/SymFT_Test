@@ -41,111 +41,10 @@ std::optional<int> measurement_record(PendingFactoredState& state, const Pending
     return measurement.record;
 }
 
-PauliString forward_conjugate_H(const PauliString& pauli, int q) {
-    CliffordFrame gate(pauli.nqubits);
-    left_H(gate, q);
-    return preimage(gate, pauli);
-}
-
-PauliString forward_conjugate_S(const PauliString& pauli, int q) {
-    CliffordFrame gate(pauli.nqubits);
-    left_SDG(gate, q);
-    return preimage(gate, pauli);
-}
-
-PauliString forward_conjugate_CX(const PauliString& pauli, int c, int t) {
-    CliffordFrame gate(pauli.nqubits);
-    left_CX(gate, c, t);
-    return preimage(gate, pauli);
-}
-
-PauliString forward_conjugate_CZ(const PauliString& pauli, int a, int b) {
-    CliffordFrame gate(pauli.nqubits);
-    left_CZ(gate, a, b);
-    return preimage(gate, pauli);
-}
-
-PauliString forward_conjugate_SWAP(const PauliString& pauli, int a, int b) {
-    CliffordFrame gate(pauli.nqubits);
-    left_SWAP(gate, a, b);
-    return preimage(gate, pauli);
-}
-
-struct BasisChange {
-    enum Kind { H, S, CX, CZ, SWAP } kind;
-    int a = 0;
-    int b = 0;
-};
-
-PauliString transform_pauli_by_basis_changes(PauliString pauli, const std::vector<BasisChange>& changes) {
-    for (const auto& change : changes) {
-        switch (change.kind) {
-        case BasisChange::H:
-            pauli = forward_conjugate_H(pauli, change.a);
-            break;
-        case BasisChange::S:
-            pauli = forward_conjugate_S(pauli, change.a);
-            break;
-        case BasisChange::CX:
-            pauli = forward_conjugate_CX(pauli, change.a, change.b);
-            break;
-        case BasisChange::CZ:
-            pauli = forward_conjugate_CZ(pauli, change.a, change.b);
-            break;
-        case BasisChange::SWAP:
-            pauli = forward_conjugate_SWAP(pauli, change.a, change.b);
-            break;
-        }
-    }
-    return pauli;
-}
-
-PendingPauliRotation transform_operation_by_basis_changes(
-    const PendingPauliRotation& operation,
-    const std::vector<BasisChange>& changes) {
-    return PendingPauliRotation{
-        operation.theta,
-        SymbolicPauliString(transform_pauli_by_basis_changes(operation.pauli.pauli, changes), operation.pauli.sign),
-    };
-}
-
-PendingPauliMeasurement transform_operation_by_basis_changes(
-    const PendingPauliMeasurement& operation,
-    const std::vector<BasisChange>& changes) {
-    return PendingPauliMeasurement{
-        SymbolicPauliString(transform_pauli_by_basis_changes(operation.pauli.pauli, changes), operation.pauli.sign),
-        operation.record,
-        operation.record_condition,
-    };
-}
-
-PendingOperation transform_operation_by_basis_changes(const PendingOperation& operation, const std::vector<BasisChange>& changes) {
-    return std::visit([&](const auto& op) -> PendingOperation { return transform_operation_by_basis_changes(op, changes); }, operation);
-}
-
-void transform_pending_operations_by_basis_changes(PendingFactoredState& state, const std::vector<BasisChange>& changes) {
-    for (auto& operation : state.pending_operations) {
-        operation = transform_operation_by_basis_changes(operation, changes);
-    }
-}
-
-PendingPauliRotation rewrite_current_and_pending_by_basis_change(
-    PendingFactoredState& state,
-    const PendingPauliRotation& current,
-    BasisChange change) {
-    const std::vector<BasisChange> changes{change};
-    transform_pending_operations_by_basis_changes(state, changes);
-    return transform_operation_by_basis_changes(current, changes);
-}
-
-PendingPauliMeasurement rewrite_current_and_pending_by_basis_change(
-    PendingFactoredState& state,
-    const PendingPauliMeasurement& current,
-    BasisChange change) {
-    const std::vector<BasisChange> changes{change};
-    transform_pending_operations_by_basis_changes(state, changes);
-    return transform_operation_by_basis_changes(current, changes);
-}
+PauliString transform_by_frame(const CliffordFrame& frame, const PauliString& pauli);
+PendingPauliRotation transform_operation_by_frame(const PendingPauliRotation& operation, const CliffordFrame& frame);
+PendingPauliMeasurement transform_operation_by_frame(const PendingPauliMeasurement& operation, const CliffordFrame& frame);
+void transform_pending_operations_by_frame(PendingFactoredState& state, const CliffordFrame& frame);
 
 PendingPauliRotation xor_operation_sign_if_anticommutes(
     const PendingPauliRotation& operation,
@@ -198,6 +97,71 @@ SymbolicBool rotation_sign_from_pauli(const SymbolicPauliString& pauli) {
     return xor_bool(pauli.sign, measurement_phase_sign(pauli.pauli));
 }
 
+PauliString positive_hermitian_body(PauliString pauli) {
+    if (!pauli_squares_to_identity(pauli)) {
+        fail("Pauli frame row requires a Hermitian Pauli body");
+    }
+    pauli.set_phase(pauli_body_y_count(pauli));
+    return pauli;
+}
+
+PauliString multiply_by_stabilizer_if_anticommutes(
+    PauliString row,
+    const PauliString& measured_or_rotated,
+    const PauliString& stabilizer) {
+    if (pauli_anticommutes(row, measured_or_rotated)) {
+        row = row * stabilizer;
+        row.set_phase(pauli_body_y_count(row));
+    }
+    return row;
+}
+
+// Planner-only stabilizer tableau basis changes. The runtime alpha vector is
+// changed only by the emitted promote/measure instructions, never by these frames.
+CliffordFrame dormant_rotation_promotion_tableau_frame(
+    const PendingFactoredState& state,
+    const PauliString& rotation_pauli,
+    int picked_dormant) {
+    const int old_k = state.k;
+    const int picked_q = old_k + picked_dormant;
+    const PauliString stabilizer = pauli_z(state.n, picked_q);
+    const PauliString promoted_x = positive_hermitian_body(rotation_pauli);
+    if (!pauli_anticommutes(promoted_x, stabilizer)) {
+        fail("dormant rotation promotion requires an anti-commuting fixed stabilizer");
+    }
+
+    CliffordFrame frame(state.n);
+    for (int q = 0; q < old_k; ++q) {
+        frame.copy_pauli_to_row(
+            frame.zrow(q),
+            multiply_by_stabilizer_if_anticommutes(pauli_z(state.n, q), promoted_x, stabilizer));
+        frame.copy_pauli_to_row(
+            frame.xrow(q),
+            multiply_by_stabilizer_if_anticommutes(pauli_x(state.n, q), promoted_x, stabilizer));
+    }
+
+    frame.copy_pauli_to_row(frame.zrow(old_k), stabilizer);
+    frame.copy_pauli_to_row(frame.xrow(old_k), promoted_x);
+
+    int new_q = old_k + 1;
+    for (int old_q = old_k; old_q < state.n; ++old_q) {
+        if (old_q == picked_q) {
+            continue;
+        }
+        frame.copy_pauli_to_row(
+            frame.zrow(new_q),
+            multiply_by_stabilizer_if_anticommutes(pauli_z(state.n, old_q), promoted_x, stabilizer));
+        frame.copy_pauli_to_row(
+            frame.xrow(new_q),
+            multiply_by_stabilizer_if_anticommutes(pauli_x(state.n, old_q), promoted_x, stabilizer));
+        ++new_q;
+    }
+    if (new_q != state.n) {
+        fail("dormant rotation promotion frame did not repack dormant rows");
+    }
+    return frame;
+}
+
 ApplyPrecomputedActivePauliRotation active_rotation_instruction(
     const PauliString& active_body,
     double theta,
@@ -227,85 +191,21 @@ std::optional<FactoredInstruction> process_diagonal_dormant_rotation(
     return push_instruction(state, active_rotation_instruction(active_body, current.theta, sign));
 }
 
-PendingPauliRotation eliminate_active_support_for_dormant_rotation(
-    PendingFactoredState& state,
-    PendingPauliRotation current,
-    int picked_dormant,
-    int target_active) {
-    const int control = state.k + picked_dormant;
-    if (current.pauli.pauli.xbit(target_active)) {
-        current = rewrite_current_and_pending_by_basis_change(
-            state,
-            current,
-            {BasisChange::CX, control, target_active});
-    }
-    if (current.pauli.pauli.zbit(target_active)) {
-        current = rewrite_current_and_pending_by_basis_change(
-            state,
-            current,
-            {BasisChange::CZ, control, target_active});
-    }
-    return current;
-}
-
-PendingPauliRotation eliminate_other_dormant_support_for_rotation(
-    PendingFactoredState& state,
-    PendingPauliRotation current,
-    int picked_dormant,
-    int target_dormant) {
-    const int q = state.k + target_dormant;
-    if (current.pauli.pauli.xbit(q) && current.pauli.pauli.zbit(q)) {
-        current = rewrite_current_and_pending_by_basis_change(state, current, {BasisChange::S, q, 0});
-    }
-    const int control = state.k + picked_dormant;
-    const int target = state.k + target_dormant;
-    if (current.pauli.pauli.xbit(target)) {
-        current = rewrite_current_and_pending_by_basis_change(state, current, {BasisChange::CX, control, target});
-    }
-    if (current.pauli.pauli.zbit(target)) {
-        current = rewrite_current_and_pending_by_basis_change(state, current, {BasisChange::CZ, control, target});
-    }
-    return current;
-}
-
-PendingPauliRotation normalize_first_dormant_rotation_to_x(PendingFactoredState& state, PendingPauliRotation current) {
-    const int q = state.k;
-    if (!current.pauli.pauli.xbit(q)) {
-        fail("dormant rotation reduction lost first-dormant X support");
-    }
-    if (current.pauli.pauli.zbit(q)) {
-        current = rewrite_current_and_pending_by_basis_change(state, current, {BasisChange::S, q, 0});
-    }
-    if (!current.pauli.pauli.xbit(q) || current.pauli.pauli.zbit(q)) {
-        fail("failed to normalize dormant rotation Pauli to first-dormant X");
-    }
-    return current;
-}
-
 std::optional<FactoredInstruction> process_nondiagonal_dormant_rotation(
     PendingFactoredState& state,
     PendingPauliRotation current,
     int picked_dormant) {
-    for (int q = 0; q < state.k; ++q) {
-        current = eliminate_active_support_for_dormant_rotation(state, current, picked_dormant, q);
+    const int old_k = state.k;
+    const CliffordFrame frame = dormant_rotation_promotion_tableau_frame(state, current.pauli.pauli, picked_dormant);
+    current = transform_operation_by_frame(current, frame);
+    transform_pending_operations_by_frame(state, frame);
+    if (!current.pauli.pauli.same_body(pauli_x(state.n, old_k))) {
+        fail("dormant rotation tableau reduction did not expose promoted X");
     }
-    for (int d = 0; d < state.n - state.k; ++d) {
-        if (d == picked_dormant) {
-            continue;
-        }
-        current = eliminate_other_dormant_support_for_rotation(state, current, picked_dormant, d);
-    }
-    if (picked_dormant != 0) {
-        current = rewrite_current_and_pending_by_basis_change(
-            state,
-            current,
-            {BasisChange::SWAP, state.k, state.k + picked_dormant});
-    }
-    current = normalize_first_dormant_rotation_to_x(state, current);
     const SymbolicBool sign = rotation_sign_from_pauli(current.pauli);
     PromoteDormantRotation instruction{current.theta, sign, SymbolicBoolEvaluationPlan(sign)};
     FactoredInstruction pushed = push_instruction(state, instruction);
-    set_planning_active_count(state, state.k + 1);
+    set_planning_active_count(state, old_k + 1);
     return pushed;
 }
 
@@ -327,45 +227,32 @@ std::optional<FactoredInstruction> record_deterministic_measurement(
         });
 }
 
-PendingPauliMeasurement eliminate_active_support_for_dormant_measurement(
-    PendingFactoredState& state,
-    PendingPauliMeasurement current,
-    int picked_dormant,
-    int target_active) {
-    const int control = state.k + picked_dormant;
-    if (current.pauli.pauli.xbit(target_active)) {
-        current = rewrite_current_and_pending_by_basis_change(
-            state,
-            current,
-            {BasisChange::CX, control, target_active});
-    }
-    if (current.pauli.pauli.zbit(target_active)) {
-        current = rewrite_current_and_pending_by_basis_change(
-            state,
-            current,
-            {BasisChange::CZ, control, target_active});
-    }
-    return current;
-}
-
-PendingPauliMeasurement normalize_picked_dormant_measurement_to_z(
-    PendingFactoredState& state,
-    PendingPauliMeasurement current,
+CliffordFrame dormant_measurement_replacement_tableau_frame(
+    const PendingFactoredState& state,
+    const PauliString& measured_pauli,
     int picked_dormant) {
-    const int q = state.k + picked_dormant;
-    const bool xb = current.pauli.pauli.xbit(q);
-    const bool zb = current.pauli.pauli.zbit(q);
-    if (xb && zb) {
-        current = rewrite_current_and_pending_by_basis_change(state, current, {BasisChange::S, q, 0});
-        return rewrite_current_and_pending_by_basis_change(state, current, {BasisChange::H, q, 0});
+    const int picked_q = state.k + picked_dormant;
+    const PauliString old_stabilizer = pauli_z(state.n, picked_q);
+    const PauliString new_stabilizer = positive_hermitian_body(measured_pauli);
+    if (!pauli_anticommutes(new_stabilizer, old_stabilizer)) {
+        fail("dormant measurement replacement requires an anti-commuting fixed stabilizer");
     }
-    if (xb) {
-        return rewrite_current_and_pending_by_basis_change(state, current, {BasisChange::H, q, 0});
+
+    CliffordFrame frame(state.n);
+    for (int q = 0; q < state.n; ++q) {
+        if (q == picked_q) {
+            continue;
+        }
+        frame.copy_pauli_to_row(
+            frame.zrow(q),
+            multiply_by_stabilizer_if_anticommutes(pauli_z(state.n, q), new_stabilizer, old_stabilizer));
+        frame.copy_pauli_to_row(
+            frame.xrow(q),
+            multiply_by_stabilizer_if_anticommutes(pauli_x(state.n, q), new_stabilizer, old_stabilizer));
     }
-    if (zb) {
-        return current;
-    }
-    fail("dormant measurement reduction lost the picked Pauli support");
+    frame.copy_pauli_to_row(frame.zrow(picked_q), new_stabilizer);
+    frame.copy_pauli_to_row(frame.xrow(picked_q), old_stabilizer);
+    return frame;
 }
 
 std::optional<FactoredInstruction> measure_dormant_xy_pauli(
@@ -373,22 +260,13 @@ std::optional<FactoredInstruction> measure_dormant_xy_pauli(
     PendingPauliMeasurement current,
     int picked_dormant,
     bool queued_first) {
-    for (int d = 0; d < state.n - state.k; ++d) {
-        if (d == picked_dormant) {
-            continue;
-        }
-        const int q = state.k + d;
-        if (current.pauli.pauli.xbit(q)) {
-            current = rewrite_current_and_pending_by_basis_change(
-                state,
-                current,
-                {BasisChange::CX, state.k + picked_dormant, q});
-        }
+    const int picked_q = state.k + picked_dormant;
+    const CliffordFrame frame = dormant_measurement_replacement_tableau_frame(state, current.pauli.pauli, picked_dormant);
+    current = transform_operation_by_frame(current, frame);
+    transform_pending_operations_by_frame(state, frame);
+    if (!current.pauli.pauli.same_body(pauli_z(state.n, picked_q))) {
+        fail("dormant measurement tableau reduction did not expose fixed Z");
     }
-    for (int q = 0; q < state.k; ++q) {
-        current = eliminate_active_support_for_dormant_measurement(state, current, picked_dormant, q);
-    }
-    current = normalize_picked_dormant_measurement_to_z(state, current, picked_dormant);
     const SymbolicBool base_outcome = measurement_base_outcome(current.pauli);
     const int branch = state.context->fresh_condition();
     const SymbolicBool branch_bit = symbolic_bool(branch);

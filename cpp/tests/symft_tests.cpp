@@ -165,6 +165,42 @@ void test_active_h_rewrite_stays_virtual() {
     }
 }
 
+void test_dormant_measurement_tableau_reuse() {
+    using namespace symft;
+    FrameFactoredState state(2, 1);
+    const PauliString measured = pauli_z(2, 0) * pauli_x(2, 1);
+    apply_pauli_measurement(state, measured);
+    apply_pauli_measurement(state, measured);
+    PendingFactoredState pending(state);
+    const auto program = plan_factored_updates(pending);
+    require(program.max_k == 1, "dormant measurement tableau does not touch alpha");
+
+    const auto records = sample_measurements(program, 64, 123);
+    for (const auto& shot : records) {
+        require(
+            packed_bit(shot, 0) == packed_bit(shot, 1),
+            "dormant measurement tableau reuses fixed stabilizer outcome");
+    }
+}
+
+void test_dormant_measurement_sign_feeds_promotion() {
+    using namespace symft;
+    FrameFactoredState state(1, 0);
+    apply_pauli_measurement(state, pauli_x(1, 0));
+    apply_pauli_rotation(state, pauli_z(1, 0), M_PI / 2.0);
+    apply_pauli_measurement(state, pauli_x(1, 0));
+    PendingFactoredState pending(state);
+    const auto program = plan_factored_updates(pending);
+    require(program.max_k == 1, "dormant sign promotion test promotes one active qubit");
+
+    const auto records = sample_measurements(program, 64, 456);
+    for (const auto& shot : records) {
+        require(
+            packed_bit(shot, 0) != packed_bit(shot, 1),
+            "dormant measurement sign feeds later promotion");
+    }
+}
+
 void test_parser_feedback() {
     using namespace symft;
     const auto parsed = parse_stim_text("M !0\nCX rec[-1] 1\nM 1\n");
@@ -350,6 +386,8 @@ int main() {
     test_clifford_frame();
     test_active_rotation();
     test_active_h_rewrite_stays_virtual();
+    test_dormant_measurement_tableau_reuse();
+    test_dormant_measurement_sign_feeds_promotion();
     test_parser_feedback();
     test_stim_frontend_circuit_lowering();
     test_t_gate_exact_rotation();
