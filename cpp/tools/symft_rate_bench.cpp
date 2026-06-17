@@ -337,16 +337,15 @@ void copy_presampled_exogenous_slice(
     out.nsymbols = samples.nsymbols;
     out.nwords = samples.nwords;
     out.next_rng_state = samples.next_rng_state;
-    out.exogenous_assigned_words = samples.exogenous_assigned_words;
-    out.value_words.resize(static_cast<std::size_t>(shots) * out.nwords);
-    for (int shot = 0; shot < shots; ++shot) {
-        const auto src = samples.value_words.begin() +
-                         static_cast<std::ptrdiff_t>(
-                             static_cast<std::size_t>(first_sample_shot + shot) * samples.nwords);
-        const auto dst = out.value_words.begin() +
-                         static_cast<std::ptrdiff_t>(static_cast<std::size_t>(shot) * out.nwords);
-        std::copy_n(src, out.nwords, dst);
+    if (out.exogenous_assigned_words.size() != samples.exogenous_assigned_words.size()) {
+        out.exogenous_assigned_words = samples.exogenous_assigned_words;
     }
+    const std::size_t words = static_cast<std::size_t>(shots) * out.nwords;
+    out.value_words.resize(words);
+    const auto src = samples.value_words.begin() +
+                     static_cast<std::ptrdiff_t>(
+                         static_cast<std::size_t>(first_sample_shot) * samples.nwords);
+    std::copy_n(src, words, out.value_words.begin());
 }
 
 void xor_records_into(
@@ -1220,6 +1219,8 @@ BenchResult run_batch_sampler(const Options& options) {
             std::vector<std::uint64_t> scratch(runtime.batch_words, 0);
             std::vector<std::uint64_t> compact_scratch(runtime.batch_words, 0);
             if (result.sample_chunk_shots == result.block_shots) {
+                symft::PresampledExogenous samples;
+                symft::prepare_presampled_exogenous(samples, program);
                 for (std::uint64_t block_index = static_cast<std::uint64_t>(worker_id);
                      block_index < nchunks;
                      block_index += static_cast<std::uint64_t>(active_threads)) {
@@ -1229,7 +1230,8 @@ BenchResult run_batch_sampler(const Options& options) {
                         options.shots - offset));
 
                     const auto presample_start = Clock::now();
-                    const auto samples = symft::presample_exogenous(
+                    symft::resample_prepared_exogenous_in_place(
+                        samples,
                         program,
                         block,
                         block_seed(0x7eed0000ULL, repeat, block_index));
@@ -1276,7 +1278,9 @@ BenchResult run_batch_sampler(const Options& options) {
                 }
             } else {
                 symft::PresampledExogenous samples;
+                symft::prepare_presampled_exogenous(samples, program);
                 symft::PresampledExogenous block_samples;
+                symft::prepare_presampled_exogenous(block_samples, program);
                 for (std::uint64_t chunk_index = static_cast<std::uint64_t>(worker_id);
                      chunk_index < nchunks;
                      chunk_index += static_cast<std::uint64_t>(active_threads)) {
@@ -1287,7 +1291,7 @@ BenchResult run_batch_sampler(const Options& options) {
                         options.shots - chunk_offset));
 
                     const auto presample_start = Clock::now();
-                    symft::presample_exogenous_in_place(
+                    symft::resample_prepared_exogenous_in_place(
                         samples,
                         program,
                         chunk_shots,

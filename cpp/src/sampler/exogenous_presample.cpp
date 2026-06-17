@@ -168,13 +168,33 @@ void presample_exogenous_in_place(
     const FactoredInstructionProgram& program,
     int shots,
     std::uint64_t seed) {
-    if (shots < 0) {
-        fail("presampled shot count must be nonnegative");
-    }
-    samples.nshots = shots;
+    prepare_presampled_exogenous(samples, program);
+    resample_prepared_exogenous_in_place(samples, program, shots, seed);
+}
+
+void prepare_presampled_exogenous(PresampledExogenous& samples, const FactoredInstructionProgram& program) {
+    samples.nshots = 0;
     samples.nsymbols = program.nsymbols;
     samples.nwords = symbol_word_count(program.nsymbols);
     samples.exogenous_assigned_words = exogenous_assigned_words(program);
+    samples.value_words.clear();
+    samples.next_rng_state = 0;
+}
+
+void resample_prepared_exogenous_in_place(
+    PresampledExogenous& samples,
+    const FactoredInstructionProgram& program,
+    int shots,
+    std::uint64_t seed) {
+    if (shots < 0) {
+        fail("presampled shot count must be nonnegative");
+    }
+    if (samples.nsymbols != program.nsymbols ||
+        samples.nwords != symbol_word_count(program.nsymbols) ||
+        samples.exogenous_assigned_words.size() != samples.nwords) {
+        fail("presampled exogenous storage was not prepared for this program");
+    }
+    samples.nshots = shots;
     samples.value_words.assign(static_cast<std::size_t>(shots) * samples.nwords, 0);
 
     std::uint64_t rng_state = seed;

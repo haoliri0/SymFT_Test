@@ -18,7 +18,13 @@ struct PresampledExogenous {
 };
 
 PresampledExogenous presample_exogenous(const FactoredInstructionProgram& program, int shots, std::uint64_t seed = 1);
+void prepare_presampled_exogenous(PresampledExogenous& samples, const FactoredInstructionProgram& program);
 void presample_exogenous_in_place(
+    PresampledExogenous& samples,
+    const FactoredInstructionProgram& program,
+    int shots,
+    std::uint64_t seed = 1);
+void resample_prepared_exogenous_in_place(
     PresampledExogenous& samples,
     const FactoredInstructionProgram& program,
     int shots,
