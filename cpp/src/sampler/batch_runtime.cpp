@@ -231,6 +231,21 @@ int count_live_bits(const std::vector<std::uint64_t>& bits, int shots) {
     return count;
 }
 
+bool should_execute_masked_for_dead_bits(
+    const BatchFactoredExecutorState& runtime,
+    const BatchDetectorPostselectionScratch& scratch,
+    const BatchDetectorPostselectionOptions& options) {
+    if (!options.mask_dead_shots || runtime.active_shots == 0) {
+        return false;
+    }
+    const int dead_count = count_live_bits(scratch.dead_bits, runtime.active_shots);
+    if (dead_count == 0) {
+        return false;
+    }
+    const int denominator = std::max(1, options.mask_dead_shots_min_fraction_denominator);
+    return dead_count * denominator >= runtime.active_shots;
+}
+
 #if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386))
 __attribute__((target("bmi2")))
 std::uint64_t compress_bits_bmi2(std::uint64_t bits, std::uint64_t keep_mask) {
@@ -932,7 +947,7 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
         if (runtime.active_shots == 0) {
             break;
         }
-        if (options.mask_dead_shots && count_live_bits(scratch.dead_bits, runtime.active_shots) > 0) {
+        if (should_execute_masked_for_dead_bits(runtime, scratch, options)) {
             fill_keep_bits_from_dead(runtime, scratch.dead_bits, scratch.keep_bits);
             execute_batch_instruction_masked(runtime, program.instructions[idx], scratch.keep_bits);
         } else {
@@ -1022,7 +1037,7 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
         if (runtime.active_shots == 0) {
             break;
         }
-        if (options.mask_dead_shots && count_live_bits(scratch.dead_bits, runtime.active_shots) > 0) {
+        if (should_execute_masked_for_dead_bits(runtime, scratch, options)) {
             fill_keep_bits_from_dead(runtime, scratch.dead_bits, scratch.keep_bits);
             execute_batch_instruction_masked(runtime, program.instructions[idx], scratch.keep_bits);
         } else {

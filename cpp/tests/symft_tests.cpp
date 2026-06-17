@@ -409,7 +409,7 @@ void test_batch_postselection() {
             samples,
             single_detector_plan(program, 1),
             hybrid_scratch,
-            BatchDetectorPostselectionOptions{false, false, 8});
+            BatchDetectorPostselectionOptions{false, false, 1, 8});
         require(default_result.discarded == hybrid_result.discarded, "hybrid postselection discarded count");
         require(default_result.accepted == hybrid_result.accepted, "hybrid postselection accepted count");
         require(default_runtime.measurement_words == hybrid_runtime.measurement_words, "hybrid postselection records");
@@ -443,12 +443,24 @@ void test_batch_postselection() {
             samples,
             single_detector_plan(program, 1),
             masked_scratch,
-            BatchDetectorPostselectionOptions{false, true, 0});
+            BatchDetectorPostselectionOptions{false, true, 1, 0});
+        BatchDetectorPostselectionScratch combined_scratch;
+        BatchFactoredExecutorState combined_runtime(program, 64, 43);
+        const auto combined_result = execute_batch_postselected_in_place(
+            combined_runtime,
+            program,
+            samples,
+            single_detector_plan(program, 1),
+            combined_scratch,
+            BatchDetectorPostselectionOptions{false, true, 8, 0});
         require(masked_result.discarded > 0, "masked postselection test kills at least one lane");
         require(masked_result.discarded * 4 < 64, "masked postselection test stays dirty before final compaction");
         require(default_result.discarded == masked_result.discarded, "masked postselection discarded count");
         require(default_result.accepted == masked_result.accepted, "masked postselection accepted count");
         require(default_runtime.measurement_words == masked_runtime.measurement_words, "masked postselection records");
+        require(default_result.discarded == combined_result.discarded, "combined postselection discarded count");
+        require(default_result.accepted == combined_result.accepted, "combined postselection accepted count");
+        require(default_runtime.measurement_words == combined_runtime.measurement_words, "combined postselection records");
     }
 }
 

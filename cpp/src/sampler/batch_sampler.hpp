@@ -35,6 +35,7 @@ struct BatchDetectorPostselectionResult {
 struct BatchDetectorPostselectionOptions {
     bool compact_after_detector = false;
     bool mask_dead_shots = false;
+    int mask_dead_shots_min_fraction_denominator = 1;
     int single_shot_fallback_threshold = 0;
 };
 
