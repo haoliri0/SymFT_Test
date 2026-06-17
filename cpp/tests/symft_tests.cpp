@@ -268,6 +268,13 @@ void test_presampled_exogenous() {
         execute_in_place(runtime, program, packed_expression_plan, packed_expression_block, shot);
         require(packed_bit(runtime.measurement_words, 0), "packed presampled expression deterministic X error");
     }
+
+    require(default_single_shot_sample_chunk_shots() == 1024, "single-shot default sample chunk");
+    const auto chunked_records = sample_measurements(program, 9, 17, 3);
+    require(chunked_records.size() == 9, "chunked single-shot sample count");
+    for (const auto& shot : chunked_records) {
+        require(packed_bit(shot, 0), "chunked single-shot deterministic X error");
+    }
 }
 
 void test_batch_sampler() {

@@ -22,8 +22,6 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-constexpr int kDefaultPackedSampleChunkShots = 1 << 10;
-
 struct RateCounts {
     std::uint64_t shots = 0;
     std::uint64_t discarded = 0;
@@ -664,7 +662,7 @@ RateBenchSetup build_rate_bench_setup(
     setup.sample_chunk_shots =
         options.sample_chunk_shots > 0
             ? options.sample_chunk_shots
-            : (packed_streaming ? kDefaultPackedSampleChunkShots : setup.block_shots);
+            : (packed_streaming ? symft::default_single_shot_sample_chunk_shots() : setup.block_shots);
     setup.logical_records = logical_records_for_observable(parsed.observables, options.observable);
     setup.postselection_detectors_by_record = detectors_by_max_record(parsed.detectors, program.nrecords);
     setup.instruction_records_by_index = instruction_records(program);

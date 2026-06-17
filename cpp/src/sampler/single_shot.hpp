@@ -97,4 +97,10 @@ bool execute_postselected_in_place(
     const SingleShotPresampledExpressionBlock& expression_block,
     int shot_index,
     const DetectorPostselectionPlan& postselection);
+int default_single_shot_sample_chunk_shots();
+std::vector<std::vector<std::uint64_t>> sample_measurements(
+    const FactoredInstructionProgram& program,
+    int shots,
+    std::uint64_t seed,
+    int sample_chunk_shots);
 } // namespace symft

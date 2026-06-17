@@ -16,6 +16,9 @@ using namespace detail;
 
 namespace {
 
+constexpr int kDefaultSingleShotSampleChunkShots = 1 << 10;
+constexpr std::uint64_t kSingleShotBranchSeedXor = 0x5eed1234ULL;
+
 void check_symbol_slot(const FactoredExecutorState& runtime, int condition) {
     if (condition <= 0 || condition > runtime.nsymbols) {
         fail("symbolic condition exceeds executor symbol table");
@@ -142,6 +145,13 @@ std::uint64_t low_bits_mask(int nbits) {
 
 std::uint64_t live_shot_word_mask(int shots, std::size_t word) {
     return low_bits_mask(shots - static_cast<int>(word << 6));
+}
+
+int normalize_single_shot_sample_chunk_shots(int sample_chunk_shots) {
+    if (sample_chunk_shots < 0) {
+        fail("single-shot sample chunk count must be nonnegative");
+    }
+    return sample_chunk_shots > 0 ? sample_chunk_shots : kDefaultSingleShotSampleChunkShots;
 }
 
 SingleShotPresampledExpression split_presampled_expression(
@@ -1251,20 +1261,57 @@ std::vector<std::uint64_t> sample_measurements(const FactoredInstructionProgram&
     return execute(runtime, program);
 }
 
-std::vector<std::vector<std::uint64_t>> sample_measurements(const FactoredInstructionProgram& program, int shots, std::uint64_t seed) {
+int default_single_shot_sample_chunk_shots() {
+    return kDefaultSingleShotSampleChunkShots;
+}
+
+std::vector<std::vector<std::uint64_t>> sample_measurements(
+    const FactoredInstructionProgram& program,
+    int shots,
+    std::uint64_t seed,
+    int sample_chunk_shots) {
     if (shots < 0) {
         fail("shot count must be nonnegative");
     }
-    const auto samples = presample_exogenous(program, shots, seed);
-    FactoredExecutorState runtime(program, samples.next_rng_state);
+
+    const int chunk_shots = normalize_single_shot_sample_chunk_shots(sample_chunk_shots);
+    PackedPresampledExogenous packed_samples;
+    prepare_presampled_exogenous_packed(packed_samples, program);
+    SingleShotPresampledExpressionPlan expression_plan;
+    prepare_single_shot_presampled_expression_plan(expression_plan, program, packed_samples);
+    SingleShotPresampledExpressionBlock expression_block;
+    FactoredExecutorState runtime(program, seed ^ kSingleShotBranchSeedXor);
+
     std::vector<std::vector<std::uint64_t>> out;
     out.reserve(static_cast<std::size_t>(shots));
-    for (int shot = 0; shot < shots; ++shot) {
-        reset_executor(runtime, program);
-        execute_in_place(runtime, program, samples, shot);
-        out.push_back(runtime.measurement_words);
+
+    std::uint64_t exogenous_rng_state = seed;
+    for (int offset = 0; offset < shots; offset += chunk_shots) {
+        const int chunk = std::min(chunk_shots, shots - offset);
+        resample_prepared_exogenous_packed_in_place(
+            packed_samples,
+            program,
+            chunk,
+            exogenous_rng_state);
+        exogenous_rng_state = packed_samples.next_rng_state;
+        evaluate_single_shot_presampled_expression_block(
+            expression_block,
+            expression_plan,
+            packed_samples);
+        for (int shot = 0; shot < chunk; ++shot) {
+            reset_executor(runtime, program);
+            execute_in_place(runtime, program, expression_plan, expression_block, shot);
+            out.push_back(runtime.measurement_words);
+        }
     }
     return out;
+}
+
+std::vector<std::vector<std::uint64_t>> sample_measurements(
+    const FactoredInstructionProgram& program,
+    int shots,
+    std::uint64_t seed) {
+    return sample_measurements(program, shots, seed, 0);
 }
 
 } // namespace symft
