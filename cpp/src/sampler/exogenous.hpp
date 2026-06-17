@@ -18,5 +18,10 @@ struct PresampledExogenous {
 };
 
 PresampledExogenous presample_exogenous(const FactoredInstructionProgram& program, int shots, std::uint64_t seed = 1);
+void presample_exogenous_in_place(
+    PresampledExogenous& samples,
+    const FactoredInstructionProgram& program,
+    int shots,
+    std::uint64_t seed = 1);
 
 } // namespace symft

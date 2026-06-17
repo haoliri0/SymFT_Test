@@ -163,11 +163,14 @@ void presample_low_probability_bernoulli_group(
 
 } // namespace
 
-PresampledExogenous presample_exogenous(const FactoredInstructionProgram& program, int shots, std::uint64_t seed) {
+void presample_exogenous_in_place(
+    PresampledExogenous& samples,
+    const FactoredInstructionProgram& program,
+    int shots,
+    std::uint64_t seed) {
     if (shots < 0) {
         fail("presampled shot count must be nonnegative");
     }
-    PresampledExogenous samples;
     samples.nshots = shots;
     samples.nsymbols = program.nsymbols;
     samples.nwords = symbol_word_count(program.nsymbols);
@@ -194,6 +197,11 @@ PresampledExogenous presample_exogenous(const FactoredInstructionProgram& progra
         presample_low_probability_bernoulli_group(samples.value_words, samples.nwords, rng_state, group, shots);
     }
     samples.next_rng_state = rng_state;
+}
+
+PresampledExogenous presample_exogenous(const FactoredInstructionProgram& program, int shots, std::uint64_t seed) {
+    PresampledExogenous samples;
+    presample_exogenous_in_place(samples, program, shots, seed);
     return samples;
 }
 
