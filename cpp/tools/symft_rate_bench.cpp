@@ -59,8 +59,6 @@ struct BenchResult {
     int threads = 1;
     int requested_threads = 1;
     bool detector_postselection = false;
-    std::string batch_postselection_mode;
-    int batch_postselection_fallback_threshold = 0;
     int batch_mask_threshold_denominator = 0;
     std::string exogenous_mode;
     std::string rng_streams = "split_exogenous_branch";
@@ -162,45 +160,6 @@ SamplerMode parse_sampler_mode(const char* raw) {
     throw std::runtime_error(std::string("invalid sampler: ") + raw);
 }
 
-std::string parse_batch_postselection_mode(const char* raw) {
-    const std::string value(raw);
-    if (value == "lazy" || value == "current" ||
-        value == "combined" || value == "adaptive" ||
-        value == "masked" || value == "mask" ||
-        value == "aggressive" ||
-        value == "masked-aggressive" || value == "aggressive-masked" ||
-        value == "hybrid" ||
-        value == "masked-hybrid" || value == "hybrid-masked" ||
-        value == "hybrid-aggressive" || value == "aggressive-hybrid") {
-        if (value == "mask") {
-            return "masked";
-        }
-        if (value == "adaptive") {
-            return "combined";
-        }
-        if (value == "aggressive-masked") {
-            return "masked-aggressive";
-        }
-        if (value == "hybrid-masked") {
-            return "masked-hybrid";
-        }
-        return value == "aggressive-hybrid" ? "hybrid-aggressive" : value;
-    }
-    throw std::runtime_error(std::string("invalid batch postselection mode: ") + raw);
-}
-
-bool batch_postselection_mode_is_masked(const std::string& mode) {
-    return mode == "masked" || mode == "combined" || mode == "masked-aggressive" || mode == "masked-hybrid";
-}
-
-bool batch_postselection_mode_is_aggressive(const std::string& mode) {
-    return mode == "aggressive" || mode == "hybrid-aggressive" || mode == "masked-aggressive";
-}
-
-bool batch_postselection_mode_is_hybrid(const std::string& mode) {
-    return mode == "hybrid" || mode == "hybrid-aggressive" || mode == "masked-hybrid";
-}
-
 struct Options {
     std::string path = "d3.stim";
     std::uint64_t shots = 100000000ULL;
@@ -210,8 +169,6 @@ struct Options {
     int observable = 0;
     int threads = 1;
     bool postselect_detectors = false;
-    std::string batch_postselection_mode = "lazy";
-    int batch_postselection_fallback_threshold = 16;
     int batch_mask_threshold_denominator = 8;
     SamplerMode sampler = SamplerMode::Batch;
 };
@@ -233,8 +190,6 @@ void print_usage(const char* argv0) {
         << "  --threads N|auto                  Parallel worker threads over independent batches\n"
         << "  --postselect-detectors            Stop discarded single shots or compact discarded batch shots after fired detectors\n"
         << "  --no-postselect-detectors         Disable detector postselection abort\n"
-        << "  --batch-postselection-mode lazy|combined|masked|aggressive|hybrid|hybrid-aggressive\n"
-        << "  --batch-fallback-threshold N      Live-shot threshold for hybrid batch postselection; default: 16\n"
         << "  --batch-mask-threshold-denominator N  Combined mode masks when dead/live >= 1/N; default: 8\n";
 }
 
@@ -329,13 +284,6 @@ Options parse_options(int argc, char** argv) {
             options.postselect_detectors = value.empty() ? true : parse_bool_flag(value.c_str(), "postselect_detectors");
         } else if (name == "--no-postselect-detectors") {
             options.postselect_detectors = false;
-        } else if (name == "--batch-postselection-mode" || name == "--batch-postselect-mode") {
-            const std::string raw = require_option_value(name, value, idx, argc, argv);
-            options.batch_postselection_mode = parse_batch_postselection_mode(raw.c_str());
-        } else if (name == "--batch-fallback-threshold" || name == "--postselection-fallback-threshold") {
-            const std::string raw = require_option_value(name, value, idx, argc, argv);
-            options.batch_postselection_fallback_threshold =
-                parse_nonnegative_int(raw.c_str(), "batch_fallback_threshold");
         } else if (name == "--batch-mask-threshold-denominator" || name == "--mask-threshold-denominator") {
             const std::string raw = require_option_value(name, value, idx, argc, argv);
             options.batch_mask_threshold_denominator =
@@ -349,15 +297,7 @@ Options parse_options(int argc, char** argv) {
 
 symft::BatchDetectorPostselectionOptions batch_postselection_options(const Options& options) {
     symft::BatchDetectorPostselectionOptions out;
-    out.mask_dead_shots = batch_postselection_mode_is_masked(options.batch_postselection_mode);
-    out.mask_dead_shots_min_fraction_denominator =
-        options.batch_postselection_mode == "combined" ? options.batch_mask_threshold_denominator : 1;
-    if (batch_postselection_mode_is_aggressive(options.batch_postselection_mode)) {
-        out.compact_after_detector = true;
-    }
-    if (batch_postselection_mode_is_hybrid(options.batch_postselection_mode)) {
-        out.single_shot_fallback_threshold = options.batch_postselection_fallback_threshold;
-    }
+    out.mask_dead_shots_min_fraction_denominator = options.batch_mask_threshold_denominator;
     return out;
 }
 
@@ -876,13 +816,7 @@ BenchResult run_batch_sampler(const Options& options) {
     result.observable = options.observable;
     result.requested_threads = options.threads;
     result.detector_postselection = options.postselect_detectors;
-    result.batch_postselection_mode = options.batch_postselection_mode;
-    result.batch_postselection_fallback_threshold =
-        batch_postselection_mode_is_hybrid(options.batch_postselection_mode)
-            ? options.batch_postselection_fallback_threshold
-            : 0;
-    result.batch_mask_threshold_denominator =
-        options.batch_postselection_mode == "combined" ? options.batch_mask_threshold_denominator : 0;
+    result.batch_mask_threshold_denominator = options.postselect_detectors ? options.batch_mask_threshold_denominator : 0;
     result.exogenous_mode = "packed_presampled_streaming";
     result.rng_streams = "split_exogenous_branch";
 
@@ -1066,8 +1000,7 @@ void print_result(const BenchResult& result) {
     std::cout << "sampler " << result.sampler << "\n";
     std::cout << "detector_postselection " << (result.detector_postselection ? "enabled" : "disabled") << "\n";
     if (result.sampler == "batch_postselected") {
-        std::cout << "batch_postselection_mode " << result.batch_postselection_mode << "\n";
-        std::cout << "batch_fallback_threshold " << result.batch_postselection_fallback_threshold << "\n";
+        std::cout << "batch_postselection_mode combined\n";
         std::cout << "batch_mask_threshold_denominator " << result.batch_mask_threshold_denominator << "\n";
     }
     std::cout << "exogenous_mode " << result.exogenous_mode << "\n";

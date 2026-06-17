@@ -389,32 +389,6 @@ void test_batch_postselection() {
         require(runtime.measurement_words[0] == 0, "batch postselection keeps quiet measurement records");
     }
     {
-        const auto parsed = parse_stim_text("X_ERROR(0.5) 0\nM 0\nDETECTOR rec[-1]\nM !1\n");
-        PendingFactoredState pending(parsed.state);
-        const auto program = plan_factored_updates(pending);
-        const auto samples = presample_exogenous(program, 8, 31);
-        BatchDetectorPostselectionScratch default_scratch;
-        BatchFactoredExecutorState default_runtime(program, 8, 37);
-        const auto default_result = execute_batch_postselected_in_place(
-            default_runtime,
-            program,
-            samples,
-            single_detector_plan(program, 1),
-            default_scratch);
-        BatchDetectorPostselectionScratch hybrid_scratch;
-        BatchFactoredExecutorState hybrid_runtime(program, 8, 37);
-        const auto hybrid_result = execute_batch_postselected_in_place(
-            hybrid_runtime,
-            program,
-            samples,
-            single_detector_plan(program, 1),
-            hybrid_scratch,
-            BatchDetectorPostselectionOptions{false, false, 1, 8});
-        require(default_result.discarded == hybrid_result.discarded, "hybrid postselection discarded count");
-        require(default_result.accepted == hybrid_result.accepted, "hybrid postselection accepted count");
-        require(default_runtime.measurement_words == hybrid_runtime.measurement_words, "hybrid postselection records");
-    }
-    {
         const auto parsed = parse_stim_text(
             "X_ERROR(0.125) 0\n"
             "M 0\n"
@@ -435,32 +409,20 @@ void test_batch_postselection() {
             samples,
             single_detector_plan(program, 1),
             default_scratch);
-        BatchDetectorPostselectionScratch masked_scratch;
-        BatchFactoredExecutorState masked_runtime(program, 64, 43);
-        const auto masked_result = execute_batch_postselected_in_place(
-            masked_runtime,
+        BatchDetectorPostselectionScratch alternate_scratch;
+        BatchFactoredExecutorState alternate_runtime(program, 64, 43);
+        const auto alternate_result = execute_batch_postselected_in_place(
+            alternate_runtime,
             program,
             samples,
             single_detector_plan(program, 1),
-            masked_scratch,
-            BatchDetectorPostselectionOptions{false, true, 1, 0});
-        BatchDetectorPostselectionScratch combined_scratch;
-        BatchFactoredExecutorState combined_runtime(program, 64, 43);
-        const auto combined_result = execute_batch_postselected_in_place(
-            combined_runtime,
-            program,
-            samples,
-            single_detector_plan(program, 1),
-            combined_scratch,
-            BatchDetectorPostselectionOptions{false, true, 8, 0});
-        require(masked_result.discarded > 0, "masked postselection test kills at least one lane");
-        require(masked_result.discarded * 4 < 64, "masked postselection test stays dirty before final compaction");
-        require(default_result.discarded == masked_result.discarded, "masked postselection discarded count");
-        require(default_result.accepted == masked_result.accepted, "masked postselection accepted count");
-        require(default_runtime.measurement_words == masked_runtime.measurement_words, "masked postselection records");
-        require(default_result.discarded == combined_result.discarded, "combined postselection discarded count");
-        require(default_result.accepted == combined_result.accepted, "combined postselection accepted count");
-        require(default_runtime.measurement_words == combined_runtime.measurement_words, "combined postselection records");
+            alternate_scratch,
+            BatchDetectorPostselectionOptions{1});
+        require(default_result.discarded > 0, "combined postselection test kills at least one lane");
+        require(default_result.discarded * 4 < 64, "combined postselection test stays dirty before final compaction");
+        require(default_result.discarded == alternate_result.discarded, "combined postselection discarded count");
+        require(default_result.accepted == alternate_result.accepted, "combined postselection accepted count");
+        require(default_runtime.measurement_words == alternate_runtime.measurement_words, "combined postselection records");
     }
 }
 

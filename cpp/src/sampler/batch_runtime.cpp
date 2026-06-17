@@ -235,7 +235,7 @@ bool should_execute_masked_for_dead_bits(
     const BatchFactoredExecutorState& runtime,
     const BatchDetectorPostselectionScratch& scratch,
     const BatchDetectorPostselectionOptions& options) {
-    if (!options.mask_dead_shots || runtime.active_shots == 0) {
+    if (runtime.active_shots == 0) {
         return false;
     }
     const int dead_count = count_live_bits(scratch.dead_bits, runtime.active_shots);
@@ -546,8 +546,7 @@ int apply_postselection_checks_for_record(
     BatchDetectorPostselectionScratch& scratch,
     const std::vector<int>& condition_last_use,
     const std::vector<int>& record_last_use,
-    int instruction_index,
-    bool compact_after_detector) {
+    int instruction_index) {
     if (detectors.empty() || runtime.active_shots == 0) {
         return 0;
     }
@@ -583,157 +582,8 @@ int apply_postselection_checks_for_record(
         false,
         scratch.compact_scratch,
         scratch.live_sources,
-        compact_after_detector);
+        false);
     return discarded_now;
-}
-
-bool record_parity_from_single_words(
-    const std::vector<std::uint64_t>& measurement_words,
-    const std::vector<int>& records) {
-    bool parity = false;
-    for (int record : records) {
-        if (record <= 0) {
-            fail("detector record ids must be positive");
-        }
-        parity ^= packed_bit(measurement_words, record - 1);
-    }
-    return parity;
-}
-
-bool any_single_detector_fires(
-    const std::vector<std::uint64_t>& measurement_words,
-    const std::vector<std::vector<int>>& detectors) {
-    for (const auto& records : detectors) {
-        if (record_parity_from_single_words(measurement_words, records)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-void copy_batch_shot_to_single(
-    FactoredExecutorState& single,
-    const BatchFactoredExecutorState& batch,
-    const FactoredInstructionProgram& program,
-    int shot) {
-    single.n = batch.n;
-    single.k = batch.k;
-    single.ndormant = batch.ndormant;
-    single.nsymbols = batch.nsymbols;
-    single.nrecords = batch.nrecords;
-    const std::size_t max_dim = active_length(program.max_k);
-    if (single.active_re.size() < max_dim) {
-        single.active_re.resize(max_dim, 0.0);
-    }
-    if (single.active_im.size() < max_dim) {
-        single.active_im.resize(max_dim, 0.0);
-    }
-    if (single.active_scratch_re.size() < max_dim) {
-        single.active_scratch_re.resize(max_dim, 0.0);
-    }
-    if (single.active_scratch_im.size() < max_dim) {
-        single.active_scratch_im.resize(max_dim, 0.0);
-    }
-
-    const std::size_t dim = active_length(batch.k);
-    for (std::size_t basis = 0; basis < dim; ++basis) {
-        const std::size_t batch_offset = batch_active_offset(batch, basis, shot);
-        single.active_re[basis] = batch.active_re[batch_offset];
-        single.active_im[basis] = batch.active_im[batch_offset];
-    }
-
-    if (single.assigned_words.size() != batch.assigned_words.size()) {
-        single.assigned_words.resize(batch.assigned_words.size(), 0);
-    }
-    single.assigned_words = batch.assigned_words;
-    if (single.value_words.size() != batch.assigned_words.size()) {
-        single.value_words.resize(batch.assigned_words.size(), 0);
-    }
-    std::fill(single.value_words.begin(), single.value_words.end(), 0);
-    const std::size_t shot_word = batch_shot_word(shot);
-    const std::uint64_t shot_mask = batch_shot_mask(shot);
-    for (int condition = 1; condition <= batch.nsymbols; ++condition) {
-        const std::size_t symbol_word = symbol_word_index(condition);
-        const std::uint64_t symbol_mask = symbol_bit_mask(condition);
-        if ((single.assigned_words[symbol_word] & symbol_mask) == 0) {
-            continue;
-        }
-        if ((batch.value_words[batch_condition_offset(batch, condition, shot_word)] & shot_mask) != 0) {
-            single.value_words[symbol_word] |= symbol_mask;
-        }
-    }
-
-    const std::size_t record_words = symbol_word_count(batch.nrecords);
-    if (single.measurement_words.size() != record_words) {
-        single.measurement_words.resize(record_words, 0);
-    }
-    std::fill(single.measurement_words.begin(), single.measurement_words.end(), 0);
-    for (int record = 1; record <= batch.nrecords; ++record) {
-        if ((batch.measurement_words[batch_record_offset(batch, record, shot_word)] & shot_mask) != 0) {
-            const int bit = record - 1;
-            single.measurement_words[static_cast<std::size_t>(bit >> 6)] |= std::uint64_t{1} << (bit & 63);
-        }
-    }
-}
-
-void copy_single_measurements_to_batch(
-    BatchFactoredExecutorState& batch,
-    int dest_shot,
-    const FactoredExecutorState& single) {
-    const std::size_t dest_word = batch_shot_word(dest_shot);
-    const std::uint64_t dest_mask = batch_shot_mask(dest_shot);
-    for (int record = 1; record <= batch.nrecords; ++record) {
-        const int bit = record - 1;
-        const bool value = (single.measurement_words[static_cast<std::size_t>(bit >> 6)] &
-                            (std::uint64_t{1} << (bit & 63))) != 0;
-        auto& word = batch.measurement_words[batch_record_offset(batch, record, dest_word)];
-        if (value) {
-            word |= dest_mask;
-        } else {
-            word &= ~dest_mask;
-        }
-    }
-}
-
-BatchDetectorPostselectionResult finish_postselected_batch_as_single_shots(
-    BatchFactoredExecutorState& runtime,
-    const FactoredInstructionProgram& program,
-    std::size_t next_instruction_index,
-    const BatchDetectorPostselectionPlan& postselection,
-    FactoredExecutorState& single_runtime) {
-    int accepted = 0;
-    int discarded = 0;
-    const int survivors = runtime.active_shots;
-    for (int shot = 0; shot < survivors; ++shot) {
-        copy_batch_shot_to_single(single_runtime, runtime, program, shot);
-        single_runtime.rng_state = runtime.rng_state;
-        bool survived = true;
-        for (std::size_t idx = next_instruction_index; idx < program.instructions.size(); ++idx) {
-            execute_instruction_in_place(single_runtime, program.instructions[idx]);
-            const int record = postselection.instruction_records_by_index[idx];
-            if (record <= 0) {
-                continue;
-            }
-            if (record >= static_cast<int>(postselection.detectors_by_record.size())) {
-                fail("batch postselection instruction record table references an out-of-range record");
-            }
-            if (any_single_detector_fires(
-                    single_runtime.measurement_words,
-                    postselection.detectors_by_record[static_cast<std::size_t>(record)])) {
-                survived = false;
-                break;
-            }
-        }
-        runtime.rng_state = single_runtime.rng_state;
-        if (!survived) {
-            ++discarded;
-            continue;
-        }
-        copy_single_measurements_to_batch(runtime, accepted, single_runtime);
-        ++accepted;
-    }
-    runtime.active_shots = accepted;
-    return {discarded, accepted};
 }
 
 void validate_batch_postselection_plan(
@@ -967,37 +817,8 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
             scratch,
             postselection.condition_last_use_by_index,
             postselection.record_last_use_by_index,
-            static_cast<int>(idx),
-            options.compact_after_detector);
+            static_cast<int>(idx));
         discarded += discarded_now;
-        if (options.single_shot_fallback_threshold > 0 &&
-            discarded_now > 0 &&
-            runtime.active_shots > 0 &&
-            idx + 1 < program.instructions.size()) {
-            compact_dead_shots_if_needed(
-                runtime,
-                scratch.dead_bits,
-                scratch.keep_bits,
-                postselection.condition_last_use_by_index,
-                postselection.record_last_use_by_index,
-                static_cast<int>(idx),
-                false,
-                scratch.compact_scratch,
-                scratch.live_sources,
-                true);
-            if (runtime.active_shots > options.single_shot_fallback_threshold) {
-                continue;
-            }
-            FactoredExecutorState single_runtime(program, runtime.rng_state);
-            const auto fallback = finish_postselected_batch_as_single_shots(
-                runtime,
-                program,
-                idx + 1,
-                postselection,
-                single_runtime);
-            discarded += fallback.discarded;
-            return {discarded, runtime.active_shots};
-        }
     }
     compact_dead_shots_if_needed(
         runtime,
@@ -1057,37 +878,8 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
             scratch,
             postselection.condition_last_use_by_index,
             postselection.record_last_use_by_index,
-            static_cast<int>(idx),
-            options.compact_after_detector);
+            static_cast<int>(idx));
         discarded += discarded_now;
-        if (options.single_shot_fallback_threshold > 0 &&
-            discarded_now > 0 &&
-            runtime.active_shots > 0 &&
-            idx + 1 < program.instructions.size()) {
-            compact_dead_shots_if_needed(
-                runtime,
-                scratch.dead_bits,
-                scratch.keep_bits,
-                postselection.condition_last_use_by_index,
-                postselection.record_last_use_by_index,
-                static_cast<int>(idx),
-                false,
-                scratch.compact_scratch,
-                scratch.live_sources,
-                true);
-            if (runtime.active_shots > options.single_shot_fallback_threshold) {
-                continue;
-            }
-            FactoredExecutorState single_runtime(program, runtime.rng_state);
-            const auto fallback = finish_postselected_batch_as_single_shots(
-                runtime,
-                program,
-                idx + 1,
-                postselection,
-                single_runtime);
-            discarded += fallback.discarded;
-            return {discarded, runtime.active_shots};
-        }
     }
     compact_dead_shots_if_needed(
         runtime,
