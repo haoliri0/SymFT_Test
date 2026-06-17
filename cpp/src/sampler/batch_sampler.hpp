@@ -10,6 +10,26 @@ namespace symft {
 
 struct PresampledExogenous;
 
+struct BatchDetectorPostselectionPlan {
+    std::vector<int> instruction_records_by_index;
+    std::vector<std::vector<std::vector<int>>> detectors_by_record;
+    std::vector<int> condition_last_use_by_index;
+    std::vector<int> record_last_use_by_index;
+};
+
+struct BatchDetectorPostselectionScratch {
+    std::vector<std::uint64_t> detector_bits;
+    std::vector<std::uint64_t> dead_bits;
+    std::vector<std::uint64_t> keep_bits;
+    std::vector<std::uint64_t> scratch;
+    std::vector<std::uint64_t> compact_scratch;
+};
+
+struct BatchDetectorPostselectionResult {
+    int discarded = 0;
+    int accepted = 0;
+};
+
 // Active storage is a Julia-column-major equivalent SoA layout:
 // active_re[basis * batches + shot] and active_im[basis * batches + shot].
 // Thus shots are contiguous for each active basis column.
@@ -49,6 +69,15 @@ void execute_batch_in_place(
     BatchFactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
     const PresampledExogenous& samples);
+void prepare_batch_detector_postselection_scratch(
+    BatchDetectorPostselectionScratch& scratch,
+    const BatchFactoredExecutorState& runtime);
+BatchDetectorPostselectionResult execute_batch_postselected_in_place(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    const PresampledExogenous& samples,
+    const BatchDetectorPostselectionPlan& postselection,
+    BatchDetectorPostselectionScratch& scratch);
 const char* active_batch_backend();
 std::vector<std::vector<std::uint64_t>> sample_measurements_batch(
     const FactoredInstructionProgram& program,

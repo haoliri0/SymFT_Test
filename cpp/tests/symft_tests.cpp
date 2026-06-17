@@ -7,7 +7,10 @@
 #include <complex>
 #include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <string>
+#include <type_traits>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -21,6 +24,45 @@ void require(bool condition, const std::string& message) {
 
 bool approx(symft::Complex a, symft::Complex b, double eps = 1e-10) {
     return std::abs(a - b) <= eps;
+}
+
+std::optional<int> instruction_record(const symft::FactoredInstruction& instruction) {
+    return std::visit(
+        [](const auto& inst) -> std::optional<int> {
+            using T = std::decay_t<decltype(inst)>;
+            if constexpr (
+                std::is_same_v<T, symft::RecordMeasurement> ||
+                std::is_same_v<T, symft::MeasureActiveLastZ> ||
+                std::is_same_v<T, symft::MeasurePrecomputedActivePauli> ||
+                std::is_same_v<T, symft::IntroduceDormantMeasurementBranch>) {
+                return inst.record;
+            } else {
+                return std::nullopt;
+            }
+        },
+        instruction);
+}
+
+symft::BatchDetectorPostselectionPlan single_detector_plan(
+    const symft::FactoredInstructionProgram& program,
+    int record) {
+    symft::BatchDetectorPostselectionPlan plan;
+    plan.instruction_records_by_index.reserve(program.instructions.size());
+    int producer_instruction = -1;
+    for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+        const int produced_record = instruction_record(program.instructions[idx]).value_or(0);
+        plan.instruction_records_by_index.push_back(produced_record);
+        if (produced_record == record) {
+            producer_instruction = static_cast<int>(idx);
+        }
+    }
+    require(producer_instruction >= 0, "postselection test record producer");
+    plan.detectors_by_record.resize(static_cast<std::size_t>(program.nrecords + 1));
+    plan.detectors_by_record[static_cast<std::size_t>(record)].push_back({record});
+    plan.condition_last_use_by_index.assign(static_cast<std::size_t>(program.nsymbols + 1), -1);
+    plan.record_last_use_by_index.assign(static_cast<std::size_t>(program.nrecords + 1), -1);
+    plan.record_last_use_by_index[static_cast<std::size_t>(record)] = producer_instruction;
+    return plan;
 }
 
 void test_pauli_algebra() {
@@ -242,6 +284,45 @@ void test_batch_sampler() {
     require(ones > 50 && ones < 150, "batch T then MX produces non-deterministic X measurement");
 }
 
+void test_batch_postselection() {
+    using namespace symft;
+    {
+        const auto parsed = parse_stim_text("M !0\nDETECTOR rec[-1]\n");
+        PendingFactoredState pending(parsed.state);
+        const auto program = plan_factored_updates(pending);
+        const auto samples = presample_exogenous(program, 8, 17);
+        BatchFactoredExecutorState runtime(program, 8, 19);
+        BatchDetectorPostselectionScratch scratch;
+        const auto result = execute_batch_postselected_in_place(
+            runtime,
+            program,
+            samples,
+            single_detector_plan(program, 1),
+            scratch);
+        require(result.discarded == 8, "batch postselection rejects fired detector");
+        require(result.accepted == 0, "batch postselection no accepted shots after rejection");
+        require(runtime.active_shots == 0, "batch postselection compacts all rejected shots");
+    }
+    {
+        const auto parsed = parse_stim_text("M 0\nDETECTOR rec[-1]\n");
+        PendingFactoredState pending(parsed.state);
+        const auto program = plan_factored_updates(pending);
+        const auto samples = presample_exogenous(program, 8, 23);
+        BatchFactoredExecutorState runtime(program, 8, 29);
+        BatchDetectorPostselectionScratch scratch;
+        const auto result = execute_batch_postselected_in_place(
+            runtime,
+            program,
+            samples,
+            single_detector_plan(program, 1),
+            scratch);
+        require(result.discarded == 0, "batch postselection keeps quiet detector");
+        require(result.accepted == 8, "batch postselection accepted count");
+        require(runtime.active_shots == 8, "batch postselection keeps active shots");
+        require(runtime.measurement_words[0] == 0, "batch postselection keeps quiet measurement records");
+    }
+}
+
 void test_detectors() {
     using namespace symft;
     const auto accepted = parse_stim_text("M !0\nOBSERVABLE_INCLUDE(0) rec[-1]\n");
@@ -268,6 +349,7 @@ int main() {
     test_t_gate_exact_rotation();
     test_presampled_exogenous();
     test_batch_sampler();
+    test_batch_postselection();
     test_detectors();
     std::cout << "symft_cpp_tests passed (SIMD backend: " << symft::active_simd_backend() << ")\n";
     return 0;
