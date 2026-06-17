@@ -157,6 +157,10 @@ void write_batch_measurement_record(
     const std::vector<std::uint64_t>& outcome_bits,
     std::optional<int> record_condition);
 void assign_presampled_exogenous_batch(BatchFactoredExecutorState& runtime, const PresampledExogenous& samples);
+void assign_presampled_exogenous_batch(
+    BatchFactoredExecutorState& runtime,
+    const PackedPresampledExogenous& samples,
+    int first_sample_shot);
 void sample_exogenous_symbols_batch(BatchFactoredExecutorState& runtime, const FactoredInstructionProgram& program);
 void rotate_pauli_batch(
     BatchFactoredExecutorState& runtime,

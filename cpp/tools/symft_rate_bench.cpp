@@ -326,31 +326,6 @@ std::size_t measurement_offset(std::size_t stride_words, int record, std::size_t
     return static_cast<std::size_t>(record - 1) * stride_words + word;
 }
 
-void copy_presampled_exogenous_slice(
-    symft::PresampledExogenous& out,
-    const symft::PresampledExogenous& samples,
-    int first_sample_shot,
-    int shots) {
-    if (first_sample_shot < 0 || shots < 0 ||
-        first_sample_shot + shots > samples.nshots ||
-        samples.value_words.size() != static_cast<std::size_t>(samples.nshots) * samples.nwords) {
-        throw std::runtime_error("presampled exogenous slice is out of range");
-    }
-    out.nshots = shots;
-    out.nsymbols = samples.nsymbols;
-    out.nwords = samples.nwords;
-    out.next_rng_state = samples.next_rng_state;
-    if (out.exogenous_assigned_words.size() != samples.exogenous_assigned_words.size()) {
-        out.exogenous_assigned_words = samples.exogenous_assigned_words;
-    }
-    const std::size_t words = static_cast<std::size_t>(shots) * out.nwords;
-    out.value_words.resize(words);
-    const auto src = samples.value_words.begin() +
-                     static_cast<std::ptrdiff_t>(
-                         static_cast<std::size_t>(first_sample_shot) * samples.nwords);
-    std::copy_n(src, words, out.value_words.begin());
-}
-
 void xor_records_into(
     std::vector<std::uint64_t>& out,
     const std::vector<std::uint64_t>& measurements,
@@ -828,12 +803,12 @@ BenchResult run_batch_sampler(const Options& options) {
     result.observable = options.observable;
     result.requested_threads = options.threads;
     result.detector_postselection = options.postselect_detectors;
-    result.exogenous_mode = "presampled_streaming";
+    result.exogenous_mode = "packed_presampled_streaming";
     result.rng_streams = "split_exogenous_branch";
 
     double parse_total = 0.0;
     double plan_total = 0.0;
-    const auto setup = build_rate_bench_setup(options, false, parse_total, plan_total);
+    const auto setup = build_rate_bench_setup(options, true, parse_total, plan_total);
     result.n = setup.parsed.state.n;
     result.records = setup.program.nrecords;
     result.max_k = setup.program.max_k;
@@ -872,25 +847,33 @@ BenchResult run_batch_sampler(const Options& options) {
             std::vector<std::uint64_t> scratch(runtime.batch_words, 0);
             symft::BatchDetectorPostselectionScratch postselection_scratch;
             symft::prepare_batch_detector_postselection_scratch(postselection_scratch, runtime);
-            if (result.sample_chunk_shots == result.block_shots) {
-                symft::PresampledExogenous samples;
-                symft::prepare_presampled_exogenous(samples, setup.program);
-                for (std::uint64_t block_index = static_cast<std::uint64_t>(worker_id);
-                     block_index < nchunks;
-                     block_index += static_cast<std::uint64_t>(active_threads)) {
-                    const std::uint64_t offset = block_index * static_cast<std::uint64_t>(result.block_shots);
-                    const int block = static_cast<int>(std::min<std::uint64_t>(
-                        static_cast<std::uint64_t>(result.block_shots),
-                        options.shots - offset));
+            symft::PackedPresampledExogenous samples;
+            symft::prepare_presampled_exogenous_packed(samples, setup.program);
+            for (std::uint64_t chunk_index = static_cast<std::uint64_t>(worker_id);
+                 chunk_index < nchunks;
+                 chunk_index += static_cast<std::uint64_t>(active_threads)) {
+                const std::uint64_t chunk_offset =
+                    chunk_index * static_cast<std::uint64_t>(result.sample_chunk_shots);
+                const int chunk_shots = static_cast<int>(std::min<std::uint64_t>(
+                    static_cast<std::uint64_t>(result.sample_chunk_shots),
+                    options.shots - chunk_offset));
 
-                    const auto presample_start = Clock::now();
-                    symft::resample_prepared_exogenous_in_place(
-                        samples,
-                        setup.program,
-                        block,
-                        block_seed(0x7eed0000ULL, repeat, block_index));
-                    const auto presample_stop = Clock::now();
+                const auto presample_start = Clock::now();
+                symft::resample_prepared_exogenous_packed_in_place(
+                    samples,
+                    setup.program,
+                    chunk_shots,
+                    block_seed(0x7eed0000ULL, repeat, chunk_index));
+                const auto presample_stop = Clock::now();
+                local.presample_s += seconds_between(presample_start, presample_stop);
 
+                for (int chunk_local_offset = 0, local_block_index = 0;
+                     chunk_local_offset < chunk_shots;
+                     chunk_local_offset += result.block_shots, ++local_block_index) {
+                    const int block = std::min(result.block_shots, chunk_shots - chunk_local_offset);
+                    const std::uint64_t block_index =
+                        chunk_index * blocks_per_chunk + static_cast<std::uint64_t>(local_block_index);
+                    const auto execute_start = Clock::now();
                     symft::reset_batch_executor(runtime, setup.program, block);
                     runtime.rng_state = block_seed(0x5eed1234ULL, repeat, block_index);
                     if (options.postselect_detectors) {
@@ -898,12 +881,13 @@ BenchResult run_batch_sampler(const Options& options) {
                             runtime,
                             setup.program,
                             samples,
+                            chunk_local_offset,
                             setup.batch_postselection_plan,
                             postselection_scratch);
                         local.counts.discarded +=
                             static_cast<std::uint64_t>(postselection_result.discarded);
                     } else {
-                        symft::execute_batch_in_place(runtime, setup.program, samples);
+                        symft::execute_batch_in_place(runtime, setup.program, samples, chunk_local_offset);
                     }
                     const auto execute_stop = Clock::now();
                     if (options.postselect_detectors) {
@@ -926,83 +910,8 @@ BenchResult run_batch_sampler(const Options& options) {
                     }
                     const auto accumulate_stop = Clock::now();
                     local.counts.shots += static_cast<std::uint64_t>(block);
-                    local.presample_s += seconds_between(presample_start, presample_stop);
-                    local.execute_s += seconds_between(presample_stop, execute_stop);
+                    local.execute_s += seconds_between(execute_start, execute_stop);
                     local.accumulate_s += seconds_between(execute_stop, accumulate_stop);
-                }
-            } else {
-                symft::PresampledExogenous samples;
-                symft::prepare_presampled_exogenous(samples, setup.program);
-                symft::PresampledExogenous block_samples;
-                symft::prepare_presampled_exogenous(block_samples, setup.program);
-                for (std::uint64_t chunk_index = static_cast<std::uint64_t>(worker_id);
-                     chunk_index < nchunks;
-                     chunk_index += static_cast<std::uint64_t>(active_threads)) {
-                    const std::uint64_t chunk_offset =
-                        chunk_index * static_cast<std::uint64_t>(result.sample_chunk_shots);
-                    const int chunk_shots = static_cast<int>(std::min<std::uint64_t>(
-                        static_cast<std::uint64_t>(result.sample_chunk_shots),
-                        options.shots - chunk_offset));
-
-                    const auto presample_start = Clock::now();
-                    symft::resample_prepared_exogenous_in_place(
-                        samples,
-                        setup.program,
-                        chunk_shots,
-                        block_seed(0x7eed0000ULL, repeat, chunk_index));
-                    const auto presample_stop = Clock::now();
-
-                    for (int chunk_local_offset = 0, local_block_index = 0;
-                         chunk_local_offset < chunk_shots;
-                         chunk_local_offset += result.block_shots, ++local_block_index) {
-                        const int block = std::min(result.block_shots, chunk_shots - chunk_local_offset);
-                        const std::uint64_t block_index =
-                            chunk_index * blocks_per_chunk + static_cast<std::uint64_t>(local_block_index);
-                        const auto execute_start = Clock::now();
-                        copy_presampled_exogenous_slice(
-                            block_samples,
-                            samples,
-                            chunk_local_offset,
-                            block);
-                        symft::reset_batch_executor(runtime, setup.program, block);
-                        runtime.rng_state = block_seed(0x5eed1234ULL, repeat, block_index);
-                        if (options.postselect_detectors) {
-                            const auto postselection_result = symft::execute_batch_postselected_in_place(
-                                runtime,
-                                setup.program,
-                                block_samples,
-                                setup.batch_postselection_plan,
-                                postselection_scratch);
-                            local.counts.discarded +=
-                                static_cast<std::uint64_t>(postselection_result.discarded);
-                        } else {
-                            symft::execute_batch_in_place(runtime, setup.program, block_samples);
-                        }
-                        const auto execute_stop = Clock::now();
-                        if (options.postselect_detectors) {
-                            accumulate_logical_counts_for_survivors(
-                                local.counts,
-                                runtime,
-                                setup.logical_records,
-                                logical_bits,
-                                scratch);
-                        } else {
-                            accumulate_block_counts(
-                                local.counts,
-                                runtime,
-                                block,
-                                setup.parsed.detectors,
-                                setup.logical_records,
-                                discard_bits,
-                                logical_bits,
-                                scratch);
-                        }
-                        const auto accumulate_stop = Clock::now();
-                        local.counts.shots += static_cast<std::uint64_t>(block);
-                        local.execute_s += seconds_between(execute_start, execute_stop);
-                        local.accumulate_s += seconds_between(execute_stop, accumulate_stop);
-                    }
-                    local.presample_s += seconds_between(presample_start, presample_stop);
                 }
             }
             worker_results[static_cast<std::size_t>(worker_id)] = local;

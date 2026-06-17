@@ -9,6 +9,7 @@
 namespace symft {
 
 struct PresampledExogenous;
+struct PackedPresampledExogenous;
 
 struct BatchDetectorPostselectionPlan {
     std::vector<int> instruction_records_by_index;
@@ -69,6 +70,11 @@ void execute_batch_in_place(
     BatchFactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
     const PresampledExogenous& samples);
+void execute_batch_in_place(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    const PackedPresampledExogenous& samples,
+    int first_sample_shot = 0);
 void prepare_batch_detector_postselection_scratch(
     BatchDetectorPostselectionScratch& scratch,
     const BatchFactoredExecutorState& runtime);
@@ -76,6 +82,13 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
     BatchFactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
     const PresampledExogenous& samples,
+    const BatchDetectorPostselectionPlan& postselection,
+    BatchDetectorPostselectionScratch& scratch);
+BatchDetectorPostselectionResult execute_batch_postselected_in_place(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    const PackedPresampledExogenous& samples,
+    int first_sample_shot,
     const BatchDetectorPostselectionPlan& postselection,
     BatchDetectorPostselectionScratch& scratch);
 const char* active_batch_backend();
@@ -87,6 +100,10 @@ std::vector<std::vector<std::uint64_t>> sample_measurements_batch(
 void assign_presampled_exogenous_batch_in_place(
     BatchFactoredExecutorState& runtime,
     const PresampledExogenous& samples);
+void assign_presampled_exogenous_batch_in_place(
+    BatchFactoredExecutorState& runtime,
+    const PackedPresampledExogenous& samples,
+    int first_sample_shot = 0);
 void execute_batch_instruction_in_place(
     BatchFactoredExecutorState& runtime,
     const FactoredInstruction& instruction);

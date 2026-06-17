@@ -3,6 +3,7 @@
 #include "sampler/exogenous.hpp"
 #include "sampler/single_shot.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstdlib>
@@ -294,6 +295,30 @@ void test_presampled_exogenous() {
     for (const auto& shot : chunked_records) {
         require(packed_bit(shot, 0), "chunked single-shot deterministic X error");
     }
+
+    const auto random_error = parse_stim_text("X_ERROR(0.5) 0\nM 0\n");
+    PendingFactoredState pending_random(random_error.state);
+    const auto random_program = plan_factored_updates(pending_random);
+    const auto scalar_samples = presample_exogenous(random_program, 11, 31);
+    const auto packed_random_samples = presample_exogenous_packed(random_program, 11, 31);
+    PresampledExogenous scalar_block;
+    scalar_block.nshots = 5;
+    scalar_block.nsymbols = scalar_samples.nsymbols;
+    scalar_block.nwords = scalar_samples.nwords;
+    scalar_block.next_rng_state = scalar_samples.next_rng_state;
+    scalar_block.exogenous_assigned_words = scalar_samples.exogenous_assigned_words;
+    scalar_block.value_words.resize(5 * scalar_block.nwords);
+    std::copy_n(
+        scalar_samples.value_words.begin() + static_cast<std::ptrdiff_t>(3 * scalar_block.nwords),
+        5 * scalar_block.nwords,
+        scalar_block.value_words.begin());
+    BatchFactoredExecutorState scalar_runtime(random_program, 5, 41);
+    execute_batch_in_place(scalar_runtime, random_program, scalar_block);
+    BatchFactoredExecutorState packed_runtime(random_program, 5, 41);
+    execute_batch_in_place(packed_runtime, random_program, packed_random_samples, 3);
+    require(
+        scalar_runtime.measurement_words == packed_runtime.measurement_words,
+        "packed batch exogenous slice matches shot-major presample");
 }
 
 void test_batch_sampler() {

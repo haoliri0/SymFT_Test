@@ -305,6 +305,70 @@ void assign_presampled_exogenous_batch(
     }
 }
 
+std::uint64_t packed_condition_slice_word(
+    const PackedPresampledExogenous& samples,
+    int condition,
+    int first_sample_shot,
+    int active_shots,
+    std::size_t dest_word) {
+    const int bit_offset = first_sample_shot & 63;
+    const std::size_t src_word = static_cast<std::size_t>(first_sample_shot >> 6) + dest_word;
+    const std::size_t base = static_cast<std::size_t>(condition - 1) * samples.shot_words;
+    std::uint64_t out = 0;
+    if (src_word < samples.shot_words) {
+        out = samples.value_words[base + src_word] >> bit_offset;
+    }
+    if (bit_offset != 0 && src_word + 1 < samples.shot_words) {
+        out |= samples.value_words[base + src_word + 1] << (64 - bit_offset);
+    }
+    return out & low_bits_mask(active_shots - static_cast<int>(dest_word << 6));
+}
+
+void copy_packed_exogenous_condition_to_batch(
+    BatchFactoredExecutorState& runtime,
+    const PackedPresampledExogenous& samples,
+    int condition,
+    int first_sample_shot) {
+    const std::size_t nwords = runtime_batch_word_count(runtime);
+    const std::size_t base = batch_condition_offset(runtime, condition, 0);
+    for (std::size_t word = 0; word < nwords; ++word) {
+        runtime.value_words[base + word] = packed_condition_slice_word(
+            samples,
+            condition,
+            first_sample_shot,
+            runtime.active_shots,
+            word);
+    }
+    for (std::size_t word = nwords; word < runtime.batch_words; ++word) {
+        runtime.value_words[base + word] = 0;
+    }
+}
+
+void assign_presampled_exogenous_batch(
+    BatchFactoredExecutorState& runtime,
+    const PackedPresampledExogenous& samples,
+    int first_sample_shot) {
+    if (first_sample_shot < 0 ||
+        runtime.active_shots > samples.nshots - first_sample_shot ||
+        runtime.nsymbols != samples.nsymbols ||
+        samples.exogenous_assigned_words.size() != symbol_word_count(samples.nsymbols) ||
+        samples.value_words.size() != static_cast<std::size_t>(samples.nsymbols) * samples.shot_words) {
+        fail("packed presampled exogenous table does not match batch executor");
+    }
+    for (std::size_t symbol_word = 0; symbol_word < samples.exogenous_assigned_words.size(); ++symbol_word) {
+        std::uint64_t assigned = samples.exogenous_assigned_words[symbol_word];
+        runtime.assigned_words[symbol_word] |= assigned;
+        while (assigned != 0) {
+            const int bit = trailing_zeros64(assigned);
+            const int condition = static_cast<int>(symbol_word * 64 + static_cast<std::size_t>(bit) + 1);
+            if (condition <= runtime.nsymbols) {
+                copy_packed_exogenous_condition_to_batch(runtime, samples, condition, first_sample_shot);
+            }
+            assigned &= assigned - 1;
+        }
+    }
+}
+
 void sample_categorical_distribution_batch(
     BatchFactoredExecutorState& runtime,
     const std::vector<int>& conditions,

@@ -471,6 +471,13 @@ void assign_presampled_exogenous_batch_in_place(
     assign_presampled_exogenous_batch(runtime, samples);
 }
 
+void assign_presampled_exogenous_batch_in_place(
+    BatchFactoredExecutorState& runtime,
+    const PackedPresampledExogenous& samples,
+    int first_sample_shot) {
+    assign_presampled_exogenous_batch(runtime, samples, first_sample_shot);
+}
+
 void execute_batch_instruction_in_place(
     BatchFactoredExecutorState& runtime,
     const FactoredInstruction& instruction) {
@@ -583,6 +590,23 @@ void execute_batch_in_place(
     }
 }
 
+void execute_batch_in_place(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    const PackedPresampledExogenous& samples,
+    int first_sample_shot) {
+    if (runtime.n != program.n || runtime.k + runtime.ndormant != runtime.n) {
+        fail("batch executor state does not match program");
+    }
+    if (runtime.active_shots == 0) {
+        return;
+    }
+    assign_presampled_exogenous_batch(runtime, samples, first_sample_shot);
+    for (const auto& instruction : program.instructions) {
+        execute_batch_instruction(runtime, instruction);
+    }
+}
+
 void prepare_batch_detector_postselection_scratch(
     BatchDetectorPostselectionScratch& scratch,
     const BatchFactoredExecutorState& runtime) {
@@ -612,6 +636,59 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
 
     int discarded = 0;
     assign_presampled_exogenous_batch(runtime, samples);
+    for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+        if (runtime.active_shots == 0) {
+            break;
+        }
+        execute_batch_instruction(runtime, program.instructions[idx]);
+        const int record = postselection.instruction_records_by_index[idx];
+        if (record <= 0) {
+            continue;
+        }
+        if (record >= static_cast<int>(postselection.detectors_by_record.size())) {
+            fail("batch postselection instruction record table references an out-of-range record");
+        }
+        const auto& detectors = postselection.detectors_by_record[static_cast<std::size_t>(record)];
+        discarded += apply_postselection_checks_for_record(
+            runtime,
+            detectors,
+            scratch,
+            postselection.condition_last_use_by_index,
+            postselection.record_last_use_by_index,
+            static_cast<int>(idx));
+    }
+    compact_dead_shots_if_needed(
+        runtime,
+        scratch.dead_bits,
+        scratch.keep_bits,
+        postselection.condition_last_use_by_index,
+        postselection.record_last_use_by_index,
+        static_cast<int>(program.instructions.size()),
+        true,
+        scratch.compact_scratch,
+        true);
+    return {discarded, runtime.active_shots};
+}
+
+BatchDetectorPostselectionResult execute_batch_postselected_in_place(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    const PackedPresampledExogenous& samples,
+    int first_sample_shot,
+    const BatchDetectorPostselectionPlan& postselection,
+    BatchDetectorPostselectionScratch& scratch) {
+    if (runtime.n != program.n || runtime.k + runtime.ndormant != runtime.n) {
+        fail("batch executor state does not match program");
+    }
+    validate_batch_postselection_plan(program, postselection);
+    prepare_batch_detector_postselection_scratch(scratch, runtime);
+    std::fill(scratch.dead_bits.begin(), scratch.dead_bits.end(), 0);
+    if (runtime.active_shots == 0) {
+        return {};
+    }
+
+    int discarded = 0;
+    assign_presampled_exogenous_batch(runtime, samples, first_sample_shot);
     for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
         if (runtime.active_shots == 0) {
             break;
