@@ -442,6 +442,52 @@ std::vector<std::vector<std::vector<int>>> detectors_by_max_record(
     return out;
 }
 
+std::vector<int> record_producer_instructions(const std::vector<int>& records_by_instruction, int nrecords) {
+    std::vector<int> out(static_cast<std::size_t>(nrecords + 1), -1);
+    for (std::size_t idx = 0; idx < records_by_instruction.size(); ++idx) {
+        const int record = records_by_instruction[idx];
+        if (record > 0 && record <= nrecords) {
+            out[static_cast<std::size_t>(record)] = static_cast<int>(idx);
+        }
+    }
+    return out;
+}
+
+std::vector<int> measurement_record_last_uses(
+    int nrecords,
+    const std::vector<int>& record_producers,
+    const std::vector<std::vector<std::vector<int>>>& detectors_by_record,
+    const std::vector<std::vector<int>>& logical_records,
+    int final_instruction_index) {
+    std::vector<int> last_use(static_cast<std::size_t>(nrecords + 1), -1);
+    for (int max_record = 1; max_record <= nrecords; ++max_record) {
+        if (static_cast<std::size_t>(max_record) >= detectors_by_record.size() ||
+            detectors_by_record[static_cast<std::size_t>(max_record)].empty()) {
+            continue;
+        }
+        const int use_index = record_producers[static_cast<std::size_t>(max_record)];
+        if (use_index < 0) {
+            throw std::runtime_error("detector checkpoint record has no producing instruction");
+        }
+        for (const auto& records : detectors_by_record[static_cast<std::size_t>(max_record)]) {
+            for (int record : records) {
+                last_use[static_cast<std::size_t>(record)] =
+                    std::max(last_use[static_cast<std::size_t>(record)], use_index);
+            }
+        }
+    }
+    for (const auto& records : logical_records) {
+        for (int record : records) {
+            if (record <= 0 || record > nrecords) {
+                throw std::runtime_error("observable references an out-of-range measurement record");
+            }
+            last_use[static_cast<std::size_t>(record)] =
+                std::max(last_use[static_cast<std::size_t>(record)], final_instruction_index);
+        }
+    }
+    return last_use;
+}
+
 bool packed_batch_bit(const std::vector<std::uint64_t>& words, int shot) {
     return (words[static_cast<std::size_t>(shot >> 6)] & (std::uint64_t{1} << (shot & 63))) != 0;
 }
@@ -507,21 +553,30 @@ void append_compressed_bits(
     dest_bit += nbits;
 }
 
-void compact_packed_columns(
+void compact_live_measurement_columns(
     std::vector<std::uint64_t>& columns,
-    int column_count,
+    const std::vector<int>& record_last_use,
+    int instruction_index,
+    bool include_current_use,
     std::size_t stride_words,
     int old_shots,
     int survivor_count,
     const std::vector<std::uint64_t>& keep_bits,
     std::vector<std::uint64_t>& scratch) {
-    if (column_count <= 0 || stride_words == 0) {
+    if (stride_words == 0 || old_shots == 0 || record_last_use.size() <= 1) {
         return;
     }
+    const auto record_is_live = [&](int record) {
+        const int last_use = record_last_use[static_cast<std::size_t>(record)];
+        return include_current_use ? last_use >= instruction_index : last_use > instruction_index;
+    };
     if (old_shots <= 64) {
         const std::uint64_t keep_mask = keep_bits.empty() ? 0 : keep_bits[0] & live_word_mask(old_shots, 0);
-        for (int column = 0; column < column_count; ++column) {
-            const std::size_t base = static_cast<std::size_t>(column) * stride_words;
+        for (int record = 1; record < static_cast<int>(record_last_use.size()); ++record) {
+            if (!record_is_live(record)) {
+                continue;
+            }
+            const std::size_t base = static_cast<std::size_t>(record - 1) * stride_words;
             columns[base] = compress_bits(columns[base], keep_mask);
             for (std::size_t word = 1; word < stride_words; ++word) {
                 columns[base + word] = 0;
@@ -533,9 +588,12 @@ void compact_packed_columns(
         scratch.resize(stride_words, 0);
     }
     const std::size_t nwords = batch_word_count(old_shots);
-    for (int column = 0; column < column_count; ++column) {
+    for (int record = 1; record < static_cast<int>(record_last_use.size()); ++record) {
+        if (!record_is_live(record)) {
+            continue;
+        }
         std::fill(scratch.begin(), scratch.begin() + static_cast<std::ptrdiff_t>(stride_words), 0);
-        const std::size_t base = static_cast<std::size_t>(column) * stride_words;
+        const std::size_t base = static_cast<std::size_t>(record - 1) * stride_words;
         int dest_bit = 0;
         for (std::size_t word = 0; word < nwords; ++word) {
             const std::uint64_t keep_mask = keep_bits[word] & live_word_mask(old_shots, word);
@@ -550,7 +608,7 @@ void compact_packed_columns(
                 kept);
         }
         if (dest_bit != survivor_count) {
-            throw std::runtime_error("internal survivor compaction count mismatch");
+            throw std::runtime_error("internal measurement compaction count mismatch");
         }
         std::copy_n(scratch.data(), stride_words, columns.data() + base);
     }
@@ -670,7 +728,9 @@ void compact_surviving_shots(
     symft::BatchFactoredExecutorState& runtime,
     const std::vector<std::uint64_t>& keep_bits,
     const std::vector<int>& condition_last_use,
+    const std::vector<int>& record_last_use,
     int instruction_index,
+    bool include_current_record_use,
     std::vector<std::uint64_t>& scratch) {
     const int old_shots = runtime.active_shots;
     const int survivor_count = count_live_bits(keep_bits, old_shots);
@@ -687,9 +747,11 @@ void compact_surviving_shots(
         survivor_count,
         keep_bits,
         scratch);
-    compact_packed_columns(
+    compact_live_measurement_columns(
         runtime.measurement_words,
-        runtime.nrecords,
+        record_last_use,
+        instruction_index,
+        include_current_record_use,
         runtime.batch_words,
         old_shots,
         survivor_count,
@@ -703,7 +765,9 @@ void compact_dead_shots_if_needed(
     std::vector<std::uint64_t>& dead_bits,
     std::vector<std::uint64_t>& keep_bits,
     const std::vector<int>& condition_last_use,
+    const std::vector<int>& record_last_use,
     int instruction_index,
+    bool include_current_record_use,
     std::vector<std::uint64_t>& compact_scratch,
     bool force) {
     if (runtime.active_shots == 0) {
@@ -721,7 +785,14 @@ void compact_dead_shots_if_needed(
         keep_bits[word] = (~dead_bits[word]) & live_word_mask(runtime.active_shots, word);
     }
     std::fill(keep_bits.begin() + static_cast<std::ptrdiff_t>(nwords), keep_bits.end(), 0);
-    compact_surviving_shots(runtime, keep_bits, condition_last_use, instruction_index, compact_scratch);
+    compact_surviving_shots(
+        runtime,
+        keep_bits,
+        condition_last_use,
+        record_last_use,
+        instruction_index,
+        include_current_record_use,
+        compact_scratch);
     std::fill(dead_bits.begin(), dead_bits.end(), 0);
 }
 
@@ -733,6 +804,7 @@ void apply_postselection_checks_for_record(
     std::vector<std::uint64_t>& dead_bits,
     std::vector<std::uint64_t>& keep_bits,
     const std::vector<int>& condition_last_use,
+    const std::vector<int>& record_last_use,
     int instruction_index,
     std::vector<std::uint64_t>& scratch,
     std::vector<std::uint64_t>& compact_scratch) {
@@ -763,7 +835,9 @@ void apply_postselection_checks_for_record(
         dead_bits,
         keep_bits,
         condition_last_use,
+        record_last_use,
         instruction_index,
+        false,
         compact_scratch,
         false);
 }
@@ -799,6 +873,7 @@ void execute_postselected_block(
     const symft::PresampledExogenous& samples,
     const std::vector<int>& instruction_records_by_index,
     const std::vector<int>& condition_last_use,
+    const std::vector<int>& record_last_use,
     const std::vector<std::vector<std::vector<int>>>& detectors_by_record,
     const std::vector<std::vector<int>>& logical_records,
     std::vector<std::uint64_t>& detector_bits,
@@ -826,6 +901,7 @@ void execute_postselected_block(
             dead_bits,
             keep_bits,
             condition_last_use,
+            record_last_use,
             static_cast<int>(idx),
             scratch,
             compact_scratch);
@@ -835,7 +911,9 @@ void execute_postselected_block(
         dead_bits,
         keep_bits,
         condition_last_use,
+        record_last_use,
         static_cast<int>(program.instructions.size()),
+        true,
         compact_scratch,
         true);
     accumulate_logical_counts_for_survivors(counts, runtime, logical_records, keep_bits, scratch);
@@ -1061,6 +1139,14 @@ BenchResult run_batch_sampler(const Options& options) {
         const auto postselection_detectors_by_record = detectors_by_max_record(parsed.detectors, program.nrecords);
         const auto instruction_records_by_index = instruction_records(program);
         const auto condition_last_use_by_index = condition_last_uses(program);
+        const auto record_producers_by_index =
+            record_producer_instructions(instruction_records_by_index, program.nrecords);
+        const auto record_last_use_by_index = measurement_record_last_uses(
+            program.nrecords,
+            record_producers_by_index,
+            postselection_detectors_by_record,
+            logical_records,
+            static_cast<int>(program.instructions.size()));
 
         const std::uint64_t nblocks =
             (options.shots + static_cast<std::uint64_t>(result.block_shots) - 1) /
@@ -1108,6 +1194,7 @@ BenchResult run_batch_sampler(const Options& options) {
                         samples,
                         instruction_records_by_index,
                         condition_last_use_by_index,
+                        record_last_use_by_index,
                         postselection_detectors_by_record,
                         logical_records,
                         discard_bits,
