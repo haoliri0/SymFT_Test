@@ -409,10 +409,46 @@ void test_batch_postselection() {
             samples,
             single_detector_plan(program, 1),
             hybrid_scratch,
-            BatchDetectorPostselectionOptions{false, 8});
+            BatchDetectorPostselectionOptions{false, false, 8});
         require(default_result.discarded == hybrid_result.discarded, "hybrid postselection discarded count");
         require(default_result.accepted == hybrid_result.accepted, "hybrid postselection accepted count");
         require(default_runtime.measurement_words == hybrid_runtime.measurement_words, "hybrid postselection records");
+    }
+    {
+        const auto parsed = parse_stim_text(
+            "X_ERROR(0.125) 0\n"
+            "M 0\n"
+            "DETECTOR rec[-1]\n"
+            "H 1\n"
+            "T 1\n"
+            "T_DAG 1\n"
+            "H 1\n"
+            "M 1\n");
+        PendingFactoredState pending(parsed.state);
+        const auto program = plan_factored_updates(pending);
+        const auto samples = presample_exogenous(program, 64, 41);
+        BatchDetectorPostselectionScratch default_scratch;
+        BatchFactoredExecutorState default_runtime(program, 64, 43);
+        const auto default_result = execute_batch_postselected_in_place(
+            default_runtime,
+            program,
+            samples,
+            single_detector_plan(program, 1),
+            default_scratch);
+        BatchDetectorPostselectionScratch masked_scratch;
+        BatchFactoredExecutorState masked_runtime(program, 64, 43);
+        const auto masked_result = execute_batch_postselected_in_place(
+            masked_runtime,
+            program,
+            samples,
+            single_detector_plan(program, 1),
+            masked_scratch,
+            BatchDetectorPostselectionOptions{false, true, 0});
+        require(masked_result.discarded > 0, "masked postselection test kills at least one lane");
+        require(masked_result.discarded * 4 < 64, "masked postselection test stays dirty before final compaction");
+        require(default_result.discarded == masked_result.discarded, "masked postselection discarded count");
+        require(default_result.accepted == masked_result.accepted, "masked postselection accepted count");
+        require(default_runtime.measurement_words == masked_runtime.measurement_words, "masked postselection records");
     }
 }
 

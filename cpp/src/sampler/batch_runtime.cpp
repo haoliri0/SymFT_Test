@@ -63,6 +63,136 @@ void execute_batch_instruction(BatchFactoredExecutorState& runtime, const Factor
     std::visit([&](const auto& inst) { execute_batch_instruction(runtime, inst); }, instruction);
 }
 
+void fill_keep_bits_from_dead(
+    const BatchFactoredExecutorState& runtime,
+    const std::vector<std::uint64_t>& dead_bits,
+    std::vector<std::uint64_t>& keep_bits) {
+    const std::size_t nwords = runtime_batch_word_count(runtime);
+    if (keep_bits.size() < runtime.batch_words) {
+        keep_bits.resize(runtime.batch_words, 0);
+    }
+    for (std::size_t word = 0; word < nwords; ++word) {
+        keep_bits[word] = (~dead_bits[word]) & batch_live_word_mask(runtime, word);
+    }
+    std::fill(keep_bits.begin() + static_cast<std::ptrdiff_t>(nwords), keep_bits.end(), 0);
+}
+
+void mask_out_dead_bits(
+    std::vector<std::uint64_t>& bits,
+    const BatchFactoredExecutorState& runtime,
+    const std::vector<std::uint64_t>& live_bits) {
+    const std::size_t nwords = runtime_batch_word_count(runtime);
+    for (std::size_t word = 0; word < nwords; ++word) {
+        bits[word] &= live_bits[word] & batch_live_word_mask(runtime, word);
+    }
+    std::fill(bits.begin() + static_cast<std::ptrdiff_t>(nwords), bits.end(), 0);
+}
+
+void invert_batch_bits_masked(
+    std::vector<std::uint64_t>& bits,
+    const BatchFactoredExecutorState& runtime,
+    const std::vector<std::uint64_t>& live_bits) {
+    const std::size_t nwords = runtime_batch_word_count(runtime);
+    for (std::size_t word = 0; word < nwords; ++word) {
+        const std::uint64_t live = live_bits[word] & batch_live_word_mask(runtime, word);
+        bits[word] = (~bits[word]) & live;
+    }
+    std::fill(bits.begin() + static_cast<std::ptrdiff_t>(nwords), bits.end(), 0);
+}
+
+void execute_batch_instruction_masked(
+    BatchFactoredExecutorState& runtime,
+    const ApplyPrecomputedActivePauliRotation& instruction,
+    const std::vector<std::uint64_t>& live_bits) {
+    eval_symbolic_bool_batch(runtime.eval_scratch, instruction.sign_plan, runtime);
+    rotate_pauli_batch_masked(runtime, instruction.rotation_kernel, runtime.eval_scratch, live_bits);
+}
+
+void execute_batch_instruction_masked(
+    BatchFactoredExecutorState& runtime,
+    const PromoteDormantRotation& instruction,
+    const std::vector<std::uint64_t>& live_bits) {
+    eval_symbolic_bool_batch(runtime.eval_scratch, instruction.sign_plan, runtime);
+    promote_first_dormant_rotation_batch_masked(runtime, instruction.theta, runtime.eval_scratch, live_bits);
+}
+
+void execute_batch_instruction_masked(
+    BatchFactoredExecutorState& runtime,
+    const RecordMeasurement& instruction,
+    const std::vector<std::uint64_t>& live_bits) {
+    eval_symbolic_bool_batch(runtime.eval_scratch, instruction.outcome_plan, runtime);
+    write_batch_measurement_record_masked(
+        runtime,
+        instruction.record,
+        runtime.eval_scratch,
+        instruction.record_condition,
+        live_bits);
+}
+
+void execute_batch_instruction_masked(
+    BatchFactoredExecutorState& runtime,
+    const MeasureActiveLastZ& instruction,
+    const std::vector<std::uint64_t>& live_bits) {
+    measure_active_last_z_batch_masked(
+        runtime,
+        instruction.branch,
+        instruction.outcome_plan,
+        instruction.record,
+        instruction.record_condition,
+        live_bits);
+}
+
+void execute_batch_instruction_masked(
+    BatchFactoredExecutorState& runtime,
+    const MeasurePrecomputedActivePauli& instruction,
+    const std::vector<std::uint64_t>& live_bits) {
+    measure_precomputed_active_pauli_batch_masked(
+        runtime,
+        instruction.kernel,
+        instruction.branch,
+        instruction.outcome_plan,
+        instruction.record,
+        instruction.record_condition,
+        live_bits);
+}
+
+void execute_batch_instruction_masked(
+    BatchFactoredExecutorState& runtime,
+    const IntroduceDormantMeasurementBranch& instruction,
+    const std::vector<std::uint64_t>& live_bits) {
+    fill_batch_random_half_bits(runtime.eval_scratch, runtime);
+    mask_out_dead_bits(runtime.eval_scratch, runtime, live_bits);
+    const auto& branch_bits = runtime.eval_scratch;
+    assign_batch_symbol_masked(runtime, instruction.branch, branch_bits, live_bits);
+    if (instruction.outcome_plan.conditions.size() == 1 &&
+        instruction.outcome_plan.conditions.front() == instruction.branch) {
+        if (instruction.outcome_plan.constant) {
+            invert_batch_bits_masked(runtime.eval_scratch, runtime, live_bits);
+        }
+        write_batch_measurement_record_masked(
+            runtime,
+            instruction.record,
+            runtime.eval_scratch,
+            instruction.record_condition,
+            live_bits);
+        return;
+    }
+    eval_symbolic_bool_batch(runtime.eval_scratch, instruction.outcome_plan, runtime);
+    write_batch_measurement_record_masked(
+        runtime,
+        instruction.record,
+        runtime.eval_scratch,
+        instruction.record_condition,
+        live_bits);
+}
+
+void execute_batch_instruction_masked(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstruction& instruction,
+    const std::vector<std::uint64_t>& live_bits) {
+    std::visit([&](const auto& inst) { execute_batch_instruction_masked(runtime, inst, live_bits); }, instruction);
+}
+
 namespace {
 
 std::uint64_t live_word_mask_for_shots(int shots, std::size_t word) {
@@ -802,7 +932,12 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
         if (runtime.active_shots == 0) {
             break;
         }
-        execute_batch_instruction(runtime, program.instructions[idx]);
+        if (options.mask_dead_shots && count_live_bits(scratch.dead_bits, runtime.active_shots) > 0) {
+            fill_keep_bits_from_dead(runtime, scratch.dead_bits, scratch.keep_bits);
+            execute_batch_instruction_masked(runtime, program.instructions[idx], scratch.keep_bits);
+        } else {
+            execute_batch_instruction(runtime, program.instructions[idx]);
+        }
         const int record = postselection.instruction_records_by_index[idx];
         if (record <= 0) {
             continue;
@@ -887,7 +1022,12 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
         if (runtime.active_shots == 0) {
             break;
         }
-        execute_batch_instruction(runtime, program.instructions[idx]);
+        if (options.mask_dead_shots && count_live_bits(scratch.dead_bits, runtime.active_shots) > 0) {
+            fill_keep_bits_from_dead(runtime, scratch.dead_bits, scratch.keep_bits);
+            execute_batch_instruction_masked(runtime, program.instructions[idx], scratch.keep_bits);
+        } else {
+            execute_batch_instruction(runtime, program.instructions[idx]);
+        }
         const int record = postselection.instruction_records_by_index[idx];
         if (record <= 0) {
             continue;

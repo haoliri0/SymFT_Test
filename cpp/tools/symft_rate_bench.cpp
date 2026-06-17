@@ -164,12 +164,36 @@ SamplerMode parse_sampler_mode(const char* raw) {
 std::string parse_batch_postselection_mode(const char* raw) {
     const std::string value(raw);
     if (value == "lazy" || value == "current" ||
+        value == "masked" || value == "mask" ||
         value == "aggressive" ||
+        value == "masked-aggressive" || value == "aggressive-masked" ||
         value == "hybrid" ||
+        value == "masked-hybrid" || value == "hybrid-masked" ||
         value == "hybrid-aggressive" || value == "aggressive-hybrid") {
+        if (value == "mask") {
+            return "masked";
+        }
+        if (value == "aggressive-masked") {
+            return "masked-aggressive";
+        }
+        if (value == "hybrid-masked") {
+            return "masked-hybrid";
+        }
         return value == "aggressive-hybrid" ? "hybrid-aggressive" : value;
     }
     throw std::runtime_error(std::string("invalid batch postselection mode: ") + raw);
+}
+
+bool batch_postselection_mode_is_masked(const std::string& mode) {
+    return mode == "masked" || mode == "masked-aggressive" || mode == "masked-hybrid";
+}
+
+bool batch_postselection_mode_is_aggressive(const std::string& mode) {
+    return mode == "aggressive" || mode == "hybrid-aggressive" || mode == "masked-aggressive";
+}
+
+bool batch_postselection_mode_is_hybrid(const std::string& mode) {
+    return mode == "hybrid" || mode == "hybrid-aggressive" || mode == "masked-hybrid";
 }
 
 struct Options {
@@ -203,7 +227,7 @@ void print_usage(const char* argv0) {
         << "  --threads N|auto                  Parallel worker threads over independent batches\n"
         << "  --postselect-detectors            Stop discarded single shots or compact discarded batch shots after fired detectors\n"
         << "  --no-postselect-detectors         Disable detector postselection abort\n"
-        << "  --batch-postselection-mode lazy|aggressive|hybrid|hybrid-aggressive\n"
+        << "  --batch-postselection-mode lazy|masked|aggressive|hybrid|hybrid-aggressive\n"
         << "  --batch-fallback-threshold N      Live-shot threshold for hybrid batch postselection; default: 16\n";
 }
 
@@ -314,12 +338,11 @@ Options parse_options(int argc, char** argv) {
 
 symft::BatchDetectorPostselectionOptions batch_postselection_options(const Options& options) {
     symft::BatchDetectorPostselectionOptions out;
-    if (options.batch_postselection_mode == "aggressive" ||
-        options.batch_postselection_mode == "hybrid-aggressive") {
+    out.mask_dead_shots = batch_postselection_mode_is_masked(options.batch_postselection_mode);
+    if (batch_postselection_mode_is_aggressive(options.batch_postselection_mode)) {
         out.compact_after_detector = true;
     }
-    if (options.batch_postselection_mode == "hybrid" ||
-        options.batch_postselection_mode == "hybrid-aggressive") {
+    if (batch_postselection_mode_is_hybrid(options.batch_postselection_mode)) {
         out.single_shot_fallback_threshold = options.batch_postselection_fallback_threshold;
     }
     return out;
@@ -842,7 +865,7 @@ BenchResult run_batch_sampler(const Options& options) {
     result.detector_postselection = options.postselect_detectors;
     result.batch_postselection_mode = options.batch_postselection_mode;
     result.batch_postselection_fallback_threshold =
-        options.batch_postselection_mode == "hybrid" || options.batch_postselection_mode == "hybrid-aggressive"
+        batch_postselection_mode_is_hybrid(options.batch_postselection_mode)
             ? options.batch_postselection_fallback_threshold
             : 0;
     result.exogenous_mode = "packed_presampled_streaming";
