@@ -483,6 +483,27 @@ std::vector<std::vector<std::vector<int>>> detectors_by_max_record(
     return out;
 }
 
+std::vector<std::vector<std::vector<std::uint64_t>>> detector_masks_by_record(
+    const std::vector<std::vector<std::vector<int>>>& detectors_by_record,
+    int nrecords) {
+    const std::size_t record_words = batch_word_count(nrecords);
+    std::vector<std::vector<std::vector<std::uint64_t>>> out(detectors_by_record.size());
+    for (std::size_t checkpoint = 0; checkpoint < detectors_by_record.size(); ++checkpoint) {
+        out[checkpoint].reserve(detectors_by_record[checkpoint].size());
+        for (const auto& records : detectors_by_record[checkpoint]) {
+            auto& mask = out[checkpoint].emplace_back(record_words, 0);
+            for (int record : records) {
+                if (record <= 0 || record > nrecords) {
+                    throw std::runtime_error("detector references an out-of-range measurement record");
+                }
+                const int bit = record - 1;
+                mask[static_cast<std::size_t>(bit >> 6)] |= std::uint64_t{1} << (bit & 63);
+            }
+        }
+    }
+    return out;
+}
+
 std::vector<int> record_producer_instructions(const std::vector<int>& records_by_instruction, int nrecords) {
     std::vector<int> out(static_cast<std::size_t>(nrecords + 1), -1);
     for (std::size_t idx = 0; idx < records_by_instruction.size(); ++idx) {
@@ -1020,6 +1041,7 @@ struct RateBenchSetup {
     std::vector<int> instruction_records_by_index;
     std::vector<int> condition_last_use_by_index;
     std::vector<int> record_last_use_by_index;
+    symft::DetectorPostselectionPlan single_postselection_plan;
     int block_shots = 0;
     int sample_chunk_shots = 0;
 };
@@ -1046,6 +1068,11 @@ RateBenchSetup build_rate_bench_setup(
     setup.logical_records = logical_records_for_observable(parsed.observables, options.observable);
     setup.postselection_detectors_by_record = detectors_by_max_record(parsed.detectors, program.nrecords);
     setup.instruction_records_by_index = instruction_records(program);
+    setup.single_postselection_plan.instruction_records_by_index = setup.instruction_records_by_index;
+    setup.single_postselection_plan.detectors_by_record = setup.postselection_detectors_by_record;
+    setup.single_postselection_plan.detector_masks_by_record =
+        detector_masks_by_record(setup.postselection_detectors_by_record, program.nrecords);
+    setup.single_postselection_plan.record_words = batch_word_count(program.nrecords);
     setup.condition_last_use_by_index = condition_last_uses(program);
     const auto record_producers_by_index =
         record_producer_instructions(setup.instruction_records_by_index, program.nrecords);
@@ -1085,10 +1112,6 @@ BenchResult run_single_sampler(const Options& options) {
     result.observable_includes = static_cast<int>(setup.parsed.observables.size());
     result.block_shots = setup.block_shots;
     result.sample_chunk_shots = setup.sample_chunk_shots;
-    const symft::DetectorPostselectionPlan postselection_plan{
-        setup.instruction_records_by_index,
-        setup.postselection_detectors_by_record,
-    };
 
     double presample_total = 0.0;
     double execute_total = 0.0;
@@ -1129,7 +1152,7 @@ BenchResult run_single_sampler(const Options& options) {
                         setup.program,
                         samples,
                         shot,
-                        postselection_plan);
+                        setup.single_postselection_plan);
                     const auto execute_stop = Clock::now();
                     if (!survived) {
                         ++counts.discarded;

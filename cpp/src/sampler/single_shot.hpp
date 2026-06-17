@@ -12,6 +12,8 @@ struct PresampledExogenous;
 struct DetectorPostselectionPlan {
     std::vector<int> instruction_records_by_index;
     std::vector<std::vector<std::vector<int>>> detectors_by_record;
+    std::vector<std::vector<std::vector<std::uint64_t>>> detector_masks_by_record;
+    std::size_t record_words = 0;
 };
 
 struct FactoredExecutorState {

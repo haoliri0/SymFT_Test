@@ -712,6 +712,27 @@ bool any_postselected_detector_fires(
     return false;
 }
 
+bool detector_mask_fires(
+    const std::vector<std::uint64_t>& measurement_words,
+    const std::vector<std::uint64_t>& mask) {
+    std::uint64_t parity_bits = 0;
+    for (std::size_t word = 0; word < mask.size(); ++word) {
+        parity_bits ^= measurement_words[word] & mask[word];
+    }
+    return is_odd_popcount(parity_bits);
+}
+
+bool any_postselected_detector_mask_fires(
+    const std::vector<std::uint64_t>& measurement_words,
+    const std::vector<std::vector<std::uint64_t>>& detector_masks) {
+    for (const auto& mask : detector_masks) {
+        if (detector_mask_fires(measurement_words, mask)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 FactoredExecutorState::FactoredExecutorState(const FactoredInstructionProgram& program, std::uint64_t seed)
@@ -818,6 +839,18 @@ bool execute_postselected_in_place(
         std::visit([&](const auto& inst) { execute_instruction(runtime, inst); }, program.instructions[idx]);
         const int record = postselection.instruction_records_by_index[idx];
         if (record <= 0 || record >= static_cast<int>(postselection.detectors_by_record.size())) {
+            continue;
+        }
+        if (static_cast<std::size_t>(record) < postselection.detector_masks_by_record.size() &&
+            !postselection.detector_masks_by_record[static_cast<std::size_t>(record)].empty()) {
+            if (postselection.record_words > runtime.measurement_words.size()) {
+                fail("postselection detector mask width exceeds measurement record storage");
+            }
+            if (any_postselected_detector_mask_fires(
+                    runtime.measurement_words,
+                    postselection.detector_masks_by_record[static_cast<std::size_t>(record)])) {
+                return false;
+            }
             continue;
         }
         if (any_postselected_detector_fires(
