@@ -130,10 +130,6 @@ bool eval_symbolic_bool_unchecked(const SymbolicBoolEvaluationPlan& plan, const 
     return eval_symbolic_bool_packed_unchecked(plan, runtime);
 }
 
-std::size_t shot_word_count(int shots) {
-    return shots <= 0 ? 0 : static_cast<std::size_t>((shots + 63) >> 6);
-}
-
 std::uint64_t low_bits_mask(int nbits) {
     if (nbits <= 0) {
         return 0;
@@ -146,16 +142,6 @@ std::uint64_t low_bits_mask(int nbits) {
 
 std::uint64_t live_shot_word_mask(int shots, std::size_t word) {
     return low_bits_mask(shots - static_cast<int>(word << 6));
-}
-
-void append_exogenous_mask(SingleShotPresampledExpression& out, std::size_t word, std::uint64_t mask) {
-    if (!out.exogenous_word_indices.empty() &&
-        out.exogenous_word_indices.back() == static_cast<int>(word)) {
-        out.exogenous_word_masks.back() |= mask;
-        return;
-    }
-    out.exogenous_word_indices.push_back(static_cast<int>(word));
-    out.exogenous_word_masks.push_back(mask);
 }
 
 SingleShotPresampledExpression split_presampled_expression(
@@ -172,7 +158,7 @@ SingleShotPresampledExpression split_presampled_expression(
             word < exogenous_assigned_words.size() &&
             (exogenous_assigned_words[word] & mask) != 0;
         if (exogenous) {
-            append_exogenous_mask(out, word, mask);
+            out.exogenous_conditions.push_back(condition);
         } else {
             residual_conditions.push_back(condition);
         }
@@ -236,8 +222,7 @@ bool same_exogenous_partial(
     const SingleShotPresampledExpression& lhs,
     const SingleShotPresampledExpression& rhs) {
     return lhs.constant == rhs.constant &&
-           lhs.exogenous_word_indices == rhs.exogenous_word_indices &&
-           lhs.exogenous_word_masks == rhs.exogenous_word_masks;
+           lhs.exogenous_conditions == rhs.exogenous_conditions;
 }
 
 int intern_exogenous_partial(
@@ -250,35 +235,14 @@ int intern_exogenous_partial(
     }
     SingleShotPresampledExpression block_expression;
     block_expression.constant = expression.constant;
-    block_expression.exogenous_word_indices = expression.exogenous_word_indices;
-    block_expression.exogenous_word_masks = expression.exogenous_word_masks;
+    block_expression.exogenous_conditions = expression.exogenous_conditions;
     block_expressions.push_back(std::move(block_expression));
     return static_cast<int>(block_expressions.size() - 1);
 }
 
-bool expression_sample_value(
-    const SingleShotPresampledExpression& expression,
-    const PresampledExogenous& samples,
-    int shot_index) {
-    if (shot_index < 0 || shot_index >= samples.nshots) {
-        fail("single-shot presampled expression shot index is out of range");
-    }
-    const std::size_t base = static_cast<std::size_t>(shot_index) * samples.nwords;
-    std::uint64_t parity_bits = 0;
-    for (std::size_t idx = 0; idx < expression.exogenous_word_indices.size(); ++idx) {
-        const std::size_t word = static_cast<std::size_t>(expression.exogenous_word_indices[idx]);
-        if (word >= samples.nwords) {
-            fail("single-shot presampled expression references an out-of-range exogenous word");
-        }
-        parity_bits ^= samples.value_words[base + word] & expression.exogenous_word_masks[idx];
-    }
-    return expression.constant != is_odd_popcount(parity_bits);
-}
-
 struct SingleShotExpressionEvaluator {
     const SingleShotPresampledExpressionPlan& expression_plan;
-    const PresampledExogenous* samples = nullptr;
-    const SingleShotPresampledExpressionBlock* expression_block = nullptr;
+    const SingleShotPresampledExpressionBlock& expression_block;
     int shot_index = 0;
 
     bool eval(std::size_t instruction_index, const FactoredExecutorState& runtime) const {
@@ -286,23 +250,14 @@ struct SingleShotExpressionEvaluator {
             fail("single-shot presampled expression plan does not match program");
         }
         const auto& expression = expression_plan.instruction_expressions[instruction_index];
-        bool out = false;
-        if (expression_block != nullptr) {
-            if (shot_index < 0 || shot_index >= expression_block->nshots) {
-                fail("single-shot presampled expression shot index is out of range");
-            }
-            if (expression.block_expression_index < 0 ||
-                expression.block_expression_index >= static_cast<int>(expression_plan.block_expressions.size())) {
-                fail("single-shot presampled expression references an out-of-range block expression");
-            }
-            out = expression_block_bit(*expression_block, expression.block_expression_index, shot_index);
-        } else {
-            if (samples == nullptr ||
-                samples->value_words.size() != static_cast<std::size_t>(samples->nshots) * samples->nwords) {
-                fail("single-shot presampled expression samples are not initialized");
-            }
-            out = expression_sample_value(expression, *samples, shot_index);
+        if (shot_index < 0 || shot_index >= expression_block.nshots) {
+            fail("single-shot presampled expression shot index is out of range");
         }
+        if (expression.block_expression_index < 0 ||
+            expression.block_expression_index >= static_cast<int>(expression_plan.block_expressions.size())) {
+            fail("single-shot presampled expression references an out-of-range block expression");
+        }
+        bool out = expression_block_bit(expression_block, expression.block_expression_index, shot_index);
         if (!expression.residual_plan.conditions.empty()) {
             out = out != eval_symbolic_bool_unchecked(expression.residual_plan, runtime);
         }
@@ -1095,12 +1050,7 @@ void execute_in_place(
 void prepare_single_shot_presampled_expression_plan(
     SingleShotPresampledExpressionPlan& out,
     const FactoredInstructionProgram& program,
-    const PresampledExogenous& samples) {
-    if (samples.nsymbols != program.nsymbols ||
-        samples.nwords != symbol_word_count(program.nsymbols) ||
-        samples.exogenous_assigned_words.size() != samples.nwords) {
-        fail("presampled exogenous storage was not prepared for this program");
-    }
+    const std::vector<std::uint64_t>& exogenous_assigned_words) {
     out.instruction_expressions.clear();
     out.block_expressions.clear();
     out.instruction_expressions.reserve(program.instructions.size());
@@ -1110,7 +1060,7 @@ void prepare_single_shot_presampled_expression_plan(
         if (source == nullptr) {
             expression = SingleShotPresampledExpression();
         } else {
-            expression = split_presampled_expression(*source, samples.exogenous_assigned_words);
+            expression = split_presampled_expression(*source, exogenous_assigned_words);
         }
         expression.block_expression_index =
             intern_exogenous_partial(out.block_expressions, expression);
@@ -1118,15 +1068,26 @@ void prepare_single_shot_presampled_expression_plan(
     }
 }
 
+void prepare_single_shot_presampled_expression_plan(
+    SingleShotPresampledExpressionPlan& out,
+    const FactoredInstructionProgram& program,
+    const PackedPresampledExogenous& samples) {
+    if (samples.nsymbols != program.nsymbols ||
+        samples.exogenous_assigned_words.size() != symbol_word_count(program.nsymbols)) {
+        fail("packed presampled exogenous storage was not prepared for this program");
+    }
+    prepare_single_shot_presampled_expression_plan(out, program, samples.exogenous_assigned_words);
+}
+
 void evaluate_single_shot_presampled_expression_block(
     SingleShotPresampledExpressionBlock& out,
     const SingleShotPresampledExpressionPlan& plan,
-    const PresampledExogenous& samples) {
-    if (samples.value_words.size() != static_cast<std::size_t>(samples.nshots) * samples.nwords) {
-        fail("presampled exogenous values are not initialized");
+    const PackedPresampledExogenous& samples) {
+    if (samples.value_words.size() != static_cast<std::size_t>(samples.nsymbols) * samples.shot_words) {
+        fail("packed presampled exogenous values are not initialized");
     }
     out.nshots = samples.nshots;
-    out.shot_words = shot_word_count(samples.nshots);
+    out.shot_words = samples.shot_words;
     const std::size_t nexpressions = plan.block_expressions.size();
     const std::size_t total_words = nexpressions * out.shot_words;
     if (out.expression_words.size() != total_words) {
@@ -1134,57 +1095,20 @@ void evaluate_single_shot_presampled_expression_block(
     }
     for (std::size_t expression_index = 0; expression_index < nexpressions; ++expression_index) {
         const auto& expression = plan.block_expressions[expression_index];
-        if (expression.exogenous_word_indices.empty()) {
-            for (std::size_t shot_word = 0; shot_word < out.shot_words; ++shot_word) {
-                out.expression_words[expression_block_offset(out, expression_index, shot_word)] =
-                    expression.constant ? live_shot_word_mask(samples.nshots, shot_word) : 0;
-            }
-            continue;
-        }
         for (std::size_t shot_word = 0; shot_word < out.shot_words; ++shot_word) {
-            std::uint64_t packed = 0;
-            const int first_shot = static_cast<int>(shot_word << 6);
-            const int limit = std::min(samples.nshots, first_shot + 64);
-            for (int shot = first_shot; shot < limit; ++shot) {
-                const std::size_t base = static_cast<std::size_t>(shot) * samples.nwords;
-                std::uint64_t parity_bits = 0;
-                for (std::size_t idx = 0; idx < expression.exogenous_word_indices.size(); ++idx) {
-                    const std::size_t word = static_cast<std::size_t>(expression.exogenous_word_indices[idx]);
-                    if (word >= samples.nwords) {
-                        fail("single-shot presampled expression references an out-of-range exogenous word");
-                    }
-                    parity_bits ^= samples.value_words[base + word] & expression.exogenous_word_masks[idx];
+            std::uint64_t value =
+                expression.constant ? live_shot_word_mask(samples.nshots, shot_word) : 0;
+            for (int condition : expression.exogenous_conditions) {
+                if (condition <= 0 || condition > samples.nsymbols) {
+                    fail("single-shot presampled expression references an out-of-range exogenous condition");
                 }
-                const bool value = expression.constant != is_odd_popcount(parity_bits);
-                if (value) {
-                    packed |= std::uint64_t{1} << (shot - first_shot);
-                }
+                const std::size_t base =
+                    static_cast<std::size_t>(condition - 1) * samples.shot_words;
+                value ^= samples.value_words[base + shot_word];
             }
             out.expression_words[expression_block_offset(out, expression_index, shot_word)] =
-                packed & live_shot_word_mask(samples.nshots, shot_word);
+                value & live_shot_word_mask(samples.nshots, shot_word);
         }
-    }
-}
-
-void execute_in_place(
-    FactoredExecutorState& runtime,
-    const FactoredInstructionProgram& program,
-    const PresampledExogenous& samples,
-    const SingleShotPresampledExpressionPlan& expression_plan,
-    int shot_index) {
-    if (runtime.n != program.n || runtime.k + runtime.ndormant != runtime.n) {
-        fail("executor state does not match program");
-    }
-    if (expression_plan.instruction_expressions.size() != program.instructions.size()) {
-        fail("single-shot presampled expression plan does not match program");
-    }
-    SingleShotExpressionEvaluator evaluator{expression_plan, &samples, nullptr, shot_index};
-    for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
-        execute_instruction_presampled(
-            runtime,
-            program.instructions[idx],
-            evaluator,
-            idx);
     }
 }
 
@@ -1203,7 +1127,7 @@ void execute_in_place(
     if (shot_index < 0 || shot_index >= expression_block.nshots) {
         fail("single-shot presampled expression shot index is out of range");
     }
-    SingleShotExpressionEvaluator evaluator{expression_plan, nullptr, &expression_block, shot_index};
+    SingleShotExpressionEvaluator evaluator{expression_plan, expression_block, shot_index};
     for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
         execute_instruction_presampled(
             runtime,
@@ -1269,54 +1193,6 @@ bool execute_postselected_in_place(
 bool execute_postselected_in_place(
     FactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
-    const PresampledExogenous& samples,
-    const SingleShotPresampledExpressionPlan& expression_plan,
-    int shot_index,
-    const DetectorPostselectionPlan& postselection) {
-    if (runtime.n != program.n || runtime.k + runtime.ndormant != runtime.n) {
-        fail("executor state does not match program");
-    }
-    if (expression_plan.instruction_expressions.size() != program.instructions.size()) {
-        fail("single-shot presampled expression plan does not match program");
-    }
-    if (postselection.instruction_records_by_index.size() != program.instructions.size()) {
-        fail("postselection instruction record table does not match program");
-    }
-    SingleShotExpressionEvaluator evaluator{expression_plan, &samples, nullptr, shot_index};
-    for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
-        execute_instruction_presampled(
-            runtime,
-            program.instructions[idx],
-            evaluator,
-            idx);
-        const int record = postselection.instruction_records_by_index[idx];
-        if (record <= 0 || record >= static_cast<int>(postselection.detectors_by_record.size())) {
-            continue;
-        }
-        if (static_cast<std::size_t>(record) < postselection.detector_masks_by_record.size() &&
-            !postselection.detector_masks_by_record[static_cast<std::size_t>(record)].empty()) {
-            if (postselection.record_words > runtime.measurement_words.size()) {
-                fail("postselection detector mask width exceeds measurement record storage");
-            }
-            if (any_postselected_detector_mask_fires(
-                    runtime.measurement_words,
-                    postselection.detector_masks_by_record[static_cast<std::size_t>(record)])) {
-                return false;
-            }
-            continue;
-        }
-        if (any_postselected_detector_fires(
-                runtime.measurement_words,
-                postselection.detectors_by_record[static_cast<std::size_t>(record)])) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool execute_postselected_in_place(
-    FactoredExecutorState& runtime,
-    const FactoredInstructionProgram& program,
     const SingleShotPresampledExpressionPlan& expression_plan,
     const SingleShotPresampledExpressionBlock& expression_block,
     int shot_index,
@@ -1333,7 +1209,7 @@ bool execute_postselected_in_place(
     if (postselection.instruction_records_by_index.size() != program.instructions.size()) {
         fail("postselection instruction record table does not match program");
     }
-    SingleShotExpressionEvaluator evaluator{expression_plan, nullptr, &expression_block, shot_index};
+    SingleShotExpressionEvaluator evaluator{expression_plan, expression_block, shot_index};
     for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
         execute_instruction_presampled(
             runtime,

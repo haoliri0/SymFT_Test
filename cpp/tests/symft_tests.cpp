@@ -253,19 +253,20 @@ void test_presampled_exogenous() {
         require(packed_bit(runtime.measurement_words, 0), "presampled deterministic X error");
     }
 
-    SingleShotPresampledExpressionPlan expression_plan;
-    prepare_single_shot_presampled_expression_plan(expression_plan, program, samples);
-    for (int shot = 0; shot < samples.nshots; ++shot) {
+    const auto packed_samples = presample_exogenous_packed(program, 4, 17);
+    require(packed_samples.nshots == 4, "packed presampled shot count");
+    require(packed_samples.nsymbols == program.nsymbols, "packed presampled symbol count");
+    SingleShotPresampledExpressionPlan packed_expression_plan;
+    prepare_single_shot_presampled_expression_plan(packed_expression_plan, program, packed_samples);
+    SingleShotPresampledExpressionBlock packed_expression_block;
+    evaluate_single_shot_presampled_expression_block(
+        packed_expression_block,
+        packed_expression_plan,
+        packed_samples);
+    for (int shot = 0; shot < packed_samples.nshots; ++shot) {
         reset_executor(runtime, program);
-        execute_in_place(runtime, program, samples, expression_plan, shot);
-        require(packed_bit(runtime.measurement_words, 0), "direct presampled expression deterministic X error");
-    }
-    SingleShotPresampledExpressionBlock expression_block;
-    evaluate_single_shot_presampled_expression_block(expression_block, expression_plan, samples);
-    for (int shot = 0; shot < samples.nshots; ++shot) {
-        reset_executor(runtime, program);
-        execute_in_place(runtime, program, expression_plan, expression_block, shot);
-        require(packed_bit(runtime.measurement_words, 0), "presampled expression deterministic X error");
+        execute_in_place(runtime, program, packed_expression_plan, packed_expression_block, shot);
+        require(packed_bit(runtime.measurement_words, 0), "packed presampled expression deterministic X error");
     }
 }
 

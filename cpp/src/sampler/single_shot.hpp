@@ -8,6 +8,7 @@
 namespace symft {
 
 struct PresampledExogenous;
+struct PackedPresampledExogenous;
 
 struct DetectorPostselectionPlan {
     std::vector<int> instruction_records_by_index;
@@ -20,8 +21,7 @@ struct SingleShotPresampledExpression {
     bool constant = false;
     int block_expression_index = 0;
     SymbolicBoolEvaluationPlan residual_plan;
-    std::vector<int> exogenous_word_indices;
-    std::vector<std::uint64_t> exogenous_word_masks;
+    std::vector<int> exogenous_conditions;
 };
 
 struct SingleShotPresampledExpressionPlan {
@@ -63,17 +63,11 @@ void execute_in_place(
 void prepare_single_shot_presampled_expression_plan(
     SingleShotPresampledExpressionPlan& out,
     const FactoredInstructionProgram& program,
-    const PresampledExogenous& samples);
+    const PackedPresampledExogenous& samples);
 void evaluate_single_shot_presampled_expression_block(
     SingleShotPresampledExpressionBlock& out,
     const SingleShotPresampledExpressionPlan& plan,
-    const PresampledExogenous& samples);
-void execute_in_place(
-    FactoredExecutorState& runtime,
-    const FactoredInstructionProgram& program,
-    const PresampledExogenous& samples,
-    const SingleShotPresampledExpressionPlan& expression_plan,
-    int shot_index);
+    const PackedPresampledExogenous& samples);
 void execute_in_place(
     FactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
@@ -94,13 +88,6 @@ bool execute_postselected_in_place(
     FactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
     const PresampledExogenous& samples,
-    int shot_index,
-    const DetectorPostselectionPlan& postselection);
-bool execute_postselected_in_place(
-    FactoredExecutorState& runtime,
-    const FactoredInstructionProgram& program,
-    const PresampledExogenous& samples,
-    const SingleShotPresampledExpressionPlan& expression_plan,
     int shot_index,
     const DetectorPostselectionPlan& postselection);
 bool execute_postselected_in_place(

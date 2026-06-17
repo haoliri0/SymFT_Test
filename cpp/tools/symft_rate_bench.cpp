@@ -693,7 +693,7 @@ BenchResult run_single_sampler(const Options& options) {
     result.threads = 1;
     result.requested_threads = options.threads;
     result.detector_postselection = options.postselect_detectors;
-    result.exogenous_mode = "presampled_streaming";
+    result.exogenous_mode = "packed_presampled_expression_streaming";
     result.phase_timing = "wall";
 
     double parse_total = 0.0;
@@ -717,8 +717,14 @@ BenchResult run_single_sampler(const Options& options) {
             (options.shots + static_cast<std::uint64_t>(result.block_shots) - 1) /
             static_cast<std::uint64_t>(result.block_shots);
         symft::FactoredExecutorState runtime(setup.program, block_seed(0x5eed1234ULL, repeat, 0));
-        symft::PresampledExogenous samples;
-        symft::prepare_presampled_exogenous(samples, setup.program);
+        symft::PackedPresampledExogenous packed_samples;
+        symft::SingleShotPresampledExpressionPlan packed_expression_plan;
+        symft::SingleShotPresampledExpressionBlock packed_expression_block;
+        symft::prepare_presampled_exogenous_packed(packed_samples, setup.program);
+        symft::prepare_single_shot_presampled_expression_plan(
+            packed_expression_plan,
+            setup.program,
+            packed_samples);
 
         const auto sample_wall_start = Clock::now();
         RateCounts counts;
@@ -729,11 +735,15 @@ BenchResult run_single_sampler(const Options& options) {
                 options.shots - offset));
 
             const auto presample_start = Clock::now();
-            symft::resample_prepared_exogenous_in_place(
-                samples,
+            symft::resample_prepared_exogenous_packed_in_place(
+                packed_samples,
                 setup.program,
                 block,
                 block_seed(0x7eed0000ULL, repeat, block_index));
+            symft::evaluate_single_shot_presampled_expression_block(
+                packed_expression_block,
+                packed_expression_plan,
+                packed_samples);
             const auto presample_stop = Clock::now();
 
             runtime.rng_state = block_seed(0x5eed1234ULL, repeat, block_index);
@@ -744,7 +754,8 @@ BenchResult run_single_sampler(const Options& options) {
                     const bool survived = symft::execute_postselected_in_place(
                         runtime,
                         setup.program,
-                        samples,
+                        packed_expression_plan,
+                        packed_expression_block,
                         shot,
                         setup.single_postselection_plan);
                     const auto execute_stop = Clock::now();
@@ -762,7 +773,12 @@ BenchResult run_single_sampler(const Options& options) {
                     accumulate_total += seconds_between(execute_stop, accumulate_stop);
                     continue;
                 } else {
-                    symft::execute_in_place(runtime, setup.program, samples, shot);
+                    symft::execute_in_place(
+                        runtime,
+                        setup.program,
+                        packed_expression_plan,
+                        packed_expression_block,
+                        shot);
                 }
                 const auto execute_stop = Clock::now();
                 accumulate_single_counts(
