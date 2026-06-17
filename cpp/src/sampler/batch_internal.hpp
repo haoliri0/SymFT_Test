@@ -147,16 +147,6 @@ void assign_batch_symbol(
     BatchFactoredExecutorState& runtime,
     std::optional<int> condition,
     const std::vector<std::uint64_t>& bits);
-void assign_batch_symbol_masked(
-    BatchFactoredExecutorState& runtime,
-    int condition,
-    const std::vector<std::uint64_t>& bits,
-    const std::vector<std::uint64_t>& live_bits);
-void assign_batch_symbol_masked(
-    BatchFactoredExecutorState& runtime,
-    std::optional<int> condition,
-    const std::vector<std::uint64_t>& bits,
-    const std::vector<std::uint64_t>& live_bits);
 void eval_symbolic_bool_batch(
     std::vector<std::uint64_t>& out,
     const SymbolicBoolEvaluationPlan& plan,
@@ -166,12 +156,6 @@ void write_batch_measurement_record(
     std::optional<int> record,
     const std::vector<std::uint64_t>& outcome_bits,
     std::optional<int> record_condition);
-void write_batch_measurement_record_masked(
-    BatchFactoredExecutorState& runtime,
-    std::optional<int> record,
-    const std::vector<std::uint64_t>& outcome_bits,
-    std::optional<int> record_condition,
-    const std::vector<std::uint64_t>& live_bits);
 void assign_presampled_exogenous_batch(BatchFactoredExecutorState& runtime, const PresampledExogenous& samples);
 void assign_presampled_exogenous_batch(
     BatchFactoredExecutorState& runtime,
@@ -182,33 +166,16 @@ void rotate_pauli_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliRotationKernel& kernel,
     const std::vector<std::uint64_t>& sign_bits);
-void rotate_pauli_batch_masked(
-    BatchFactoredExecutorState& runtime,
-    const PrecomputedActivePauliRotationKernel& kernel,
-    const std::vector<std::uint64_t>& sign_bits,
-    const std::vector<std::uint64_t>& live_bits);
 void promote_first_dormant_rotation_batch(
     BatchFactoredExecutorState& runtime,
     double theta,
     const std::vector<std::uint64_t>& sign_bits);
-void promote_first_dormant_rotation_batch_masked(
-    BatchFactoredExecutorState& runtime,
-    double theta,
-    const std::vector<std::uint64_t>& sign_bits,
-    const std::vector<std::uint64_t>& live_bits);
 void measure_active_last_z_batch(
     BatchFactoredExecutorState& runtime,
     int branch_condition,
     const SymbolicBoolEvaluationPlan& outcome_plan,
     std::optional<int> record,
     std::optional<int> record_condition);
-void measure_active_last_z_batch_masked(
-    BatchFactoredExecutorState& runtime,
-    int branch_condition,
-    const SymbolicBoolEvaluationPlan& outcome_plan,
-    std::optional<int> record,
-    std::optional<int> record_condition,
-    const std::vector<std::uint64_t>& live_bits);
 void measure_precomputed_active_pauli_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
@@ -216,13 +183,4 @@ void measure_precomputed_active_pauli_batch(
     const SymbolicBoolEvaluationPlan& outcome_plan,
     std::optional<int> record,
     std::optional<int> record_condition);
-void measure_precomputed_active_pauli_batch_masked(
-    BatchFactoredExecutorState& runtime,
-    const PrecomputedActivePauliMeasurementKernel& kernel,
-    int branch_condition,
-    const SymbolicBoolEvaluationPlan& outcome_plan,
-    std::optional<int> record,
-    std::optional<int> record_condition,
-    const std::vector<std::uint64_t>& live_bits);
-
 } // namespace symft

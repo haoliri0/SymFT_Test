@@ -63,136 +63,6 @@ void execute_batch_instruction(BatchFactoredExecutorState& runtime, const Factor
     std::visit([&](const auto& inst) { execute_batch_instruction(runtime, inst); }, instruction);
 }
 
-void fill_keep_bits_from_dead(
-    const BatchFactoredExecutorState& runtime,
-    const std::vector<std::uint64_t>& dead_bits,
-    std::vector<std::uint64_t>& keep_bits) {
-    const std::size_t nwords = runtime_batch_word_count(runtime);
-    if (keep_bits.size() < runtime.batch_words) {
-        keep_bits.resize(runtime.batch_words, 0);
-    }
-    for (std::size_t word = 0; word < nwords; ++word) {
-        keep_bits[word] = (~dead_bits[word]) & batch_live_word_mask(runtime, word);
-    }
-    std::fill(keep_bits.begin() + static_cast<std::ptrdiff_t>(nwords), keep_bits.end(), 0);
-}
-
-void mask_out_dead_bits(
-    std::vector<std::uint64_t>& bits,
-    const BatchFactoredExecutorState& runtime,
-    const std::vector<std::uint64_t>& live_bits) {
-    const std::size_t nwords = runtime_batch_word_count(runtime);
-    for (std::size_t word = 0; word < nwords; ++word) {
-        bits[word] &= live_bits[word] & batch_live_word_mask(runtime, word);
-    }
-    std::fill(bits.begin() + static_cast<std::ptrdiff_t>(nwords), bits.end(), 0);
-}
-
-void invert_batch_bits_masked(
-    std::vector<std::uint64_t>& bits,
-    const BatchFactoredExecutorState& runtime,
-    const std::vector<std::uint64_t>& live_bits) {
-    const std::size_t nwords = runtime_batch_word_count(runtime);
-    for (std::size_t word = 0; word < nwords; ++word) {
-        const std::uint64_t live = live_bits[word] & batch_live_word_mask(runtime, word);
-        bits[word] = (~bits[word]) & live;
-    }
-    std::fill(bits.begin() + static_cast<std::ptrdiff_t>(nwords), bits.end(), 0);
-}
-
-void execute_batch_instruction_masked(
-    BatchFactoredExecutorState& runtime,
-    const ApplyPrecomputedActivePauliRotation& instruction,
-    const std::vector<std::uint64_t>& live_bits) {
-    eval_symbolic_bool_batch(runtime.eval_scratch, instruction.sign_plan, runtime);
-    rotate_pauli_batch_masked(runtime, instruction.rotation_kernel, runtime.eval_scratch, live_bits);
-}
-
-void execute_batch_instruction_masked(
-    BatchFactoredExecutorState& runtime,
-    const PromoteDormantRotation& instruction,
-    const std::vector<std::uint64_t>& live_bits) {
-    eval_symbolic_bool_batch(runtime.eval_scratch, instruction.sign_plan, runtime);
-    promote_first_dormant_rotation_batch_masked(runtime, instruction.theta, runtime.eval_scratch, live_bits);
-}
-
-void execute_batch_instruction_masked(
-    BatchFactoredExecutorState& runtime,
-    const RecordMeasurement& instruction,
-    const std::vector<std::uint64_t>& live_bits) {
-    eval_symbolic_bool_batch(runtime.eval_scratch, instruction.outcome_plan, runtime);
-    write_batch_measurement_record_masked(
-        runtime,
-        instruction.record,
-        runtime.eval_scratch,
-        instruction.record_condition,
-        live_bits);
-}
-
-void execute_batch_instruction_masked(
-    BatchFactoredExecutorState& runtime,
-    const MeasureActiveLastZ& instruction,
-    const std::vector<std::uint64_t>& live_bits) {
-    measure_active_last_z_batch_masked(
-        runtime,
-        instruction.branch,
-        instruction.outcome_plan,
-        instruction.record,
-        instruction.record_condition,
-        live_bits);
-}
-
-void execute_batch_instruction_masked(
-    BatchFactoredExecutorState& runtime,
-    const MeasurePrecomputedActivePauli& instruction,
-    const std::vector<std::uint64_t>& live_bits) {
-    measure_precomputed_active_pauli_batch_masked(
-        runtime,
-        instruction.kernel,
-        instruction.branch,
-        instruction.outcome_plan,
-        instruction.record,
-        instruction.record_condition,
-        live_bits);
-}
-
-void execute_batch_instruction_masked(
-    BatchFactoredExecutorState& runtime,
-    const IntroduceDormantMeasurementBranch& instruction,
-    const std::vector<std::uint64_t>& live_bits) {
-    fill_batch_random_half_bits(runtime.eval_scratch, runtime);
-    mask_out_dead_bits(runtime.eval_scratch, runtime, live_bits);
-    const auto& branch_bits = runtime.eval_scratch;
-    assign_batch_symbol_masked(runtime, instruction.branch, branch_bits, live_bits);
-    if (instruction.outcome_plan.conditions.size() == 1 &&
-        instruction.outcome_plan.conditions.front() == instruction.branch) {
-        if (instruction.outcome_plan.constant) {
-            invert_batch_bits_masked(runtime.eval_scratch, runtime, live_bits);
-        }
-        write_batch_measurement_record_masked(
-            runtime,
-            instruction.record,
-            runtime.eval_scratch,
-            instruction.record_condition,
-            live_bits);
-        return;
-    }
-    eval_symbolic_bool_batch(runtime.eval_scratch, instruction.outcome_plan, runtime);
-    write_batch_measurement_record_masked(
-        runtime,
-        instruction.record,
-        runtime.eval_scratch,
-        instruction.record_condition,
-        live_bits);
-}
-
-void execute_batch_instruction_masked(
-    BatchFactoredExecutorState& runtime,
-    const FactoredInstruction& instruction,
-    const std::vector<std::uint64_t>& live_bits) {
-    std::visit([&](const auto& inst) { execute_batch_instruction_masked(runtime, inst, live_bits); }, instruction);
-}
-
 namespace {
 
 std::uint64_t live_word_mask_for_shots(int shots, std::size_t word) {
@@ -231,10 +101,39 @@ int count_live_bits(const std::vector<std::uint64_t>& bits, int shots) {
     return count;
 }
 
-bool should_execute_masked_for_dead_bits(
+bool instruction_is_pure_over_dead(const ApplyPrecomputedActivePauliRotation&) {
+    return true;
+}
+
+bool instruction_is_pure_over_dead(const PromoteDormantRotation&) {
+    return true;
+}
+
+bool instruction_is_pure_over_dead(const RecordMeasurement&) {
+    return false;
+}
+
+bool instruction_is_pure_over_dead(const MeasureActiveLastZ&) {
+    return false;
+}
+
+bool instruction_is_pure_over_dead(const MeasurePrecomputedActivePauli&) {
+    return false;
+}
+
+bool instruction_is_pure_over_dead(const IntroduceDormantMeasurementBranch&) {
+    return false;
+}
+
+bool instruction_is_pure_over_dead(const FactoredInstruction& instruction) {
+    return std::visit([](const auto& inst) { return instruction_is_pure_over_dead(inst); }, instruction);
+}
+
+bool should_compact_dead_before_instruction(
     const BatchFactoredExecutorState& runtime,
     const BatchDetectorPostselectionScratch& scratch,
-    const BatchDetectorPostselectionOptions& options) {
+    const BatchDetectorPostselectionOptions& options,
+    const FactoredInstruction& instruction) {
     if (runtime.active_shots == 0) {
         return false;
     }
@@ -242,7 +141,10 @@ bool should_execute_masked_for_dead_bits(
     if (dead_count == 0) {
         return false;
     }
-    const int denominator = std::max(1, options.mask_dead_shots_min_fraction_denominator);
+    if (!instruction_is_pure_over_dead(instruction)) {
+        return true;
+    }
+    const int denominator = std::max(1, options.dense_over_dead_max_fraction_denominator);
     return dead_count * denominator >= runtime.active_shots;
 }
 
@@ -543,10 +445,7 @@ void compact_dead_shots_if_needed(
 int apply_postselection_checks_for_record(
     BatchFactoredExecutorState& runtime,
     const std::vector<std::vector<int>>& detectors,
-    BatchDetectorPostselectionScratch& scratch,
-    const std::vector<int>& condition_last_use,
-    const std::vector<int>& record_last_use,
-    int instruction_index) {
+    BatchDetectorPostselectionScratch& scratch) {
     if (detectors.empty() || runtime.active_shots == 0) {
         return 0;
     }
@@ -572,17 +471,6 @@ int apply_postselection_checks_for_record(
     if (discarded_now == 0) {
         return 0;
     }
-    compact_dead_shots_if_needed(
-        runtime,
-        scratch.dead_bits,
-        scratch.keep_bits,
-        condition_last_use,
-        record_last_use,
-        instruction_index,
-        false,
-        scratch.compact_scratch,
-        scratch.live_sources,
-        false);
     return discarded_now;
 }
 
@@ -797,12 +685,23 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
         if (runtime.active_shots == 0) {
             break;
         }
-        if (should_execute_masked_for_dead_bits(runtime, scratch, options)) {
-            fill_keep_bits_from_dead(runtime, scratch.dead_bits, scratch.keep_bits);
-            execute_batch_instruction_masked(runtime, program.instructions[idx], scratch.keep_bits);
-        } else {
-            execute_batch_instruction(runtime, program.instructions[idx]);
+        if (should_compact_dead_before_instruction(runtime, scratch, options, program.instructions[idx])) {
+            compact_dead_shots_if_needed(
+                runtime,
+                scratch.dead_bits,
+                scratch.keep_bits,
+                postselection.condition_last_use_by_index,
+                postselection.record_last_use_by_index,
+                static_cast<int>(idx) - 1,
+                false,
+                scratch.compact_scratch,
+                scratch.live_sources,
+                true);
+            if (runtime.active_shots == 0) {
+                break;
+            }
         }
+        execute_batch_instruction(runtime, program.instructions[idx]);
         const int record = postselection.instruction_records_by_index[idx];
         if (record <= 0) {
             continue;
@@ -814,10 +713,7 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
         const int discarded_now = apply_postselection_checks_for_record(
             runtime,
             detectors,
-            scratch,
-            postselection.condition_last_use_by_index,
-            postselection.record_last_use_by_index,
-            static_cast<int>(idx));
+            scratch);
         discarded += discarded_now;
     }
     compact_dead_shots_if_needed(
@@ -858,12 +754,23 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
         if (runtime.active_shots == 0) {
             break;
         }
-        if (should_execute_masked_for_dead_bits(runtime, scratch, options)) {
-            fill_keep_bits_from_dead(runtime, scratch.dead_bits, scratch.keep_bits);
-            execute_batch_instruction_masked(runtime, program.instructions[idx], scratch.keep_bits);
-        } else {
-            execute_batch_instruction(runtime, program.instructions[idx]);
+        if (should_compact_dead_before_instruction(runtime, scratch, options, program.instructions[idx])) {
+            compact_dead_shots_if_needed(
+                runtime,
+                scratch.dead_bits,
+                scratch.keep_bits,
+                postselection.condition_last_use_by_index,
+                postselection.record_last_use_by_index,
+                static_cast<int>(idx) - 1,
+                false,
+                scratch.compact_scratch,
+                scratch.live_sources,
+                true);
+            if (runtime.active_shots == 0) {
+                break;
+            }
         }
+        execute_batch_instruction(runtime, program.instructions[idx]);
         const int record = postselection.instruction_records_by_index[idx];
         if (record <= 0) {
             continue;
@@ -875,10 +782,7 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
         const int discarded_now = apply_postselection_checks_for_record(
             runtime,
             detectors,
-            scratch,
-            postselection.condition_last_use_by_index,
-            postselection.record_last_use_by_index,
-            static_cast<int>(idx));
+            scratch);
         discarded += discarded_now;
     }
     compact_dead_shots_if_needed(

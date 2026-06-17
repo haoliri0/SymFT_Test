@@ -82,25 +82,6 @@ bool batch_symbol_matches_bits(
     return true;
 }
 
-bool batch_symbol_matches_bits_masked(
-    const BatchFactoredExecutorState& runtime,
-    int condition,
-    const std::vector<std::uint64_t>& bits,
-    const std::vector<std::uint64_t>& live_bits) {
-    const std::size_t nwords = runtime_batch_word_count(runtime);
-    if (bits.size() < nwords || live_bits.size() < nwords) {
-        fail("batch bit vector is too short");
-    }
-    for (std::size_t word = 0; word < nwords; ++word) {
-        const std::uint64_t mask = live_bits[word] & batch_live_word_mask(runtime, word);
-        const std::uint64_t actual = runtime.value_words[batch_condition_offset(runtime, condition, word)];
-        if (((actual ^ bits[word]) & mask) != 0) {
-            return false;
-        }
-    }
-    return true;
-}
-
 void copy_bits_to_batch_symbol_unchecked(
     BatchFactoredExecutorState& runtime,
     int condition,
@@ -122,26 +103,6 @@ void copy_bits_to_batch_symbol_unchecked(
     }
 }
 
-void copy_bits_to_batch_symbol_masked_unchecked(
-    BatchFactoredExecutorState& runtime,
-    int condition,
-    const std::vector<std::uint64_t>& bits,
-    const std::vector<std::uint64_t>& live_bits) {
-    const std::size_t nwords = runtime_batch_word_count(runtime);
-    if (bits.size() < nwords || live_bits.size() < nwords) {
-        fail("batch bit vector is too short");
-    }
-    const std::size_t base = batch_condition_offset(runtime, condition, 0);
-    for (std::size_t word = 0; word < nwords; ++word) {
-        const std::uint64_t mask = live_bits[word] & batch_live_word_mask(runtime, word);
-        runtime.value_words[base + word] =
-            (runtime.value_words[base + word] & ~mask) | (bits[word] & mask);
-    }
-    for (std::size_t word = nwords; word < runtime.batch_words; ++word) {
-        runtime.value_words[base + word] = 0;
-    }
-}
-
 void assign_batch_symbol(BatchFactoredExecutorState& runtime, int condition, const std::vector<std::uint64_t>& bits) {
     check_batch_symbol_slot(runtime, condition);
     if (batch_symbol_assigned(runtime, condition)) {
@@ -154,38 +115,12 @@ void assign_batch_symbol(BatchFactoredExecutorState& runtime, int condition, con
     copy_bits_to_batch_symbol_unchecked(runtime, condition, bits);
 }
 
-void assign_batch_symbol_masked(
-    BatchFactoredExecutorState& runtime,
-    int condition,
-    const std::vector<std::uint64_t>& bits,
-    const std::vector<std::uint64_t>& live_bits) {
-    check_batch_symbol_slot(runtime, condition);
-    if (batch_symbol_assigned(runtime, condition)) {
-        if (!batch_symbol_matches_bits_masked(runtime, condition, bits, live_bits)) {
-            fail("symbolic condition was assigned inconsistent concrete batch values");
-        }
-        return;
-    }
-    mark_batch_symbol_assigned_unchecked(runtime, condition);
-    copy_bits_to_batch_symbol_masked_unchecked(runtime, condition, bits, live_bits);
-}
-
 void assign_batch_symbol(
     BatchFactoredExecutorState& runtime,
     std::optional<int> condition,
     const std::vector<std::uint64_t>& bits) {
     if (condition) {
         assign_batch_symbol(runtime, *condition, bits);
-    }
-}
-
-void assign_batch_symbol_masked(
-    BatchFactoredExecutorState& runtime,
-    std::optional<int> condition,
-    const std::vector<std::uint64_t>& bits,
-    const std::vector<std::uint64_t>& live_bits) {
-    if (condition) {
-        assign_batch_symbol_masked(runtime, *condition, bits, live_bits);
     }
 }
 
@@ -338,31 +273,6 @@ void write_batch_measurement_record(
         }
     }
     assign_batch_symbol(runtime, record_condition, outcome_bits);
-}
-
-void write_batch_measurement_record_masked(
-    BatchFactoredExecutorState& runtime,
-    std::optional<int> record,
-    const std::vector<std::uint64_t>& outcome_bits,
-    std::optional<int> record_condition,
-    const std::vector<std::uint64_t>& live_bits) {
-    const std::size_t nwords = runtime_batch_word_count(runtime);
-    if (record) {
-        if (*record <= 0) {
-            fail("measurement record id must be positive");
-        }
-        ensure_batch_measurement_storage(runtime, *record);
-        const std::size_t base = batch_record_offset(runtime, *record, 0);
-        for (std::size_t word = 0; word < nwords; ++word) {
-            const std::uint64_t mask = live_bits[word] & batch_live_word_mask(runtime, word);
-            runtime.measurement_words[base + word] =
-                (runtime.measurement_words[base + word] & ~mask) | (outcome_bits[word] & mask);
-        }
-        for (std::size_t word = nwords; word < runtime.batch_words; ++word) {
-            runtime.measurement_words[base + word] = 0;
-        }
-    }
-    assign_batch_symbol_masked(runtime, record_condition, outcome_bits, live_bits);
 }
 
 void assign_presampled_exogenous_batch(

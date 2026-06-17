@@ -33,7 +33,7 @@ struct BatchDetectorPostselectionResult {
 };
 
 struct BatchDetectorPostselectionOptions {
-    int mask_dead_shots_min_fraction_denominator = 8;
+    int dense_over_dead_max_fraction_denominator = 4;
 };
 
 // Active storage is a Julia-column-major equivalent SoA layout:

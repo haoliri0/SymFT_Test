@@ -418,11 +418,13 @@ void test_batch_postselection() {
             single_detector_plan(program, 1),
             alternate_scratch,
             BatchDetectorPostselectionOptions{1});
-        require(default_result.discarded > 0, "combined postselection test kills at least one lane");
-        require(default_result.discarded * 4 < 64, "combined postselection test stays dirty before final compaction");
-        require(default_result.discarded == alternate_result.discarded, "combined postselection discarded count");
-        require(default_result.accepted == alternate_result.accepted, "combined postselection accepted count");
-        require(default_runtime.measurement_words == alternate_runtime.measurement_words, "combined postselection records");
+        require(default_result.discarded > 0, "dense-over-dead postselection test kills at least one lane");
+        require(default_result.discarded * 4 < 64, "dense-over-dead postselection keeps a dirty active prefix");
+        require(default_result.discarded == alternate_result.discarded, "dense-over-dead postselection discarded count");
+        require(default_result.accepted == alternate_result.accepted, "dense-over-dead postselection accepted count");
+        require(
+            default_runtime.measurement_words == alternate_runtime.measurement_words,
+            "dense-over-dead postselection records");
     }
 }
 

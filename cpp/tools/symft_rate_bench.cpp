@@ -59,7 +59,7 @@ struct BenchResult {
     int threads = 1;
     int requested_threads = 1;
     bool detector_postselection = false;
-    int batch_mask_threshold_denominator = 0;
+    int batch_dense_over_dead_threshold_denominator = 0;
     std::string exogenous_mode;
     std::string rng_streams = "split_exogenous_branch";
     std::string phase_timing = "wall";
@@ -169,7 +169,7 @@ struct Options {
     int observable = 0;
     int threads = 1;
     bool postselect_detectors = false;
-    int batch_mask_threshold_denominator = 8;
+    int batch_dense_over_dead_threshold_denominator = 4;
     SamplerMode sampler = SamplerMode::Batch;
 };
 
@@ -190,7 +190,7 @@ void print_usage(const char* argv0) {
         << "  --threads N|auto                  Parallel worker threads over independent batches\n"
         << "  --postselect-detectors            Stop discarded single shots or compact discarded batch shots after fired detectors\n"
         << "  --no-postselect-detectors         Disable detector postselection abort\n"
-        << "  --batch-mask-threshold-denominator N  Combined mode masks when dead/live >= 1/N; default: 8\n";
+        << "  --batch-dense-over-dead-threshold-denominator N  Compact before pure ops when dead/live >= 1/N; default: 4\n";
 }
 
 std::string require_option_value(
@@ -284,10 +284,14 @@ Options parse_options(int argc, char** argv) {
             options.postselect_detectors = value.empty() ? true : parse_bool_flag(value.c_str(), "postselect_detectors");
         } else if (name == "--no-postselect-detectors") {
             options.postselect_detectors = false;
-        } else if (name == "--batch-mask-threshold-denominator" || name == "--mask-threshold-denominator") {
+        } else if (
+            name == "--batch-dense-over-dead-threshold-denominator" ||
+            name == "--dense-over-dead-threshold-denominator" ||
+            name == "--batch-mask-threshold-denominator" ||
+            name == "--mask-threshold-denominator") {
             const std::string raw = require_option_value(name, value, idx, argc, argv);
-            options.batch_mask_threshold_denominator =
-                parse_positive_int(raw.c_str(), "batch_mask_threshold_denominator");
+            options.batch_dense_over_dead_threshold_denominator =
+                parse_positive_int(raw.c_str(), "batch_dense_over_dead_threshold_denominator");
         } else {
             throw std::runtime_error("unknown option: " + name);
         }
@@ -297,7 +301,7 @@ Options parse_options(int argc, char** argv) {
 
 symft::BatchDetectorPostselectionOptions batch_postselection_options(const Options& options) {
     symft::BatchDetectorPostselectionOptions out;
-    out.mask_dead_shots_min_fraction_denominator = options.batch_mask_threshold_denominator;
+    out.dense_over_dead_max_fraction_denominator = options.batch_dense_over_dead_threshold_denominator;
     return out;
 }
 
@@ -816,7 +820,8 @@ BenchResult run_batch_sampler(const Options& options) {
     result.observable = options.observable;
     result.requested_threads = options.threads;
     result.detector_postselection = options.postselect_detectors;
-    result.batch_mask_threshold_denominator = options.postselect_detectors ? options.batch_mask_threshold_denominator : 0;
+    result.batch_dense_over_dead_threshold_denominator =
+        options.postselect_detectors ? options.batch_dense_over_dead_threshold_denominator : 0;
     result.exogenous_mode = "packed_presampled_streaming";
     result.rng_streams = "split_exogenous_branch";
 
@@ -1001,7 +1006,8 @@ void print_result(const BenchResult& result) {
     std::cout << "detector_postselection " << (result.detector_postselection ? "enabled" : "disabled") << "\n";
     if (result.sampler == "batch_postselected") {
         std::cout << "batch_postselection_mode combined\n";
-        std::cout << "batch_mask_threshold_denominator " << result.batch_mask_threshold_denominator << "\n";
+        std::cout << "batch_dense_over_dead_threshold_denominator "
+                  << result.batch_dense_over_dead_threshold_denominator << "\n";
     }
     std::cout << "exogenous_mode " << result.exogenous_mode << "\n";
     std::cout << "rng_streams " << result.rng_streams << "\n";
