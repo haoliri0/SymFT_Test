@@ -25,6 +25,8 @@ struct BatchDetectorPostselectionScratch {
     std::vector<std::uint64_t> scratch;
     std::vector<std::uint64_t> compact_scratch;
     std::vector<int> live_sources;
+    std::vector<int> tail_fill_moves;
+    int dead_count = 0;
 };
 
 struct BatchDetectorPostselectionResult {
@@ -34,6 +36,7 @@ struct BatchDetectorPostselectionResult {
 
 struct BatchDetectorPostselectionOptions {
     int dense_over_dead_max_fraction_denominator = 4;
+    int unordered_tail_fill_max_dead_fraction_denominator = 5;
 };
 
 // Active storage is a Julia-column-major equivalent SoA layout:

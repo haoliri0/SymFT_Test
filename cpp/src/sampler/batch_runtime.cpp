@@ -110,7 +110,7 @@ bool instruction_is_pure_over_dead(const PromoteDormantRotation&) {
 }
 
 bool instruction_is_pure_over_dead(const RecordMeasurement&) {
-    return false;
+    return true;
 }
 
 bool instruction_is_pure_over_dead(const MeasureActiveLastZ&) {
@@ -137,15 +137,14 @@ bool should_compact_dead_before_instruction(
     if (runtime.active_shots == 0) {
         return false;
     }
-    const int dead_count = count_live_bits(scratch.dead_bits, runtime.active_shots);
-    if (dead_count == 0) {
+    if (scratch.dead_count == 0) {
         return false;
     }
     if (!instruction_is_pure_over_dead(instruction)) {
         return true;
     }
     const int denominator = std::max(1, options.dense_over_dead_max_fraction_denominator);
-    return dead_count * denominator >= runtime.active_shots;
+    return scratch.dead_count * denominator >= runtime.active_shots;
 }
 
 #if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386))
@@ -366,6 +365,149 @@ void compact_active_columns(
     }
 }
 
+bool batch_bit_is_set(const std::vector<std::uint64_t>& bits, int shot) {
+    return (bits[batch_shot_word(shot)] & batch_shot_mask(shot)) != 0;
+}
+
+bool column_bit_is_set(const std::vector<std::uint64_t>& columns, std::size_t base, int shot) {
+    return (columns[base + batch_shot_word(shot)] & batch_shot_mask(shot)) != 0;
+}
+
+void copy_column_bit(std::vector<std::uint64_t>& columns, std::size_t base, int dst, int src) {
+    const std::size_t dst_word = batch_shot_word(dst);
+    const std::uint64_t dst_mask = batch_shot_mask(dst);
+    if (column_bit_is_set(columns, base, src)) {
+        columns[base + dst_word] |= dst_mask;
+    } else {
+        columns[base + dst_word] &= ~dst_mask;
+    }
+}
+
+void collect_tail_fill_moves(
+    std::vector<int>& moves,
+    int old_shots,
+    int survivor_count,
+    const std::vector<std::uint64_t>& dead_bits) {
+    moves.clear();
+    int dst = 0;
+    int src = old_shots - 1;
+    while (dst < survivor_count) {
+        while (dst < survivor_count && !batch_bit_is_set(dead_bits, dst)) {
+            ++dst;
+        }
+        if (dst >= survivor_count) {
+            break;
+        }
+        while (src >= survivor_count && batch_bit_is_set(dead_bits, src)) {
+            --src;
+        }
+        if (src < survivor_count) {
+            fail("internal tail-fill compaction source mismatch");
+        }
+        moves.push_back(dst);
+        moves.push_back(src);
+        ++dst;
+        --src;
+    }
+}
+
+void tail_fill_active_columns(BatchFactoredExecutorState& runtime, const std::vector<int>& moves) {
+    if (moves.empty()) {
+        return;
+    }
+    const std::size_t pitch = static_cast<std::size_t>(runtime.batches);
+    const std::size_t dim = active_length(runtime.k);
+    for (std::size_t basis = 0; basis < dim; ++basis) {
+        const std::size_t base = basis * pitch;
+        for (std::size_t move = 0; move < moves.size(); move += 2) {
+            const int dst = moves[move];
+            const int src = moves[move + 1];
+            runtime.active_re[base + static_cast<std::size_t>(dst)] =
+                runtime.active_re[base + static_cast<std::size_t>(src)];
+            runtime.active_im[base + static_cast<std::size_t>(dst)] =
+                runtime.active_im[base + static_cast<std::size_t>(src)];
+        }
+    }
+}
+
+void tail_fill_symbol_columns(
+    std::vector<std::uint64_t>& columns,
+    const std::vector<int>& condition_last_use,
+    int instruction_index,
+    std::size_t stride_words,
+    const std::vector<int>& moves) {
+    if (stride_words == 0 || condition_last_use.size() <= 1 || moves.empty()) {
+        return;
+    }
+    for (int condition = 1; condition < static_cast<int>(condition_last_use.size()); ++condition) {
+        if (condition_last_use[static_cast<std::size_t>(condition)] <= instruction_index) {
+            continue;
+        }
+        const std::size_t base = static_cast<std::size_t>(condition - 1) * stride_words;
+        for (std::size_t move = 0; move < moves.size(); move += 2) {
+            copy_column_bit(columns, base, moves[move], moves[move + 1]);
+        }
+    }
+}
+
+void tail_fill_measurement_columns(
+    std::vector<std::uint64_t>& columns,
+    const std::vector<int>& record_last_use,
+    int instruction_index,
+    bool include_current_use,
+    std::size_t stride_words,
+    const std::vector<int>& moves) {
+    if (stride_words == 0 || record_last_use.size() <= 1 || moves.empty()) {
+        return;
+    }
+    const auto record_is_live = [&](int record) {
+        const int last_use = record_last_use[static_cast<std::size_t>(record)];
+        return include_current_use ? last_use >= instruction_index : last_use > instruction_index;
+    };
+    for (int record = 1; record < static_cast<int>(record_last_use.size()); ++record) {
+        if (!record_is_live(record)) {
+            continue;
+        }
+        const std::size_t base = static_cast<std::size_t>(record - 1) * stride_words;
+        for (std::size_t move = 0; move < moves.size(); move += 2) {
+            copy_column_bit(columns, base, moves[move], moves[move + 1]);
+        }
+    }
+}
+
+void tail_fill_compact_surviving_shots(
+    BatchFactoredExecutorState& runtime,
+    const std::vector<std::uint64_t>& dead_bits,
+    int dead_count,
+    const std::vector<int>& condition_last_use,
+    const std::vector<int>& record_last_use,
+    int instruction_index,
+    bool include_current_record_use,
+    std::vector<int>& moves) {
+    const int old_shots = runtime.active_shots;
+    const int survivor_count = old_shots - dead_count;
+    if (survivor_count <= 0) {
+        runtime.active_shots = 0;
+        return;
+    }
+    collect_tail_fill_moves(moves, old_shots, survivor_count, dead_bits);
+    tail_fill_active_columns(runtime, moves);
+    tail_fill_symbol_columns(
+        runtime.value_words,
+        condition_last_use,
+        instruction_index,
+        runtime.batch_words,
+        moves);
+    tail_fill_measurement_columns(
+        runtime.measurement_words,
+        record_last_use,
+        instruction_index,
+        include_current_record_use,
+        runtime.batch_words,
+        moves);
+    runtime.active_shots = survivor_count;
+}
+
 void compact_surviving_shots(
     BatchFactoredExecutorState& runtime,
     const std::vector<std::uint64_t>& keep_bits,
@@ -404,42 +546,72 @@ void compact_surviving_shots(
     runtime.active_shots = survivor_count;
 }
 
+bool should_use_tail_fill_compaction(
+    const BatchDetectorPostselectionOptions& options,
+    int dead_count,
+    int active_shots) {
+    if (dead_count <= 0 || dead_count >= active_shots) {
+        return false;
+    }
+    if (active_shots <= 64) {
+        return false;
+    }
+    const int denominator = options.unordered_tail_fill_max_dead_fraction_denominator;
+    return denominator > 0 && dead_count * denominator <= active_shots;
+}
+
 void compact_dead_shots_if_needed(
     BatchFactoredExecutorState& runtime,
-    std::vector<std::uint64_t>& dead_bits,
-    std::vector<std::uint64_t>& keep_bits,
+    BatchDetectorPostselectionScratch& scratch,
     const std::vector<int>& condition_last_use,
     const std::vector<int>& record_last_use,
     int instruction_index,
     bool include_current_record_use,
-    std::vector<std::uint64_t>& compact_scratch,
-    std::vector<int>& live_sources,
+    const BatchDetectorPostselectionOptions& options,
     bool force) {
     if (runtime.active_shots == 0) {
         return;
     }
-    const int dead_count = count_live_bits(dead_bits, runtime.active_shots);
+    const int dead_count = scratch.dead_count;
     if (dead_count == 0) {
         return;
     }
-    if (!force && dead_count != runtime.active_shots && dead_count * 4 < runtime.active_shots) {
+    if (!force) {
+        return;
+    }
+    if (should_use_tail_fill_compaction(options, dead_count, runtime.active_shots)) {
+        tail_fill_compact_surviving_shots(
+            runtime,
+            scratch.dead_bits,
+            dead_count,
+            condition_last_use,
+            record_last_use,
+            instruction_index,
+            include_current_record_use,
+            scratch.tail_fill_moves);
+        std::fill(scratch.dead_bits.begin(), scratch.dead_bits.end(), 0);
+        scratch.dead_count = 0;
         return;
     }
     const std::size_t nwords = batch_word_count(runtime.active_shots);
     for (std::size_t word = 0; word < nwords; ++word) {
-        keep_bits[word] = (~dead_bits[word]) & live_word_mask_for_shots(runtime.active_shots, word);
+        scratch.keep_bits[word] = (~scratch.dead_bits[word]) & live_word_mask_for_shots(runtime.active_shots, word);
     }
-    std::fill(keep_bits.begin() + static_cast<std::ptrdiff_t>(nwords), keep_bits.end(), 0);
+    std::fill(
+        scratch.keep_bits.begin() + static_cast<std::ptrdiff_t>(nwords),
+        scratch.keep_bits.end(),
+        0);
     compact_surviving_shots(
         runtime,
-        keep_bits,
+        scratch.keep_bits,
         condition_last_use,
         record_last_use,
         instruction_index,
         include_current_record_use,
-        compact_scratch,
-        live_sources);
-    std::fill(dead_bits.begin(), dead_bits.end(), 0);
+        scratch.compact_scratch,
+        scratch.live_sources);
+    std::fill(scratch.dead_bits.begin(), scratch.dead_bits.end(), 0);
+    scratch.dead_count = 0;
 }
 
 int apply_postselection_checks_for_record(
@@ -471,6 +643,7 @@ int apply_postselection_checks_for_record(
     if (discarded_now == 0) {
         return 0;
     }
+    scratch.dead_count += discarded_now;
     return discarded_now;
 }
 
@@ -660,6 +833,9 @@ void prepare_batch_detector_postselection_scratch(
     if (scratch.live_sources.capacity() < static_cast<std::size_t>(runtime.batches)) {
         scratch.live_sources.reserve(static_cast<std::size_t>(runtime.batches));
     }
+    if (scratch.tail_fill_moves.capacity() < static_cast<std::size_t>(runtime.batches)) {
+        scratch.tail_fill_moves.reserve(static_cast<std::size_t>(runtime.batches));
+    }
 }
 
 BatchDetectorPostselectionResult execute_batch_postselected_in_place(
@@ -675,6 +851,7 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
     validate_batch_postselection_plan(program, postselection);
     prepare_batch_detector_postselection_scratch(scratch, runtime);
     std::fill(scratch.dead_bits.begin(), scratch.dead_bits.end(), 0);
+    scratch.dead_count = 0;
     if (runtime.active_shots == 0) {
         return {};
     }
@@ -688,14 +865,12 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
         if (should_compact_dead_before_instruction(runtime, scratch, options, program.instructions[idx])) {
             compact_dead_shots_if_needed(
                 runtime,
-                scratch.dead_bits,
-                scratch.keep_bits,
+                scratch,
                 postselection.condition_last_use_by_index,
                 postselection.record_last_use_by_index,
                 static_cast<int>(idx) - 1,
                 false,
-                scratch.compact_scratch,
-                scratch.live_sources,
+                options,
                 true);
             if (runtime.active_shots == 0) {
                 break;
@@ -718,14 +893,12 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
     }
     compact_dead_shots_if_needed(
         runtime,
-        scratch.dead_bits,
-        scratch.keep_bits,
+        scratch,
         postselection.condition_last_use_by_index,
         postselection.record_last_use_by_index,
         static_cast<int>(program.instructions.size()),
         true,
-        scratch.compact_scratch,
-        scratch.live_sources,
+        options,
         true);
     return {discarded, runtime.active_shots};
 }
@@ -744,6 +917,7 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
     validate_batch_postselection_plan(program, postselection);
     prepare_batch_detector_postselection_scratch(scratch, runtime);
     std::fill(scratch.dead_bits.begin(), scratch.dead_bits.end(), 0);
+    scratch.dead_count = 0;
     if (runtime.active_shots == 0) {
         return {};
     }
@@ -757,14 +931,12 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
         if (should_compact_dead_before_instruction(runtime, scratch, options, program.instructions[idx])) {
             compact_dead_shots_if_needed(
                 runtime,
-                scratch.dead_bits,
-                scratch.keep_bits,
+                scratch,
                 postselection.condition_last_use_by_index,
                 postselection.record_last_use_by_index,
                 static_cast<int>(idx) - 1,
                 false,
-                scratch.compact_scratch,
-                scratch.live_sources,
+                options,
                 true);
             if (runtime.active_shots == 0) {
                 break;
@@ -787,14 +959,12 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
     }
     compact_dead_shots_if_needed(
         runtime,
-        scratch.dead_bits,
-        scratch.keep_bits,
+        scratch,
         postselection.condition_last_use_by_index,
         postselection.record_last_use_by_index,
         static_cast<int>(program.instructions.size()),
         true,
-        scratch.compact_scratch,
-        scratch.live_sources,
+        options,
         true);
     return {discarded, runtime.active_shots};
 }

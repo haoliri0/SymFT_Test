@@ -60,6 +60,7 @@ struct BenchResult {
     int requested_threads = 1;
     bool detector_postselection = false;
     int batch_dense_over_dead_threshold_denominator = 0;
+    int batch_tail_fill_threshold_denominator = 0;
     std::string exogenous_mode;
     std::string rng_streams = "split_exogenous_branch";
     std::string phase_timing = "wall";
@@ -170,6 +171,7 @@ struct Options {
     int threads = 1;
     bool postselect_detectors = false;
     int batch_dense_over_dead_threshold_denominator = 4;
+    int batch_tail_fill_threshold_denominator = 5;
     SamplerMode sampler = SamplerMode::Batch;
 };
 
@@ -190,7 +192,8 @@ void print_usage(const char* argv0) {
         << "  --threads N|auto                  Parallel worker threads over independent batches\n"
         << "  --postselect-detectors            Stop discarded single shots or compact discarded batch shots after fired detectors\n"
         << "  --no-postselect-detectors         Disable detector postselection abort\n"
-        << "  --batch-dense-over-dead-threshold-denominator N  Compact before pure ops when dead/live >= 1/N; default: 4\n";
+        << "  --batch-dense-over-dead-threshold-denominator N  Compact before pure ops when dead/live >= 1/N; default: 4\n"
+        << "  --batch-tail-fill-threshold-denominator N  Use unordered tail-fill when dead/live <= 1/N; 0 disables; default: 5\n";
 }
 
 std::string require_option_value(
@@ -292,6 +295,13 @@ Options parse_options(int argc, char** argv) {
             const std::string raw = require_option_value(name, value, idx, argc, argv);
             options.batch_dense_over_dead_threshold_denominator =
                 parse_positive_int(raw.c_str(), "batch_dense_over_dead_threshold_denominator");
+        } else if (
+            name == "--batch-tail-fill-threshold-denominator" ||
+            name == "--tail-fill-threshold-denominator" ||
+            name == "--batch-unordered-tail-fill-threshold-denominator") {
+            const std::string raw = require_option_value(name, value, idx, argc, argv);
+            options.batch_tail_fill_threshold_denominator =
+                parse_nonnegative_int(raw.c_str(), "batch_tail_fill_threshold_denominator");
         } else {
             throw std::runtime_error("unknown option: " + name);
         }
@@ -302,6 +312,7 @@ Options parse_options(int argc, char** argv) {
 symft::BatchDetectorPostselectionOptions batch_postselection_options(const Options& options) {
     symft::BatchDetectorPostselectionOptions out;
     out.dense_over_dead_max_fraction_denominator = options.batch_dense_over_dead_threshold_denominator;
+    out.unordered_tail_fill_max_dead_fraction_denominator = options.batch_tail_fill_threshold_denominator;
     return out;
 }
 
@@ -822,6 +833,8 @@ BenchResult run_batch_sampler(const Options& options) {
     result.detector_postselection = options.postselect_detectors;
     result.batch_dense_over_dead_threshold_denominator =
         options.postselect_detectors ? options.batch_dense_over_dead_threshold_denominator : 0;
+    result.batch_tail_fill_threshold_denominator =
+        options.postselect_detectors ? options.batch_tail_fill_threshold_denominator : 0;
     result.exogenous_mode = "packed_presampled_streaming";
     result.rng_streams = "split_exogenous_branch";
 
@@ -1008,6 +1021,8 @@ void print_result(const BenchResult& result) {
         std::cout << "batch_postselection_mode combined\n";
         std::cout << "batch_dense_over_dead_threshold_denominator "
                   << result.batch_dense_over_dead_threshold_denominator << "\n";
+        std::cout << "batch_tail_fill_threshold_denominator "
+                  << result.batch_tail_fill_threshold_denominator << "\n";
     }
     std::cout << "exogenous_mode " << result.exogenous_mode << "\n";
     std::cout << "rng_streams " << result.rng_streams << "\n";
