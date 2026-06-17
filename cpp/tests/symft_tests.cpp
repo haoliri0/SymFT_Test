@@ -426,68 +426,6 @@ void test_batch_postselection() {
             default_runtime.measurement_words == alternate_runtime.measurement_words,
             "dense-over-dead postselection records");
     }
-    {
-        const auto parsed = parse_stim_text(
-            "X_ERROR(0.75) 0\n"
-            "M 0\n"
-            "DETECTOR rec[-1]\n"
-            "H 1\n"
-            "T 1\n"
-            "T_DAG 1\n"
-            "H 1\n"
-            "M 1\n");
-        PendingFactoredState pending(parsed.state);
-        const auto program = plan_factored_updates(pending);
-        PackedPresampledExogenous samples;
-        prepare_presampled_exogenous_packed(samples, program);
-        resample_prepared_exogenous_packed_in_place(samples, program, 1024, 47);
-        auto plan = single_detector_plan(program, 1);
-        prepare_batch_detector_postselection_boundaries(plan, program);
-
-        int reference_discarded = 0;
-        int reference_accepted = 0;
-        for (int page_index = 0; page_index < 16; ++page_index) {
-            BatchFactoredExecutorState reference_page(program, 64, 101 + static_cast<std::uint64_t>(page_index));
-            BatchDetectorPostselectionScratch scratch;
-            const auto result = execute_batch_postselected_in_place(
-                reference_page,
-                program,
-                samples,
-                page_index * 64,
-                plan,
-                scratch);
-            reference_discarded += result.discarded;
-            reference_accepted += result.accepted;
-        }
-
-        std::vector<BatchFactoredExecutorState> pages;
-        pages.reserve(16);
-        for (int page_index = 0; page_index < 16; ++page_index) {
-            pages.emplace_back(program, 64, 201 + static_cast<std::uint64_t>(page_index));
-            assign_presampled_exogenous_batch_in_place(pages.back(), samples, page_index * 64);
-        }
-        std::vector<BatchDetectorPostselectionScratch> scratches;
-        BatchPostselectionCoalescingStats coalescing_stats;
-        BatchDetectorPostselectionOptions options;
-        options.cross_page_coalescing_benefit_factor = 0;
-        options.coalescing_stats = &coalescing_stats;
-        const auto pooled_result = execute_batch_postselected_page_pool_in_place(
-            pages,
-            program,
-            plan,
-            scratches,
-            options);
-        int live_pages = 0;
-        for (const auto& page : pages) {
-            if (page.active_shots > 0) {
-                ++live_pages;
-            }
-        }
-        require(pooled_result.discarded == reference_discarded, "paged postselection discarded count");
-        require(pooled_result.accepted == reference_accepted, "paged postselection accepted count");
-        require(coalescing_stats.accepted > 0, "paged postselection debug mode coalesces");
-        require(live_pages <= 8, "paged postselection coalesces survivor pages");
-    }
 }
 
 void test_detectors() {

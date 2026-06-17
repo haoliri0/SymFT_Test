@@ -31,7 +31,6 @@ struct RateCounts {
 
 struct WorkerResult {
     RateCounts counts;
-    symft::BatchPostselectionCoalescingStats coalescing_stats;
     double presample_s = 0.0;
     double execute_s = 0.0;
     double accumulate_s = 0.0;
@@ -60,11 +59,8 @@ struct BenchResult {
     int threads = 1;
     int requested_threads = 1;
     bool detector_postselection = false;
-    int batch_dense_over_dead_threshold_denominator = 0;
+    int batch_mask_threshold_denominator = 0;
     int batch_tail_fill_threshold_denominator = 0;
-    int batch_postselection_pool_shots = 0;
-    int batch_cross_page_coalescing_benefit_factor = 0;
-    symft::BatchPostselectionCoalescingStats coalescing_stats;
     std::string exogenous_mode;
     std::string rng_streams = "split_exogenous_branch";
     std::string phase_timing = "wall";
@@ -78,32 +74,6 @@ struct BenchResult {
 
 double seconds_between(Clock::time_point start, Clock::time_point stop) {
     return std::chrono::duration<double>(stop - start).count();
-}
-
-void add_coalescing_stats(
-    symft::BatchPostselectionCoalescingStats& dst,
-    const symft::BatchPostselectionCoalescingStats& src) {
-    dst.checks += src.checks;
-    dst.accepted += src.accepted;
-    dst.rejected_small_savings += src.rejected_small_savings;
-    dst.rejected_cost += src.rejected_cost;
-    dst.old_nonempty_pages += src.old_nonempty_pages;
-    dst.new_pages_if_coalesced += src.new_pages_if_coalesced;
-    dst.saved_pages += src.saved_pages;
-    dst.live_lanes += src.live_lanes;
-    dst.moved_lanes += src.moved_lanes;
-    dst.actual_moved_lanes += src.actual_moved_lanes;
-    dst.keep_basis_columns += src.keep_basis_columns;
-    dst.future_page_basis_touches += src.future_page_basis_touches;
-    dst.state_move_units += src.state_move_units;
-    dst.saved_page_units += src.saved_page_units;
-    dst.estimated_move_bytes += src.estimated_move_bytes;
-    dst.full_pages_executed += src.full_pages_executed;
-    dst.partial_pages_executed += src.partial_pages_executed;
-    dst.partial_page_live_lanes += src.partial_page_live_lanes;
-    dst.segment_execution_s += src.segment_execution_s;
-    dst.page_local_compaction_s += src.page_local_compaction_s;
-    dst.cross_page_coalescing_s += src.cross_page_coalescing_s;
 }
 
 std::uint64_t parse_u64(const char* raw, const char* name) {
@@ -200,10 +170,8 @@ struct Options {
     int observable = 0;
     int threads = 1;
     bool postselect_detectors = false;
-    int batch_dense_over_dead_threshold_denominator = 4;
+    int batch_mask_threshold_denominator = 2;
     int batch_tail_fill_threshold_denominator = 5;
-    int batch_postselection_pool_shots = 0;
-    int batch_cross_page_coalescing_benefit_factor = 8;
     SamplerMode sampler = SamplerMode::Batch;
 };
 
@@ -224,10 +192,8 @@ void print_usage(const char* argv0) {
         << "  --threads N|auto                  Parallel worker threads over independent batches\n"
         << "  --postselect-detectors            Stop discarded single shots or compact discarded batch shots after fired detectors\n"
         << "  --no-postselect-detectors         Disable detector postselection abort\n"
-        << "  --batch-dense-over-dead-threshold-denominator N  Compact before pure ops when dead/live >= 1/N; default: 4\n"
-        << "  --batch-tail-fill-threshold-denominator N  Use unordered tail-fill when dead/live <= 1/N; 0 disables; default: 5\n"
-        << "  --batch-postselection-pool-shots N|auto  Logical survivor pool over 64-shot physical pages; default: batch-size\n"
-        << "  --batch-cross-page-coalescing-benefit-factor N  Require saved work > N * state-move work; 0 disables cost gate; default: 8\n";
+        << "  --batch-mask-threshold-denominator N  Combined mode compacts before pure ops when dead/live >= 1/N; default: 2\n"
+        << "  --batch-tail-fill-threshold-denominator N  Use unordered tail-fill when dead/live <= 1/N; 0 disables; default: 5\n";
 }
 
 std::string require_option_value(
@@ -327,8 +293,8 @@ Options parse_options(int argc, char** argv) {
             name == "--batch-mask-threshold-denominator" ||
             name == "--mask-threshold-denominator") {
             const std::string raw = require_option_value(name, value, idx, argc, argv);
-            options.batch_dense_over_dead_threshold_denominator =
-                parse_positive_int(raw.c_str(), "batch_dense_over_dead_threshold_denominator");
+            options.batch_mask_threshold_denominator =
+                parse_positive_int(raw.c_str(), "batch_mask_threshold_denominator");
         } else if (
             name == "--batch-tail-fill-threshold-denominator" ||
             name == "--tail-fill-threshold-denominator" ||
@@ -336,19 +302,6 @@ Options parse_options(int argc, char** argv) {
             const std::string raw = require_option_value(name, value, idx, argc, argv);
             options.batch_tail_fill_threshold_denominator =
                 parse_nonnegative_int(raw.c_str(), "batch_tail_fill_threshold_denominator");
-        } else if (
-            name == "--batch-postselection-pool-shots" ||
-            name == "--postselection-pool-shots" ||
-            name == "--batch-postselection-pool-size") {
-            const std::string raw = require_option_value(name, value, idx, argc, argv);
-            options.batch_postselection_pool_shots = parse_sample_chunk_shots(raw.c_str());
-        } else if (
-            name == "--batch-cross-page-coalescing-benefit-factor" ||
-            name == "--cross-page-coalescing-benefit-factor" ||
-            name == "--batch-coalescing-benefit-factor") {
-            const std::string raw = require_option_value(name, value, idx, argc, argv);
-            options.batch_cross_page_coalescing_benefit_factor =
-                parse_nonnegative_int(raw.c_str(), "batch_cross_page_coalescing_benefit_factor");
         } else {
             throw std::runtime_error("unknown option: " + name);
         }
@@ -358,9 +311,8 @@ Options parse_options(int argc, char** argv) {
 
 symft::BatchDetectorPostselectionOptions batch_postselection_options(const Options& options) {
     symft::BatchDetectorPostselectionOptions out;
-    out.dense_over_dead_max_fraction_denominator = options.batch_dense_over_dead_threshold_denominator;
+    out.dense_over_dead_max_fraction_denominator = options.batch_mask_threshold_denominator;
     out.unordered_tail_fill_max_dead_fraction_denominator = options.batch_tail_fill_threshold_denominator;
-    out.cross_page_coalescing_benefit_factor = options.batch_cross_page_coalescing_benefit_factor;
     return out;
 }
 
@@ -735,7 +687,6 @@ RateBenchSetup build_rate_bench_setup(
     setup.batch_postselection_plan.detectors_by_record = setup.postselection_detectors_by_record;
     setup.batch_postselection_plan.condition_last_use_by_index = setup.condition_last_use_by_index;
     setup.batch_postselection_plan.record_last_use_by_index = setup.record_last_use_by_index;
-    symft::prepare_batch_detector_postselection_boundaries(setup.batch_postselection_plan, program);
     setup.parsed = std::move(parsed);
     setup.program = std::move(program);
     parse_s = seconds_between(parse_start, parse_stop);
@@ -880,6 +831,10 @@ BenchResult run_batch_sampler(const Options& options) {
     result.observable = options.observable;
     result.requested_threads = options.threads;
     result.detector_postselection = options.postselect_detectors;
+    result.batch_mask_threshold_denominator =
+        options.postselect_detectors ? options.batch_mask_threshold_denominator : 0;
+    result.batch_tail_fill_threshold_denominator =
+        options.postselect_detectors ? options.batch_tail_fill_threshold_denominator : 0;
     result.exogenous_mode = "packed_presampled_streaming";
     result.rng_streams = "split_exogenous_branch";
 
@@ -891,18 +846,6 @@ BenchResult run_batch_sampler(const Options& options) {
     result.max_k = setup.program.max_k;
     result.block_shots = setup.block_shots;
     result.sample_chunk_shots = setup.sample_chunk_shots;
-    result.batch_dense_over_dead_threshold_denominator =
-        options.postselect_detectors ? options.batch_dense_over_dead_threshold_denominator : 0;
-    result.batch_tail_fill_threshold_denominator =
-        options.postselect_detectors ? options.batch_tail_fill_threshold_denominator : 0;
-    result.batch_postselection_pool_shots =
-        options.postselect_detectors
-            ? (options.batch_postselection_pool_shots > 0
-                   ? options.batch_postselection_pool_shots
-                   : result.block_shots)
-            : 0;
-    result.batch_cross_page_coalescing_benefit_factor =
-        options.postselect_detectors ? options.batch_cross_page_coalescing_benefit_factor : 0;
     result.detectors = static_cast<int>(setup.parsed.detectors.size());
     result.observable_includes = static_cast<int>(setup.parsed.observables.size());
 
@@ -916,13 +859,6 @@ BenchResult run_batch_sampler(const Options& options) {
     const std::uint64_t blocks_per_chunk = ceil_div_u64(
         static_cast<std::uint64_t>(result.sample_chunk_shots),
         static_cast<std::uint64_t>(result.block_shots));
-    const int postselection_pool_shots =
-        result.batch_postselection_pool_shots > 0
-            ? result.batch_postselection_pool_shots
-            : result.block_shots;
-    const std::uint64_t postselection_pools_per_chunk = ceil_div_u64(
-        static_cast<std::uint64_t>(result.sample_chunk_shots),
-        static_cast<std::uint64_t>(postselection_pool_shots));
     const int active_threads = std::min<int>(
         options.threads,
         static_cast<int>(std::max<std::uint64_t>(1, nchunks)));
@@ -935,8 +871,6 @@ BenchResult run_batch_sampler(const Options& options) {
         const auto sample_wall_start = Clock::now();
         auto run_worker = [&](int worker_id) {
             WorkerResult local;
-            auto local_postselection_options = postselection_options;
-            local_postselection_options.coalescing_stats = &local.coalescing_stats;
             symft::BatchFactoredExecutorState runtime(
                 setup.program,
                 result.block_shots,
@@ -946,24 +880,6 @@ BenchResult run_batch_sampler(const Options& options) {
             std::vector<std::uint64_t> scratch(runtime.batch_words, 0);
             symft::BatchDetectorPostselectionScratch postselection_scratch;
             symft::prepare_batch_detector_postselection_scratch(postselection_scratch, runtime);
-            const int max_pool_pages = static_cast<int>(ceil_div_u64(
-                static_cast<std::uint64_t>(postselection_pool_shots),
-                static_cast<std::uint64_t>(result.block_shots)));
-            std::vector<symft::BatchFactoredExecutorState> page_pool;
-            std::vector<symft::BatchDetectorPostselectionScratch> page_pool_scratches;
-            if (options.postselect_detectors && max_pool_pages > 1) {
-                page_pool.reserve(static_cast<std::size_t>(max_pool_pages));
-                for (int page_index = 0; page_index < max_pool_pages; ++page_index) {
-                    page_pool.emplace_back(
-                        setup.program,
-                        result.block_shots,
-                        block_seed(
-                            0x5eed1234ULL,
-                            repeat,
-                            static_cast<std::uint64_t>(worker_id * max_pool_pages + page_index)));
-                }
-                page_pool_scratches.resize(static_cast<std::size_t>(max_pool_pages));
-            }
             symft::PackedPresampledExogenous samples;
             symft::prepare_presampled_exogenous_packed(samples, setup.program);
             for (std::uint64_t chunk_index = static_cast<std::uint64_t>(worker_id);
@@ -984,82 +900,6 @@ BenchResult run_batch_sampler(const Options& options) {
                 const auto presample_stop = Clock::now();
                 local.presample_s += seconds_between(presample_start, presample_stop);
 
-                if (options.postselect_detectors) {
-                    for (int pool_offset = 0, local_pool_index = 0;
-                         pool_offset < chunk_shots;
-                         pool_offset += postselection_pool_shots, ++local_pool_index) {
-                        const int pool = std::min(postselection_pool_shots, chunk_shots - pool_offset);
-                        const std::uint64_t pool_index =
-                            chunk_index * postselection_pools_per_chunk +
-                            static_cast<std::uint64_t>(local_pool_index);
-                        const auto execute_start = Clock::now();
-                        if (max_pool_pages <= 1) {
-                            symft::reset_batch_executor(runtime, setup.program, pool);
-                            runtime.rng_state = block_seed(0x5eed1234ULL, repeat, pool_index);
-                            const auto postselection_result = symft::execute_batch_postselected_in_place(
-                                runtime,
-                                setup.program,
-                                samples,
-                                pool_offset,
-                                setup.batch_postselection_plan,
-                                postselection_scratch,
-                                local_postselection_options);
-                            local.counts.discarded +=
-                                static_cast<std::uint64_t>(postselection_result.discarded);
-                        } else {
-                            for (int page_index = 0; page_index < max_pool_pages; ++page_index) {
-                                const int page_offset = page_index * result.block_shots;
-                                const int page_shots =
-                                    page_offset < pool ? std::min(result.block_shots, pool - page_offset) : 0;
-                                auto& page = page_pool[static_cast<std::size_t>(page_index)];
-                                symft::reset_batch_executor(page, setup.program, page_shots);
-                                page.rng_state = block_seed(
-                                    0x5eed1234ULL,
-                                    repeat,
-                                    pool_index * static_cast<std::uint64_t>(max_pool_pages) +
-                                        static_cast<std::uint64_t>(page_index));
-                                if (page_shots > 0) {
-                                    symft::assign_presampled_exogenous_batch_in_place(
-                                        page,
-                                        samples,
-                                        pool_offset + page_offset);
-                                }
-                            }
-                            const auto postselection_result = symft::execute_batch_postselected_page_pool_in_place(
-                                page_pool,
-                                setup.program,
-                                setup.batch_postselection_plan,
-                                page_pool_scratches,
-                                local_postselection_options);
-                            local.counts.discarded +=
-                                static_cast<std::uint64_t>(postselection_result.discarded);
-                        }
-                        const auto execute_stop = Clock::now();
-                        if (max_pool_pages <= 1) {
-                            accumulate_logical_counts_for_survivors(
-                                local.counts,
-                                runtime,
-                                setup.logical_records,
-                                logical_bits,
-                                scratch);
-                        } else {
-                            for (auto& page : page_pool) {
-                                accumulate_logical_counts_for_survivors(
-                                    local.counts,
-                                    page,
-                                    setup.logical_records,
-                                    logical_bits,
-                                    scratch);
-                            }
-                        }
-                        const auto accumulate_stop = Clock::now();
-                        local.counts.shots += static_cast<std::uint64_t>(pool);
-                        local.execute_s += seconds_between(execute_start, execute_stop);
-                        local.accumulate_s += seconds_between(execute_stop, accumulate_stop);
-                    }
-                    continue;
-                }
-
                 for (int chunk_local_offset = 0, local_block_index = 0;
                      chunk_local_offset < chunk_shots;
                      chunk_local_offset += result.block_shots, ++local_block_index) {
@@ -1069,17 +909,39 @@ BenchResult run_batch_sampler(const Options& options) {
                     const auto execute_start = Clock::now();
                     symft::reset_batch_executor(runtime, setup.program, block);
                     runtime.rng_state = block_seed(0x5eed1234ULL, repeat, block_index);
-                    symft::execute_batch_in_place(runtime, setup.program, samples, chunk_local_offset);
+                    if (options.postselect_detectors) {
+                        const auto postselection_result = symft::execute_batch_postselected_in_place(
+                            runtime,
+                            setup.program,
+                            samples,
+                            chunk_local_offset,
+                            setup.batch_postselection_plan,
+                            postselection_scratch,
+                            postselection_options);
+                        local.counts.discarded +=
+                            static_cast<std::uint64_t>(postselection_result.discarded);
+                    } else {
+                        symft::execute_batch_in_place(runtime, setup.program, samples, chunk_local_offset);
+                    }
                     const auto execute_stop = Clock::now();
-                    accumulate_block_counts(
-                        local.counts,
-                        runtime,
-                        block,
-                        setup.parsed.detectors,
-                        setup.logical_records,
-                        discard_bits,
-                        logical_bits,
-                        scratch);
+                    if (options.postselect_detectors) {
+                        accumulate_logical_counts_for_survivors(
+                            local.counts,
+                            runtime,
+                            setup.logical_records,
+                            logical_bits,
+                            scratch);
+                    } else {
+                        accumulate_block_counts(
+                            local.counts,
+                            runtime,
+                            block,
+                            setup.parsed.detectors,
+                            setup.logical_records,
+                            discard_bits,
+                            logical_bits,
+                            scratch);
+                    }
                     const auto accumulate_stop = Clock::now();
                     local.counts.shots += static_cast<std::uint64_t>(block);
                     local.execute_s += seconds_between(execute_start, execute_stop);
@@ -1107,7 +969,6 @@ BenchResult run_batch_sampler(const Options& options) {
             result.counts.discarded += worker.counts.discarded;
             result.counts.accepted += worker.counts.accepted;
             result.counts.logical_errors += worker.counts.logical_errors;
-            add_coalescing_stats(result.coalescing_stats, worker.coalescing_stats);
             presample_total += worker.presample_s;
             execute_total += worker.execute_s;
             accumulate_total += worker.accumulate_s;
@@ -1158,61 +1019,10 @@ void print_result(const BenchResult& result) {
     std::cout << "detector_postselection " << (result.detector_postselection ? "enabled" : "disabled") << "\n";
     if (result.sampler == "batch_postselected") {
         std::cout << "batch_postselection_mode combined\n";
-        std::cout << "batch_dense_over_dead_threshold_denominator "
-                  << result.batch_dense_over_dead_threshold_denominator << "\n";
+        std::cout << "batch_mask_threshold_denominator "
+                  << result.batch_mask_threshold_denominator << "\n";
         std::cout << "batch_tail_fill_threshold_denominator "
                   << result.batch_tail_fill_threshold_denominator << "\n";
-        std::cout << "batch_postselection_pool_shots "
-                  << result.batch_postselection_pool_shots << "\n";
-        std::cout << "batch_cross_page_coalescing_benefit_factor "
-                  << result.batch_cross_page_coalescing_benefit_factor << "\n";
-        if (result.coalescing_stats.checks != 0 ||
-            result.coalescing_stats.full_pages_executed != 0 ||
-            result.coalescing_stats.partial_pages_executed != 0) {
-            const auto& stats = result.coalescing_stats;
-            const double inv_checks = stats.checks == 0 ? 0.0 : 1.0 / static_cast<double>(stats.checks);
-            const double avg_partial_fill =
-                stats.partial_pages_executed == 0
-                    ? std::numeric_limits<double>::quiet_NaN()
-                    : static_cast<double>(stats.partial_page_live_lanes) /
-                          static_cast<double>(stats.partial_pages_executed);
-            std::cout << "batch_cross_page_coalescing_checks " << stats.checks << "\n";
-            std::cout << "batch_cross_page_coalescing_accepted " << stats.accepted << "\n";
-            std::cout << "batch_cross_page_coalescing_rejected_small_savings "
-                      << stats.rejected_small_savings << "\n";
-            std::cout << "batch_cross_page_coalescing_rejected_cost "
-                      << stats.rejected_cost << "\n";
-            std::cout << "batch_cross_page_coalescing_saved_pages "
-                      << stats.saved_pages << "\n";
-            std::cout << "batch_cross_page_coalescing_live_lanes "
-                      << stats.live_lanes << "\n";
-            std::cout << "batch_cross_page_coalescing_estimated_moved_lanes "
-                      << stats.moved_lanes << "\n";
-            std::cout << "batch_cross_page_coalescing_actual_moved_lanes "
-                      << stats.actual_moved_lanes << "\n";
-            std::cout << "batch_cross_page_coalescing_keep_basis_columns_sum "
-                      << stats.keep_basis_columns << "\n";
-            std::cout << "batch_cross_page_coalescing_future_page_basis_touches_sum "
-                      << stats.future_page_basis_touches << "\n";
-            std::cout << "batch_cross_page_coalescing_state_move_units "
-                      << stats.state_move_units << "\n";
-            std::cout << "batch_cross_page_coalescing_saved_page_units "
-                      << stats.saved_page_units << "\n";
-            std::cout << "batch_cross_page_coalescing_estimated_move_bytes "
-                      << stats.estimated_move_bytes << "\n";
-            std::cout << "batch_cross_page_coalescing_avg_old_nonempty_pages "
-                      << static_cast<double>(stats.old_nonempty_pages) * inv_checks << "\n";
-            std::cout << "batch_cross_page_coalescing_avg_new_pages_if_coalesced "
-                      << static_cast<double>(stats.new_pages_if_coalesced) * inv_checks << "\n";
-            std::cout << "batch_cross_page_coalescing_avg_moved_lanes "
-                      << static_cast<double>(stats.moved_lanes) * inv_checks << "\n";
-            std::cout << "batch_full_pages_executed " << stats.full_pages_executed << "\n";
-            std::cout << "batch_partial_pages_executed " << stats.partial_pages_executed << "\n";
-            std::cout << "batch_avg_partial_page_fill " << avg_partial_fill << "\n";
-            std::cout << "batch_page_pool_segment_execution_s " << stats.segment_execution_s << "\n";
-            std::cout << "batch_page_local_compaction_s " << stats.page_local_compaction_s << "\n";
-            std::cout << "batch_cross_page_coalescing_s " << stats.cross_page_coalescing_s << "\n";
-        }
     }
     std::cout << "exogenous_mode " << result.exogenous_mode << "\n";
     std::cout << "rng_streams " << result.rng_streams << "\n";

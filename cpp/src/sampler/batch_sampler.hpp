@@ -11,19 +11,11 @@ namespace symft {
 struct PresampledExogenous;
 struct PackedPresampledExogenous;
 
-struct BatchPostselectionBoundaryPlan {
-    std::size_t instruction_index = 0;
-    std::uint64_t future_page_basis_touches = 0;
-    std::vector<int> transfer_conditions;
-    std::vector<int> transfer_records;
-};
-
 struct BatchDetectorPostselectionPlan {
     std::vector<int> instruction_records_by_index;
     std::vector<std::vector<std::vector<int>>> detectors_by_record;
     std::vector<int> condition_last_use_by_index;
     std::vector<int> record_last_use_by_index;
-    std::vector<BatchPostselectionBoundaryPlan> boundary_plans;
 };
 
 struct BatchDetectorPostselectionScratch {
@@ -42,35 +34,9 @@ struct BatchDetectorPostselectionResult {
     int accepted = 0;
 };
 
-struct BatchPostselectionCoalescingStats {
-    std::uint64_t checks = 0;
-    std::uint64_t accepted = 0;
-    std::uint64_t rejected_small_savings = 0;
-    std::uint64_t rejected_cost = 0;
-    std::uint64_t old_nonempty_pages = 0;
-    std::uint64_t new_pages_if_coalesced = 0;
-    std::uint64_t saved_pages = 0;
-    std::uint64_t live_lanes = 0;
-    std::uint64_t moved_lanes = 0;
-    std::uint64_t actual_moved_lanes = 0;
-    std::uint64_t keep_basis_columns = 0;
-    std::uint64_t future_page_basis_touches = 0;
-    std::uint64_t state_move_units = 0;
-    std::uint64_t saved_page_units = 0;
-    std::uint64_t estimated_move_bytes = 0;
-    std::uint64_t full_pages_executed = 0;
-    std::uint64_t partial_pages_executed = 0;
-    std::uint64_t partial_page_live_lanes = 0;
-    double segment_execution_s = 0.0;
-    double page_local_compaction_s = 0.0;
-    double cross_page_coalescing_s = 0.0;
-};
-
 struct BatchDetectorPostselectionOptions {
-    int dense_over_dead_max_fraction_denominator = 4;
+    int dense_over_dead_max_fraction_denominator = 2;
     int unordered_tail_fill_max_dead_fraction_denominator = 5;
-    int cross_page_coalescing_benefit_factor = 8;
-    BatchPostselectionCoalescingStats* coalescing_stats = nullptr;
 };
 
 // Active storage is a Julia-column-major equivalent SoA layout:
@@ -121,9 +87,6 @@ void execute_batch_in_place(
 void prepare_batch_detector_postselection_scratch(
     BatchDetectorPostselectionScratch& scratch,
     const BatchFactoredExecutorState& runtime);
-void prepare_batch_detector_postselection_boundaries(
-    BatchDetectorPostselectionPlan& postselection,
-    const FactoredInstructionProgram& program);
 BatchDetectorPostselectionResult execute_batch_postselected_in_place(
     BatchFactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
@@ -138,12 +101,6 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
     int first_sample_shot,
     const BatchDetectorPostselectionPlan& postselection,
     BatchDetectorPostselectionScratch& scratch,
-    BatchDetectorPostselectionOptions options = {});
-BatchDetectorPostselectionResult execute_batch_postselected_page_pool_in_place(
-    std::vector<BatchFactoredExecutorState>& pages,
-    const FactoredInstructionProgram& program,
-    const BatchDetectorPostselectionPlan& postselection,
-    std::vector<BatchDetectorPostselectionScratch>& scratches,
     BatchDetectorPostselectionOptions options = {});
 const char* active_batch_backend();
 std::vector<std::vector<std::uint64_t>> sample_measurements_batch(
