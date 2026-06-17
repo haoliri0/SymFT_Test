@@ -1012,17 +1012,6 @@ void accumulate_single_counts(
     }
 }
 
-bool any_detector_fires(
-    const std::vector<std::uint64_t>& measurement_words,
-    const std::vector<std::vector<int>>& detectors) {
-    for (const auto& records : detectors) {
-        if (record_parity(measurement_words, records)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 struct RateBenchSetup {
     symft::StimParseResult parsed;
     symft::FactoredInstructionProgram program;
@@ -1096,6 +1085,10 @@ BenchResult run_single_sampler(const Options& options) {
     result.observable_includes = static_cast<int>(setup.parsed.observables.size());
     result.block_shots = setup.block_shots;
     result.sample_chunk_shots = setup.sample_chunk_shots;
+    const symft::DetectorPostselectionPlan postselection_plan{
+        setup.instruction_records_by_index,
+        setup.postselection_detectors_by_record,
+    };
 
     double presample_total = 0.0;
     double execute_total = 0.0;
@@ -1130,35 +1123,36 @@ BenchResult run_single_sampler(const Options& options) {
             for (int shot = 0; shot < block; ++shot) {
                 const auto execute_start = Clock::now();
                 symft::reset_executor(runtime, setup.program);
-                bool discarded = false;
                 if (options.postselect_detectors) {
-                    symft::assign_presampled_exogenous_in_place(runtime, samples, shot);
-                    for (std::size_t idx = 0; idx < setup.program.instructions.size(); ++idx) {
-                        symft::execute_instruction_in_place(runtime, setup.program.instructions[idx]);
-                        const int record = setup.instruction_records_by_index[idx];
-                        if (record <= 0 || record >= static_cast<int>(setup.postselection_detectors_by_record.size())) {
-                            continue;
-                        }
-                        if (any_detector_fires(
-                                runtime.measurement_words,
-                                setup.postselection_detectors_by_record[static_cast<std::size_t>(record)])) {
-                            discarded = true;
-                            break;
-                        }
+                    const bool survived = symft::execute_postselected_in_place(
+                        runtime,
+                        setup.program,
+                        samples,
+                        shot,
+                        postselection_plan);
+                    const auto execute_stop = Clock::now();
+                    if (!survived) {
+                        ++counts.discarded;
+                    } else {
+                        accumulate_single_counts(
+                            counts,
+                            runtime.measurement_words,
+                            setup.parsed.detectors,
+                            setup.logical_records);
                     }
+                    const auto accumulate_stop = Clock::now();
+                    execute_total += seconds_between(execute_start, execute_stop);
+                    accumulate_total += seconds_between(execute_stop, accumulate_stop);
+                    continue;
                 } else {
                     symft::execute_in_place(runtime, setup.program, samples, shot);
                 }
                 const auto execute_stop = Clock::now();
-                if (discarded) {
-                    ++counts.discarded;
-                } else {
-                    accumulate_single_counts(
-                        counts,
-                        runtime.measurement_words,
-                        setup.parsed.detectors,
-                        setup.logical_records);
-                }
+                accumulate_single_counts(
+                    counts,
+                    runtime.measurement_words,
+                    setup.parsed.detectors,
+                    setup.logical_records);
                 const auto accumulate_stop = Clock::now();
                 execute_total += seconds_between(execute_start, execute_stop);
                 accumulate_total += seconds_between(execute_stop, accumulate_stop);

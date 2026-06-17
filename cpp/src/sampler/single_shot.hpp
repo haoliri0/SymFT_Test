@@ -9,6 +9,11 @@ namespace symft {
 
 struct PresampledExogenous;
 
+struct DetectorPostselectionPlan {
+    std::vector<int> instruction_records_by_index;
+    std::vector<std::vector<std::vector<int>>> detectors_by_record;
+};
+
 struct FactoredExecutorState {
     int n = 0;
     int k = 0;
@@ -44,4 +49,10 @@ void assign_presampled_exogenous_in_place(
 void execute_instruction_in_place(
     FactoredExecutorState& runtime,
     const FactoredInstruction& instruction);
+bool execute_postselected_in_place(
+    FactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    const PresampledExogenous& samples,
+    int shot_index,
+    const DetectorPostselectionPlan& postselection);
 } // namespace symft

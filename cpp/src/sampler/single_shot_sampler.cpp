@@ -688,6 +688,30 @@ void execute_instruction(FactoredExecutorState& runtime, const IntroduceDormantM
     write_measurement_record(runtime, instruction.record, outcome, instruction.record_condition);
 }
 
+bool record_parity_from_measurements(
+    const std::vector<std::uint64_t>& measurement_words,
+    const std::vector<int>& records) {
+    bool parity = false;
+    for (int record : records) {
+        if (record <= 0) {
+            fail("record ids must be positive");
+        }
+        parity ^= packed_bit(measurement_words, record - 1);
+    }
+    return parity;
+}
+
+bool any_postselected_detector_fires(
+    const std::vector<std::uint64_t>& measurement_words,
+    const std::vector<std::vector<int>>& detectors) {
+    for (const auto& records : detectors) {
+        if (record_parity_from_measurements(measurement_words, records)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 FactoredExecutorState::FactoredExecutorState(const FactoredInstructionProgram& program, std::uint64_t seed)
@@ -775,6 +799,34 @@ void execute_instruction_in_place(
     FactoredExecutorState& runtime,
     const FactoredInstruction& instruction) {
     std::visit([&](const auto& inst) { execute_instruction(runtime, inst); }, instruction);
+}
+
+bool execute_postselected_in_place(
+    FactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    const PresampledExogenous& samples,
+    int shot_index,
+    const DetectorPostselectionPlan& postselection) {
+    if (runtime.n != program.n || runtime.k + runtime.ndormant != runtime.n) {
+        fail("executor state does not match program");
+    }
+    if (postselection.instruction_records_by_index.size() != program.instructions.size()) {
+        fail("postselection instruction record table does not match program");
+    }
+    assign_presampled_exogenous(runtime, samples, shot_index);
+    for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+        std::visit([&](const auto& inst) { execute_instruction(runtime, inst); }, program.instructions[idx]);
+        const int record = postselection.instruction_records_by_index[idx];
+        if (record <= 0 || record >= static_cast<int>(postselection.detectors_by_record.size())) {
+            continue;
+        }
+        if (any_postselected_detector_fires(
+                runtime.measurement_words,
+                postselection.detectors_by_record[static_cast<std::size_t>(record)])) {
+            return false;
+        }
+    }
+    return true;
 }
 
 std::vector<std::uint64_t> execute(FactoredExecutorState& runtime, const FactoredInstructionProgram& program) {
