@@ -24,6 +24,7 @@ struct BatchDetectorPostselectionScratch {
     std::vector<std::uint64_t> keep_bits;
     std::vector<std::uint64_t> scratch;
     std::vector<std::uint64_t> compact_scratch;
+    std::vector<int> live_sources;
 };
 
 struct BatchDetectorPostselectionResult {
@@ -38,7 +39,8 @@ struct BatchDetectorPostselectionOptions {
 
 // Active storage is a Julia-column-major equivalent SoA layout:
 // active_re[basis * batches + shot] and active_im[basis * batches + shot].
-// Thus shots are contiguous for each active basis column.
+// Here batches is the fixed shot pitch/capacity. active_shots is only the
+// current dense live prefix length; it is never used as the active column pitch.
 struct BatchFactoredExecutorState {
     int n = 0;
     int k = 0;

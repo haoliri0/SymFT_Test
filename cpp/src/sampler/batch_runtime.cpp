@@ -262,56 +262,59 @@ void compact_live_symbol_columns(
     }
 }
 
-void compact_active_columns(
-    BatchFactoredExecutorState& runtime,
+void collect_live_sources(
+    std::vector<int>& live_sources,
     int old_shots,
     int survivor_count,
     const std::vector<std::uint64_t>& keep_bits) {
-    const std::size_t dim = active_length(runtime.k);
+    live_sources.resize(static_cast<std::size_t>(survivor_count));
+    int dest = 0;
     if (old_shots <= 64) {
         const std::uint64_t keep_mask = keep_bits.empty() ? 0 : keep_bits[0] & live_word_mask_for_shots(old_shots, 0);
-        for (std::size_t basis = 0; basis < dim; ++basis) {
-            const std::size_t base = basis * static_cast<std::size_t>(runtime.batches);
-            int dest = 0;
-            for (int src = 0; src < old_shots; ++src) {
-                if ((keep_mask & (std::uint64_t{1} << src)) == 0) {
-                    continue;
-                }
-                if (dest != src) {
-                    runtime.active_re[base + static_cast<std::size_t>(dest)] =
-                        runtime.active_re[base + static_cast<std::size_t>(src)];
-                    runtime.active_im[base + static_cast<std::size_t>(dest)] =
-                        runtime.active_im[base + static_cast<std::size_t>(src)];
-                }
-                ++dest;
-            }
-            if (dest != survivor_count) {
-                fail("internal active compaction count mismatch");
+        for (int src = 0; src < old_shots; ++src) {
+            if ((keep_mask & (std::uint64_t{1} << src)) != 0) {
+                live_sources[static_cast<std::size_t>(dest++)] = src;
             }
         }
-        return;
-    }
-    const std::size_t nwords = batch_word_count(old_shots);
-    for (std::size_t basis = 0; basis < dim; ++basis) {
-        const std::size_t base = basis * static_cast<std::size_t>(runtime.batches);
-        int dest = 0;
+    } else {
+        const std::size_t nwords = batch_word_count(old_shots);
         for (std::size_t word = 0; word < nwords; ++word) {
             std::uint64_t mask = keep_bits[word] & live_word_mask_for_shots(old_shots, word);
             while (mask != 0) {
                 const int bit = trailing_zeros64(mask);
-                const int src = static_cast<int>(word << 6) + bit;
-                if (dest != src) {
-                    runtime.active_re[base + static_cast<std::size_t>(dest)] =
-                        runtime.active_re[base + static_cast<std::size_t>(src)];
-                    runtime.active_im[base + static_cast<std::size_t>(dest)] =
-                        runtime.active_im[base + static_cast<std::size_t>(src)];
-                }
-                ++dest;
+                live_sources[static_cast<std::size_t>(dest++)] = static_cast<int>(word << 6) + bit;
                 mask &= mask - 1;
             }
         }
-        if (dest != survivor_count) {
-            fail("internal active compaction count mismatch");
+    }
+    if (dest != survivor_count) {
+        fail("internal live source compaction count mismatch");
+    }
+}
+
+void compact_active_columns(
+    BatchFactoredExecutorState& runtime,
+    int survivor_count,
+    const std::vector<int>& live_sources) {
+    int first_moved = 0;
+    while (first_moved < survivor_count &&
+           live_sources[static_cast<std::size_t>(first_moved)] == first_moved) {
+        ++first_moved;
+    }
+    if (first_moved == survivor_count) {
+        return;
+    }
+
+    const std::size_t pitch = static_cast<std::size_t>(runtime.batches);
+    const std::size_t dim = active_length(runtime.k);
+    for (std::size_t basis = 0; basis < dim; ++basis) {
+        const std::size_t base = basis * pitch;
+        for (int dst = first_moved; dst < survivor_count; ++dst) {
+            const int src = live_sources[static_cast<std::size_t>(dst)];
+            runtime.active_re[base + static_cast<std::size_t>(dst)] =
+                runtime.active_re[base + static_cast<std::size_t>(src)];
+            runtime.active_im[base + static_cast<std::size_t>(dst)] =
+                runtime.active_im[base + static_cast<std::size_t>(src)];
         }
     }
 }
@@ -323,13 +326,15 @@ void compact_surviving_shots(
     const std::vector<int>& record_last_use,
     int instruction_index,
     bool include_current_record_use,
-    std::vector<std::uint64_t>& scratch) {
+    std::vector<std::uint64_t>& scratch,
+    std::vector<int>& live_sources) {
     const int old_shots = runtime.active_shots;
     const int survivor_count = count_live_bits(keep_bits, old_shots);
     if (survivor_count == old_shots) {
         return;
     }
-    compact_active_columns(runtime, old_shots, survivor_count, keep_bits);
+    collect_live_sources(live_sources, old_shots, survivor_count, keep_bits);
+    compact_active_columns(runtime, survivor_count, live_sources);
     compact_live_symbol_columns(
         runtime.value_words,
         condition_last_use,
@@ -361,6 +366,7 @@ void compact_dead_shots_if_needed(
     int instruction_index,
     bool include_current_record_use,
     std::vector<std::uint64_t>& compact_scratch,
+    std::vector<int>& live_sources,
     bool force) {
     if (runtime.active_shots == 0) {
         return;
@@ -384,7 +390,8 @@ void compact_dead_shots_if_needed(
         record_last_use,
         instruction_index,
         include_current_record_use,
-        compact_scratch);
+        compact_scratch,
+        live_sources);
     std::fill(dead_bits.begin(), dead_bits.end(), 0);
 }
 
@@ -430,6 +437,7 @@ int apply_postselection_checks_for_record(
         instruction_index,
         false,
         scratch.compact_scratch,
+        scratch.live_sources,
         compact_after_detector);
     return discarded_now;
 }
@@ -766,6 +774,9 @@ void prepare_batch_detector_postselection_scratch(
     ensure_word_scratch(scratch.keep_bits, nwords);
     ensure_word_scratch(scratch.scratch, nwords);
     ensure_word_scratch(scratch.compact_scratch, nwords);
+    if (scratch.live_sources.capacity() < static_cast<std::size_t>(runtime.batches)) {
+        scratch.live_sources.reserve(static_cast<std::size_t>(runtime.batches));
+    }
 }
 
 BatchDetectorPostselectionResult execute_batch_postselected_in_place(
@@ -822,6 +833,7 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
                 static_cast<int>(idx),
                 false,
                 scratch.compact_scratch,
+                scratch.live_sources,
                 true);
             if (runtime.active_shots > options.single_shot_fallback_threshold) {
                 continue;
@@ -846,6 +858,7 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
         static_cast<int>(program.instructions.size()),
         true,
         scratch.compact_scratch,
+        scratch.live_sources,
         true);
     return {discarded, runtime.active_shots};
 }
@@ -905,6 +918,7 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
                 static_cast<int>(idx),
                 false,
                 scratch.compact_scratch,
+                scratch.live_sources,
                 true);
             if (runtime.active_shots > options.single_shot_fallback_threshold) {
                 continue;
@@ -929,6 +943,7 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
         static_cast<int>(program.instructions.size()),
         true,
         scratch.compact_scratch,
+        scratch.live_sources,
         true);
     return {discarded, runtime.active_shots};
 }
