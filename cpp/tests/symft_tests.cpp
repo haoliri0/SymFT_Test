@@ -388,6 +388,32 @@ void test_batch_postselection() {
         require(runtime.active_shots == 8, "batch postselection keeps active shots");
         require(runtime.measurement_words[0] == 0, "batch postselection keeps quiet measurement records");
     }
+    {
+        const auto parsed = parse_stim_text("X_ERROR(0.5) 0\nM 0\nDETECTOR rec[-1]\nM !1\n");
+        PendingFactoredState pending(parsed.state);
+        const auto program = plan_factored_updates(pending);
+        const auto samples = presample_exogenous(program, 8, 31);
+        BatchDetectorPostselectionScratch default_scratch;
+        BatchFactoredExecutorState default_runtime(program, 8, 37);
+        const auto default_result = execute_batch_postselected_in_place(
+            default_runtime,
+            program,
+            samples,
+            single_detector_plan(program, 1),
+            default_scratch);
+        BatchDetectorPostselectionScratch hybrid_scratch;
+        BatchFactoredExecutorState hybrid_runtime(program, 8, 37);
+        const auto hybrid_result = execute_batch_postselected_in_place(
+            hybrid_runtime,
+            program,
+            samples,
+            single_detector_plan(program, 1),
+            hybrid_scratch,
+            BatchDetectorPostselectionOptions{false, 8});
+        require(default_result.discarded == hybrid_result.discarded, "hybrid postselection discarded count");
+        require(default_result.accepted == hybrid_result.accepted, "hybrid postselection accepted count");
+        require(default_runtime.measurement_words == hybrid_runtime.measurement_words, "hybrid postselection records");
+    }
 }
 
 void test_detectors() {

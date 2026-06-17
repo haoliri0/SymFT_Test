@@ -31,6 +31,11 @@ struct BatchDetectorPostselectionResult {
     int accepted = 0;
 };
 
+struct BatchDetectorPostselectionOptions {
+    bool compact_after_detector = false;
+    int single_shot_fallback_threshold = 0;
+};
+
 // Active storage is a Julia-column-major equivalent SoA layout:
 // active_re[basis * batches + shot] and active_im[basis * batches + shot].
 // Thus shots are contiguous for each active basis column.
@@ -83,14 +88,16 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
     const FactoredInstructionProgram& program,
     const PresampledExogenous& samples,
     const BatchDetectorPostselectionPlan& postselection,
-    BatchDetectorPostselectionScratch& scratch);
+    BatchDetectorPostselectionScratch& scratch,
+    BatchDetectorPostselectionOptions options = {});
 BatchDetectorPostselectionResult execute_batch_postselected_in_place(
     BatchFactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
     const PackedPresampledExogenous& samples,
     int first_sample_shot,
     const BatchDetectorPostselectionPlan& postselection,
-    BatchDetectorPostselectionScratch& scratch);
+    BatchDetectorPostselectionScratch& scratch,
+    BatchDetectorPostselectionOptions options = {});
 const char* active_batch_backend();
 std::vector<std::vector<std::uint64_t>> sample_measurements_batch(
     const FactoredInstructionProgram& program,
