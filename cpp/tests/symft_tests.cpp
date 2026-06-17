@@ -252,6 +252,21 @@ void test_presampled_exogenous() {
         execute_in_place(runtime, program, samples, shot);
         require(packed_bit(runtime.measurement_words, 0), "presampled deterministic X error");
     }
+
+    SingleShotPresampledExpressionPlan expression_plan;
+    prepare_single_shot_presampled_expression_plan(expression_plan, program, samples);
+    for (int shot = 0; shot < samples.nshots; ++shot) {
+        reset_executor(runtime, program);
+        execute_in_place(runtime, program, samples, expression_plan, shot);
+        require(packed_bit(runtime.measurement_words, 0), "direct presampled expression deterministic X error");
+    }
+    SingleShotPresampledExpressionBlock expression_block;
+    evaluate_single_shot_presampled_expression_block(expression_block, expression_plan, samples);
+    for (int shot = 0; shot < samples.nshots; ++shot) {
+        reset_executor(runtime, program);
+        execute_in_place(runtime, program, expression_plan, expression_block, shot);
+        require(packed_bit(runtime.measurement_words, 0), "presampled expression deterministic X error");
+    }
 }
 
 void test_batch_sampler() {
