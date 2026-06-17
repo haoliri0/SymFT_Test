@@ -22,6 +22,8 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+constexpr int kDefaultPackedSampleChunkShots = 1 << 10;
+
 struct RateCounts {
     std::uint64_t shots = 0;
     std::uint64_t discarded = 0;
@@ -85,6 +87,13 @@ std::uint64_t parse_u64(const char* raw, const char* name) {
         throw std::runtime_error(std::string("invalid ") + name + ": " + raw);
     }
     return static_cast<std::uint64_t>(value);
+}
+
+std::uint64_t ceil_div_u64(std::uint64_t numerator, std::uint64_t denominator) {
+    if (denominator == 0) {
+        throw std::runtime_error("division by zero in chunk sizing");
+    }
+    return numerator / denominator + (numerator % denominator != 0 ? 1 : 0);
 }
 
 int parse_positive_int(const char* raw, const char* name) {
@@ -175,7 +184,7 @@ void print_usage(const char* argv0) {
         << "  --shots N                         Number of shots\n"
         << "  --sampler single|batch|both       Sampler to benchmark; default: batch\n"
         << "  --batch-size N|auto               Batch size; --block-shots is accepted as an alias\n"
-        << "  --sample-chunk-size N|auto        Presample requested shots in reusable chunks; default: batch size\n"
+        << "  --sample-chunk-size N|auto        Presample requested shots in reusable chunks; default: 1024 for packed single, batch size for batch\n"
         << "  --repeats N                       Number of repeats\n"
         << "  --observable N                    Observable index\n"
         << "  --threads N|auto                  Parallel worker threads over independent batches\n"
@@ -638,6 +647,7 @@ struct RateBenchSetup {
 
 RateBenchSetup build_rate_bench_setup(
     const Options& options,
+    bool packed_streaming,
     double& parse_s,
     double& plan_s) {
     const auto parse_start = Clock::now();
@@ -653,8 +663,8 @@ RateBenchSetup build_rate_bench_setup(
     setup.block_shots = options.block_shots > 0 ? options.block_shots : symft::default_batch_count(program.max_k);
     setup.sample_chunk_shots =
         options.sample_chunk_shots > 0
-            ? std::max(options.sample_chunk_shots, setup.block_shots)
-            : setup.block_shots;
+            ? options.sample_chunk_shots
+            : (packed_streaming ? kDefaultPackedSampleChunkShots : setup.block_shots);
     setup.logical_records = logical_records_for_observable(parsed.observables, options.observable);
     setup.postselection_detectors_by_record = detectors_by_max_record(parsed.detectors, program.nrecords);
     setup.instruction_records_by_index = instruction_records(program);
@@ -698,7 +708,7 @@ BenchResult run_single_sampler(const Options& options) {
 
     double parse_total = 0.0;
     double plan_total = 0.0;
-    const auto setup = build_rate_bench_setup(options, parse_total, plan_total);
+    const auto setup = build_rate_bench_setup(options, true, parse_total, plan_total);
     result.n = setup.parsed.state.n;
     result.records = setup.program.nrecords;
     result.max_k = setup.program.max_k;
@@ -713,9 +723,9 @@ BenchResult run_single_sampler(const Options& options) {
     double sample_wall_total = 0.0;
 
     for (int repeat = 0; repeat < options.repeats; ++repeat) {
-        const std::uint64_t nblocks =
-            (options.shots + static_cast<std::uint64_t>(result.block_shots) - 1) /
-            static_cast<std::uint64_t>(result.block_shots);
+        const std::uint64_t nchunks = ceil_div_u64(
+            options.shots,
+            static_cast<std::uint64_t>(result.sample_chunk_shots));
         symft::FactoredExecutorState runtime(setup.program, block_seed(0x5eed1234ULL, repeat, 0));
         symft::PackedPresampledExogenous packed_samples;
         symft::SingleShotPresampledExpressionPlan packed_expression_plan;
@@ -728,26 +738,26 @@ BenchResult run_single_sampler(const Options& options) {
 
         const auto sample_wall_start = Clock::now();
         RateCounts counts;
-        for (std::uint64_t block_index = 0; block_index < nblocks; ++block_index) {
-            const std::uint64_t offset = block_index * static_cast<std::uint64_t>(result.block_shots);
-            const int block = static_cast<int>(std::min<std::uint64_t>(
-                static_cast<std::uint64_t>(result.block_shots),
+        for (std::uint64_t chunk_index = 0; chunk_index < nchunks; ++chunk_index) {
+            const std::uint64_t offset = chunk_index * static_cast<std::uint64_t>(result.sample_chunk_shots);
+            const int chunk = static_cast<int>(std::min<std::uint64_t>(
+                static_cast<std::uint64_t>(result.sample_chunk_shots),
                 options.shots - offset));
 
             const auto presample_start = Clock::now();
             symft::resample_prepared_exogenous_packed_in_place(
                 packed_samples,
                 setup.program,
-                block,
-                block_seed(0x7eed0000ULL, repeat, block_index));
+                chunk,
+                block_seed(0x7eed0000ULL, repeat, chunk_index));
             symft::evaluate_single_shot_presampled_expression_block(
                 packed_expression_block,
                 packed_expression_plan,
                 packed_samples);
             const auto presample_stop = Clock::now();
 
-            runtime.rng_state = block_seed(0x5eed1234ULL, repeat, block_index);
-            for (int shot = 0; shot < block; ++shot) {
+            runtime.rng_state = block_seed(0x5eed1234ULL, repeat, chunk_index);
+            for (int shot = 0; shot < chunk; ++shot) {
                 const auto execute_start = Clock::now();
                 symft::reset_executor(runtime, setup.program);
                 if (options.postselect_detectors) {
@@ -790,7 +800,7 @@ BenchResult run_single_sampler(const Options& options) {
                 execute_total += seconds_between(execute_start, execute_stop);
                 accumulate_total += seconds_between(execute_stop, accumulate_stop);
             }
-            counts.shots += static_cast<std::uint64_t>(block);
+            counts.shots += static_cast<std::uint64_t>(chunk);
             presample_total += seconds_between(presample_start, presample_stop);
         }
         const auto sample_wall_stop = Clock::now();
@@ -825,7 +835,7 @@ BenchResult run_batch_sampler(const Options& options) {
 
     double parse_total = 0.0;
     double plan_total = 0.0;
-    const auto setup = build_rate_bench_setup(options, parse_total, plan_total);
+    const auto setup = build_rate_bench_setup(options, false, parse_total, plan_total);
     result.n = setup.parsed.state.n;
     result.records = setup.program.nrecords;
     result.max_k = setup.program.max_k;
@@ -838,13 +848,12 @@ BenchResult run_batch_sampler(const Options& options) {
     double execute_total = 0.0;
     double accumulate_total = 0.0;
     double sample_wall_total = 0.0;
-    const std::uint64_t nchunks =
-        (options.shots + static_cast<std::uint64_t>(result.sample_chunk_shots) - 1) /
-        static_cast<std::uint64_t>(result.sample_chunk_shots);
-    const std::uint64_t blocks_per_chunk =
-        (static_cast<std::uint64_t>(result.sample_chunk_shots) +
-         static_cast<std::uint64_t>(result.block_shots) - 1) /
-        static_cast<std::uint64_t>(result.block_shots);
+    const std::uint64_t nchunks = ceil_div_u64(
+        options.shots,
+        static_cast<std::uint64_t>(result.sample_chunk_shots));
+    const std::uint64_t blocks_per_chunk = ceil_div_u64(
+        static_cast<std::uint64_t>(result.sample_chunk_shots),
+        static_cast<std::uint64_t>(result.block_shots));
     const int active_threads = std::min<int>(
         options.threads,
         static_cast<int>(std::max<std::uint64_t>(1, nchunks)));
