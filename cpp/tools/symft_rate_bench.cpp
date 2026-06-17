@@ -283,22 +283,15 @@ Options parse_options(int argc, char** argv) {
         } else if (name == "--threads") {
             const std::string raw = require_option_value(name, value, idx, argc, argv);
             options.threads = parse_threads(raw.c_str());
-        } else if (name == "--postselect-detectors" || name == "--detector-postselection") {
+        } else if (name == "--postselect-detectors") {
             options.postselect_detectors = value.empty() ? true : parse_bool_flag(value.c_str(), "postselect_detectors");
         } else if (name == "--no-postselect-detectors") {
             options.postselect_detectors = false;
-        } else if (
-            name == "--batch-dense-over-dead-threshold-denominator" ||
-            name == "--dense-over-dead-threshold-denominator" ||
-            name == "--batch-mask-threshold-denominator" ||
-            name == "--mask-threshold-denominator") {
+        } else if (name == "--batch-mask-threshold-denominator") {
             const std::string raw = require_option_value(name, value, idx, argc, argv);
             options.batch_mask_threshold_denominator =
                 parse_positive_int(raw.c_str(), "batch_mask_threshold_denominator");
-        } else if (
-            name == "--batch-tail-fill-threshold-denominator" ||
-            name == "--tail-fill-threshold-denominator" ||
-            name == "--batch-unordered-tail-fill-threshold-denominator") {
+        } else if (name == "--batch-tail-fill-threshold-denominator") {
             const std::string raw = require_option_value(name, value, idx, argc, argv);
             options.batch_tail_fill_threshold_denominator =
                 parse_nonnegative_int(raw.c_str(), "batch_tail_fill_threshold_denominator");
@@ -311,7 +304,7 @@ Options parse_options(int argc, char** argv) {
 
 symft::BatchDetectorPostselectionOptions batch_postselection_options(const Options& options) {
     symft::BatchDetectorPostselectionOptions out;
-    out.dense_over_dead_max_fraction_denominator = options.batch_mask_threshold_denominator;
+    out.mask_dead_shots_min_fraction_denominator = options.batch_mask_threshold_denominator;
     out.unordered_tail_fill_max_dead_fraction_denominator = options.batch_tail_fill_threshold_denominator;
     return out;
 }

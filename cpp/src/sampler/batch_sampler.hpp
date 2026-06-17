@@ -35,7 +35,7 @@ struct BatchDetectorPostselectionResult {
 };
 
 struct BatchDetectorPostselectionOptions {
-    int dense_over_dead_max_fraction_denominator = 2;
+    int mask_dead_shots_min_fraction_denominator = 2;
     int unordered_tail_fill_max_dead_fraction_denominator = 5;
 };
 

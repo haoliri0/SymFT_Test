@@ -418,13 +418,13 @@ void test_batch_postselection() {
             single_detector_plan(program, 1),
             alternate_scratch,
             BatchDetectorPostselectionOptions{1});
-        require(default_result.discarded > 0, "dense-over-dead postselection test kills at least one lane");
-        require(default_result.discarded * 4 < 64, "dense-over-dead postselection keeps a dirty active prefix");
-        require(default_result.discarded == alternate_result.discarded, "dense-over-dead postselection discarded count");
-        require(default_result.accepted == alternate_result.accepted, "dense-over-dead postselection accepted count");
+        require(default_result.discarded > 0, "mask-threshold postselection test kills at least one lane");
+        require(default_result.discarded * 4 < 64, "mask-threshold postselection keeps a dirty active prefix");
+        require(default_result.discarded == alternate_result.discarded, "mask-threshold postselection discarded count");
+        require(default_result.accepted == alternate_result.accepted, "mask-threshold postselection accepted count");
         require(
             default_runtime.measurement_words == alternate_runtime.measurement_words,
-            "dense-over-dead postselection records");
+            "mask-threshold postselection records");
     }
 }
 

@@ -143,7 +143,7 @@ bool should_compact_dead_before_instruction(
     if (!instruction_is_pure_over_dead(instruction)) {
         return true;
     }
-    const int denominator = std::max(1, options.dense_over_dead_max_fraction_denominator);
+    const int denominator = std::max(1, options.mask_dead_shots_min_fraction_denominator);
     return scratch.dead_count * denominator >= runtime.active_shots;
 }
 
@@ -664,6 +664,72 @@ void validate_batch_postselection_plan(
     }
 }
 
+template <typename AssignSamples>
+BatchDetectorPostselectionResult execute_batch_postselected_with_assignment(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    const BatchDetectorPostselectionPlan& postselection,
+    BatchDetectorPostselectionScratch& scratch,
+    BatchDetectorPostselectionOptions options,
+    AssignSamples assign_samples) {
+    if (runtime.n != program.n || runtime.k + runtime.ndormant != runtime.n) {
+        fail("batch executor state does not match program");
+    }
+    validate_batch_postselection_plan(program, postselection);
+    prepare_batch_detector_postselection_scratch(scratch, runtime);
+    std::fill(scratch.dead_bits.begin(), scratch.dead_bits.end(), 0);
+    scratch.dead_count = 0;
+    if (runtime.active_shots == 0) {
+        return {};
+    }
+
+    int discarded = 0;
+    assign_samples();
+    for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+        if (runtime.active_shots == 0) {
+            break;
+        }
+        if (should_compact_dead_before_instruction(runtime, scratch, options, program.instructions[idx])) {
+            compact_dead_shots_if_needed(
+                runtime,
+                scratch,
+                postselection.condition_last_use_by_index,
+                postselection.record_last_use_by_index,
+                static_cast<int>(idx) - 1,
+                false,
+                options,
+                true);
+            if (runtime.active_shots == 0) {
+                break;
+            }
+        }
+        execute_batch_instruction(runtime, program.instructions[idx]);
+        const int record = postselection.instruction_records_by_index[idx];
+        if (record <= 0) {
+            continue;
+        }
+        if (record >= static_cast<int>(postselection.detectors_by_record.size())) {
+            fail("batch postselection instruction record table references an out-of-range record");
+        }
+        const auto& detectors = postselection.detectors_by_record[static_cast<std::size_t>(record)];
+        const int discarded_now = apply_postselection_checks_for_record(
+            runtime,
+            detectors,
+            scratch);
+        discarded += discarded_now;
+    }
+    compact_dead_shots_if_needed(
+        runtime,
+        scratch,
+        postselection.condition_last_use_by_index,
+        postselection.record_last_use_by_index,
+        static_cast<int>(program.instructions.size()),
+        true,
+        options,
+        true);
+    return {discarded, runtime.active_shots};
+}
+
 } // namespace
 
 
@@ -845,62 +911,13 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
     const BatchDetectorPostselectionPlan& postselection,
     BatchDetectorPostselectionScratch& scratch,
     BatchDetectorPostselectionOptions options) {
-    if (runtime.n != program.n || runtime.k + runtime.ndormant != runtime.n) {
-        fail("batch executor state does not match program");
-    }
-    validate_batch_postselection_plan(program, postselection);
-    prepare_batch_detector_postselection_scratch(scratch, runtime);
-    std::fill(scratch.dead_bits.begin(), scratch.dead_bits.end(), 0);
-    scratch.dead_count = 0;
-    if (runtime.active_shots == 0) {
-        return {};
-    }
-
-    int discarded = 0;
-    assign_presampled_exogenous_batch(runtime, samples);
-    for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
-        if (runtime.active_shots == 0) {
-            break;
-        }
-        if (should_compact_dead_before_instruction(runtime, scratch, options, program.instructions[idx])) {
-            compact_dead_shots_if_needed(
-                runtime,
-                scratch,
-                postselection.condition_last_use_by_index,
-                postselection.record_last_use_by_index,
-                static_cast<int>(idx) - 1,
-                false,
-                options,
-                true);
-            if (runtime.active_shots == 0) {
-                break;
-            }
-        }
-        execute_batch_instruction(runtime, program.instructions[idx]);
-        const int record = postselection.instruction_records_by_index[idx];
-        if (record <= 0) {
-            continue;
-        }
-        if (record >= static_cast<int>(postselection.detectors_by_record.size())) {
-            fail("batch postselection instruction record table references an out-of-range record");
-        }
-        const auto& detectors = postselection.detectors_by_record[static_cast<std::size_t>(record)];
-        const int discarded_now = apply_postselection_checks_for_record(
-            runtime,
-            detectors,
-            scratch);
-        discarded += discarded_now;
-    }
-    compact_dead_shots_if_needed(
+    return execute_batch_postselected_with_assignment(
         runtime,
+        program,
+        postselection,
         scratch,
-        postselection.condition_last_use_by_index,
-        postselection.record_last_use_by_index,
-        static_cast<int>(program.instructions.size()),
-        true,
         options,
-        true);
-    return {discarded, runtime.active_shots};
+        [&]() { assign_presampled_exogenous_batch(runtime, samples); });
 }
 
 BatchDetectorPostselectionResult execute_batch_postselected_in_place(
@@ -911,62 +928,13 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
     const BatchDetectorPostselectionPlan& postselection,
     BatchDetectorPostselectionScratch& scratch,
     BatchDetectorPostselectionOptions options) {
-    if (runtime.n != program.n || runtime.k + runtime.ndormant != runtime.n) {
-        fail("batch executor state does not match program");
-    }
-    validate_batch_postselection_plan(program, postselection);
-    prepare_batch_detector_postselection_scratch(scratch, runtime);
-    std::fill(scratch.dead_bits.begin(), scratch.dead_bits.end(), 0);
-    scratch.dead_count = 0;
-    if (runtime.active_shots == 0) {
-        return {};
-    }
-
-    int discarded = 0;
-    assign_presampled_exogenous_batch(runtime, samples, first_sample_shot);
-    for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
-        if (runtime.active_shots == 0) {
-            break;
-        }
-        if (should_compact_dead_before_instruction(runtime, scratch, options, program.instructions[idx])) {
-            compact_dead_shots_if_needed(
-                runtime,
-                scratch,
-                postselection.condition_last_use_by_index,
-                postselection.record_last_use_by_index,
-                static_cast<int>(idx) - 1,
-                false,
-                options,
-                true);
-            if (runtime.active_shots == 0) {
-                break;
-            }
-        }
-        execute_batch_instruction(runtime, program.instructions[idx]);
-        const int record = postselection.instruction_records_by_index[idx];
-        if (record <= 0) {
-            continue;
-        }
-        if (record >= static_cast<int>(postselection.detectors_by_record.size())) {
-            fail("batch postselection instruction record table references an out-of-range record");
-        }
-        const auto& detectors = postselection.detectors_by_record[static_cast<std::size_t>(record)];
-        const int discarded_now = apply_postselection_checks_for_record(
-            runtime,
-            detectors,
-            scratch);
-        discarded += discarded_now;
-    }
-    compact_dead_shots_if_needed(
+    return execute_batch_postselected_with_assignment(
         runtime,
+        program,
+        postselection,
         scratch,
-        postselection.condition_last_use_by_index,
-        postselection.record_last_use_by_index,
-        static_cast<int>(program.instructions.size()),
-        true,
         options,
-        true);
-    return {discarded, runtime.active_shots};
+        [&]() { assign_presampled_exogenous_batch(runtime, samples, first_sample_shot); });
 }
 
 std::vector<std::vector<std::uint64_t>> sample_measurements_batch(
