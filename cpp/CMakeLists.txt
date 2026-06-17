@@ -30,9 +30,9 @@ add_library(symft_cpp
     src/sampler/batch_symbols.cpp
     src/sampler/batch_active.cpp
     src/sampler/batch_runtime.cpp
-    src/sampler/batch_simd_scalar.cpp
     src/simd/simd_dispatch.cpp
     src/simd/simd_scalar.cpp
+    src/simd/batch_simd_scalar.cpp
 )
 
 target_include_directories(symft_cpp PUBLIC src)
