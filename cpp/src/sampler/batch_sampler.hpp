@@ -11,11 +11,18 @@ namespace symft {
 struct PresampledExogenous;
 struct PackedPresampledExogenous;
 
+struct BatchPostselectionBoundaryPlan {
+    std::size_t instruction_index = 0;
+    std::vector<int> transfer_conditions;
+    std::vector<int> transfer_records;
+};
+
 struct BatchDetectorPostselectionPlan {
     std::vector<int> instruction_records_by_index;
     std::vector<std::vector<std::vector<int>>> detectors_by_record;
     std::vector<int> condition_last_use_by_index;
     std::vector<int> record_last_use_by_index;
+    std::vector<BatchPostselectionBoundaryPlan> boundary_plans;
 };
 
 struct BatchDetectorPostselectionScratch {
@@ -87,6 +94,7 @@ void execute_batch_in_place(
 void prepare_batch_detector_postselection_scratch(
     BatchDetectorPostselectionScratch& scratch,
     const BatchFactoredExecutorState& runtime);
+void prepare_batch_detector_postselection_boundaries(BatchDetectorPostselectionPlan& postselection);
 BatchDetectorPostselectionResult execute_batch_postselected_in_place(
     BatchFactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
@@ -101,6 +109,12 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
     int first_sample_shot,
     const BatchDetectorPostselectionPlan& postselection,
     BatchDetectorPostselectionScratch& scratch,
+    BatchDetectorPostselectionOptions options = {});
+BatchDetectorPostselectionResult execute_batch_postselected_page_pool_in_place(
+    std::vector<BatchFactoredExecutorState>& pages,
+    const FactoredInstructionProgram& program,
+    const BatchDetectorPostselectionPlan& postselection,
+    std::vector<BatchDetectorPostselectionScratch>& scratches,
     BatchDetectorPostselectionOptions options = {});
 const char* active_batch_backend();
 std::vector<std::vector<std::uint64_t>> sample_measurements_batch(

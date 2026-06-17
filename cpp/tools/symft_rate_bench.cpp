@@ -196,7 +196,7 @@ void print_usage(const char* argv0) {
         << "  --no-postselect-detectors         Disable detector postselection abort\n"
         << "  --batch-dense-over-dead-threshold-denominator N  Compact before pure ops when dead/live >= 1/N; default: 4\n"
         << "  --batch-tail-fill-threshold-denominator N  Use unordered tail-fill when dead/live <= 1/N; 0 disables; default: 5\n"
-        << "  --batch-postselection-pool-shots N|auto  Survivor-pool pitch for postselected batch execution; default: batch-size\n";
+        << "  --batch-postselection-pool-shots N|auto  Logical survivor pool over 64-shot physical pages; default: batch-size\n";
 }
 
 std::string require_option_value(
@@ -696,6 +696,7 @@ RateBenchSetup build_rate_bench_setup(
     setup.batch_postselection_plan.detectors_by_record = setup.postselection_detectors_by_record;
     setup.batch_postselection_plan.condition_last_use_by_index = setup.condition_last_use_by_index;
     setup.batch_postselection_plan.record_last_use_by_index = setup.record_last_use_by_index;
+    symft::prepare_batch_detector_postselection_boundaries(setup.batch_postselection_plan);
     setup.parsed = std::move(parsed);
     setup.program = std::move(program);
     parse_s = seconds_between(parse_start, parse_stop);
@@ -893,17 +894,33 @@ BenchResult run_batch_sampler(const Options& options) {
         const auto sample_wall_start = Clock::now();
         auto run_worker = [&](int worker_id) {
             WorkerResult local;
-            const int runtime_shot_capacity =
-                options.postselect_detectors ? postselection_pool_shots : result.block_shots;
             symft::BatchFactoredExecutorState runtime(
                 setup.program,
-                runtime_shot_capacity,
+                result.block_shots,
                 block_seed(0x5eed1234ULL, repeat, static_cast<std::uint64_t>(worker_id)));
             std::vector<std::uint64_t> discard_bits(runtime.batch_words, 0);
             std::vector<std::uint64_t> logical_bits(runtime.batch_words, 0);
             std::vector<std::uint64_t> scratch(runtime.batch_words, 0);
             symft::BatchDetectorPostselectionScratch postselection_scratch;
             symft::prepare_batch_detector_postselection_scratch(postselection_scratch, runtime);
+            const int max_pool_pages = static_cast<int>(ceil_div_u64(
+                static_cast<std::uint64_t>(postselection_pool_shots),
+                static_cast<std::uint64_t>(result.block_shots)));
+            std::vector<symft::BatchFactoredExecutorState> page_pool;
+            std::vector<symft::BatchDetectorPostselectionScratch> page_pool_scratches;
+            if (options.postselect_detectors && max_pool_pages > 1) {
+                page_pool.reserve(static_cast<std::size_t>(max_pool_pages));
+                for (int page_index = 0; page_index < max_pool_pages; ++page_index) {
+                    page_pool.emplace_back(
+                        setup.program,
+                        result.block_shots,
+                        block_seed(
+                            0x5eed1234ULL,
+                            repeat,
+                            static_cast<std::uint64_t>(worker_id * max_pool_pages + page_index)));
+                }
+                page_pool_scratches.resize(static_cast<std::size_t>(max_pool_pages));
+            }
             symft::PackedPresampledExogenous samples;
             symft::prepare_presampled_exogenous_packed(samples, setup.program);
             for (std::uint64_t chunk_index = static_cast<std::uint64_t>(worker_id);
@@ -933,25 +950,65 @@ BenchResult run_batch_sampler(const Options& options) {
                             chunk_index * postselection_pools_per_chunk +
                             static_cast<std::uint64_t>(local_pool_index);
                         const auto execute_start = Clock::now();
-                        symft::reset_batch_executor(runtime, setup.program, pool);
-                        runtime.rng_state = block_seed(0x5eed1234ULL, repeat, pool_index);
-                        const auto postselection_result = symft::execute_batch_postselected_in_place(
-                            runtime,
-                            setup.program,
-                            samples,
-                            pool_offset,
-                            setup.batch_postselection_plan,
-                            postselection_scratch,
-                            postselection_options);
-                        local.counts.discarded +=
-                            static_cast<std::uint64_t>(postselection_result.discarded);
+                        if (max_pool_pages <= 1) {
+                            symft::reset_batch_executor(runtime, setup.program, pool);
+                            runtime.rng_state = block_seed(0x5eed1234ULL, repeat, pool_index);
+                            const auto postselection_result = symft::execute_batch_postselected_in_place(
+                                runtime,
+                                setup.program,
+                                samples,
+                                pool_offset,
+                                setup.batch_postselection_plan,
+                                postselection_scratch,
+                                postselection_options);
+                            local.counts.discarded +=
+                                static_cast<std::uint64_t>(postselection_result.discarded);
+                        } else {
+                            for (int page_index = 0; page_index < max_pool_pages; ++page_index) {
+                                const int page_offset = page_index * result.block_shots;
+                                const int page_shots =
+                                    page_offset < pool ? std::min(result.block_shots, pool - page_offset) : 0;
+                                auto& page = page_pool[static_cast<std::size_t>(page_index)];
+                                symft::reset_batch_executor(page, setup.program, page_shots);
+                                page.rng_state = block_seed(
+                                    0x5eed1234ULL,
+                                    repeat,
+                                    pool_index * static_cast<std::uint64_t>(max_pool_pages) +
+                                        static_cast<std::uint64_t>(page_index));
+                                if (page_shots > 0) {
+                                    symft::assign_presampled_exogenous_batch_in_place(
+                                        page,
+                                        samples,
+                                        pool_offset + page_offset);
+                                }
+                            }
+                            const auto postselection_result = symft::execute_batch_postselected_page_pool_in_place(
+                                page_pool,
+                                setup.program,
+                                setup.batch_postselection_plan,
+                                page_pool_scratches,
+                                postselection_options);
+                            local.counts.discarded +=
+                                static_cast<std::uint64_t>(postselection_result.discarded);
+                        }
                         const auto execute_stop = Clock::now();
-                        accumulate_logical_counts_for_survivors(
-                            local.counts,
-                            runtime,
-                            setup.logical_records,
-                            logical_bits,
-                            scratch);
+                        if (max_pool_pages <= 1) {
+                            accumulate_logical_counts_for_survivors(
+                                local.counts,
+                                runtime,
+                                setup.logical_records,
+                                logical_bits,
+                                scratch);
+                        } else {
+                            for (auto& page : page_pool) {
+                                accumulate_logical_counts_for_survivors(
+                                    local.counts,
+                                    page,
+                                    setup.logical_records,
+                                    logical_bits,
+                                    scratch);
+                            }
+                        }
                         const auto accumulate_stop = Clock::now();
                         local.counts.shots += static_cast<std::uint64_t>(pool);
                         local.execute_s += seconds_between(execute_start, execute_stop);

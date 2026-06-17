@@ -430,6 +430,214 @@ void tail_fill_active_columns(BatchFactoredExecutorState& runtime, const std::ve
     }
 }
 
+void copy_active_lanes_between_pages(
+    BatchFactoredExecutorState& dst,
+    int dst0,
+    const BatchFactoredExecutorState& src,
+    int src0,
+    int count) {
+    if (count <= 0) {
+        return;
+    }
+    if (dst.k != src.k || dst.batches != src.batches) {
+        fail("cannot coalesce batch pages with incompatible active layouts");
+    }
+    const std::size_t pitch = static_cast<std::size_t>(dst.batches);
+    const std::size_t dim = active_length(dst.k);
+    for (std::size_t basis = 0; basis < dim; ++basis) {
+        const std::size_t base = basis * pitch;
+        std::copy_n(
+            src.active_re.data() + base + static_cast<std::size_t>(src0),
+            count,
+            dst.active_re.data() + base + static_cast<std::size_t>(dst0));
+        std::copy_n(
+            src.active_im.data() + base + static_cast<std::size_t>(src0),
+            count,
+            dst.active_im.data() + base + static_cast<std::size_t>(dst0));
+    }
+}
+
+void copy_bit_column_lanes_between_pages(
+    std::vector<std::uint64_t>& dst_columns,
+    const std::vector<std::uint64_t>& src_columns,
+    std::size_t dst_base,
+    std::size_t src_base,
+    int dst0,
+    int src0,
+    int count) {
+    if (count <= 0) {
+        return;
+    }
+    const std::uint64_t bits = (src_columns[src_base] >> src0) & low_bits_mask(count);
+    const std::uint64_t mask = low_bits_mask(count) << dst0;
+    dst_columns[dst_base] = (dst_columns[dst_base] & ~mask) | (bits << dst0);
+}
+
+void copy_symbol_lanes_between_pages(
+    BatchFactoredExecutorState& dst,
+    const BatchFactoredExecutorState& src,
+    const std::vector<int>& conditions,
+    int dst0,
+    int src0,
+    int count) {
+    if (conditions.empty() || count <= 0) {
+        return;
+    }
+    for (int condition : conditions) {
+        copy_bit_column_lanes_between_pages(
+            dst.value_words,
+            src.value_words,
+            batch_condition_offset(dst, condition, 0),
+            batch_condition_offset(src, condition, 0),
+            dst0,
+            src0,
+            count);
+    }
+}
+
+void copy_measurement_lanes_between_pages(
+    BatchFactoredExecutorState& dst,
+    const BatchFactoredExecutorState& src,
+    const std::vector<int>& records,
+    int dst0,
+    int src0,
+    int count) {
+    if (records.empty() || count <= 0) {
+        return;
+    }
+    for (int record : records) {
+        copy_bit_column_lanes_between_pages(
+            dst.measurement_words,
+            src.measurement_words,
+            batch_record_offset(dst, record, 0),
+            batch_record_offset(src, record, 0),
+            dst0,
+            src0,
+            count);
+    }
+}
+
+void move_lanes_between_pages(
+    BatchFactoredExecutorState& dst,
+    int dst0,
+    BatchFactoredExecutorState& src,
+    int src0,
+    int count,
+    const BatchPostselectionBoundaryPlan& transfer_plan) {
+    if (count <= 0) {
+        return;
+    }
+    copy_active_lanes_between_pages(dst, dst0, src, src0, count);
+    copy_symbol_lanes_between_pages(
+        dst,
+        src,
+        transfer_plan.transfer_conditions,
+        dst0,
+        src0,
+        count);
+    copy_measurement_lanes_between_pages(
+        dst,
+        src,
+        transfer_plan.transfer_records,
+        dst0,
+        src0,
+        count);
+}
+
+void coalesce_partial_pages(
+    std::vector<BatchFactoredExecutorState>& pages,
+    const BatchPostselectionBoundaryPlan& transfer_plan) {
+    int total_live = 0;
+    int nonempty_pages = 0;
+    int page_capacity = 0;
+    for (const auto& page : pages) {
+        if (page_capacity == 0) {
+            page_capacity = page.batches;
+        }
+        if (page.active_shots == 0) {
+            continue;
+        }
+        total_live += page.active_shots;
+        ++nonempty_pages;
+    }
+    if (total_live == 0 || page_capacity <= 0) {
+        return;
+    }
+    const int target_pages = (total_live + page_capacity - 1) / page_capacity;
+    const int saved_pages = nonempty_pages - target_pages;
+    const int min_saved_pages = std::max(2, static_cast<int>(pages.size()) / 2);
+    if (saved_pages < min_saved_pages) {
+        return;
+    }
+
+    int tail_page = -1;
+    for (int page_index = 0; page_index < static_cast<int>(pages.size()); ++page_index) {
+        auto& page = pages[static_cast<std::size_t>(page_index)];
+        if (page.active_shots == 0) {
+            continue;
+        }
+        if (page.active_shots == page.batches) {
+            continue;
+        }
+        if (tail_page < 0) {
+            tail_page = page_index;
+            continue;
+        }
+        auto& dst = pages[static_cast<std::size_t>(tail_page)];
+        auto& src = page;
+        const int room = dst.batches - dst.active_shots;
+        const int moved = std::min(room, src.active_shots);
+        const int src0 = src.active_shots - moved;
+        const int dst0 = dst.active_shots;
+        move_lanes_between_pages(
+            dst,
+            dst0,
+            src,
+            src0,
+            moved,
+            transfer_plan);
+        dst.active_shots += moved;
+        src.active_shots -= moved;
+        if (dst.active_shots == dst.batches) {
+            tail_page = src.active_shots > 0 ? page_index : -1;
+        } else if (src.active_shots > 0) {
+            fail("internal page coalescing did not fill the tail page");
+        }
+    }
+}
+
+BatchPostselectionBoundaryPlan make_batch_postselection_boundary_plan(
+    const BatchDetectorPostselectionPlan& postselection,
+    int instruction_index,
+    bool include_current_record_use) {
+    BatchPostselectionBoundaryPlan plan;
+    plan.instruction_index = static_cast<std::size_t>(instruction_index);
+    if (postselection.condition_last_use_by_index.size() > 1) {
+        plan.transfer_conditions.reserve(postselection.condition_last_use_by_index.size() - 1);
+        for (int condition = 1;
+             condition < static_cast<int>(postselection.condition_last_use_by_index.size());
+             ++condition) {
+            if (postselection.condition_last_use_by_index[static_cast<std::size_t>(condition)] >
+                instruction_index) {
+                plan.transfer_conditions.push_back(condition);
+            }
+        }
+    }
+    if (postselection.record_last_use_by_index.size() > 1) {
+        plan.transfer_records.reserve(postselection.record_last_use_by_index.size() - 1);
+        for (int record = 1;
+             record < static_cast<int>(postselection.record_last_use_by_index.size());
+             ++record) {
+            const int last_use = postselection.record_last_use_by_index[static_cast<std::size_t>(record)];
+            const bool live = include_current_record_use ? last_use >= instruction_index : last_use > instruction_index;
+            if (live) {
+                plan.transfer_records.push_back(record);
+            }
+        }
+    }
+    return plan;
+}
+
 void tail_fill_symbol_columns(
     std::vector<std::uint64_t>& columns,
     const std::vector<int>& condition_last_use,
@@ -677,6 +885,27 @@ int default_batch_count(int max_k) {
 
 const char* active_batch_backend() {
     return batch_simd::scalar_table().name;
+}
+
+void prepare_batch_detector_postselection_boundaries(BatchDetectorPostselectionPlan& postselection) {
+    postselection.boundary_plans.clear();
+    postselection.boundary_plans.reserve(postselection.instruction_records_by_index.size());
+    for (std::size_t idx = 0; idx < postselection.instruction_records_by_index.size(); ++idx) {
+        const int record = postselection.instruction_records_by_index[idx];
+        if (record <= 0) {
+            continue;
+        }
+        if (record >= static_cast<int>(postselection.detectors_by_record.size())) {
+            fail("batch postselection instruction record table references an out-of-range record");
+        }
+        if (postselection.detectors_by_record[static_cast<std::size_t>(record)].empty()) {
+            continue;
+        }
+        postselection.boundary_plans.push_back(make_batch_postselection_boundary_plan(
+            postselection,
+            static_cast<int>(idx),
+            false));
+    }
 }
 
 void assign_presampled_exogenous_batch_in_place(
@@ -967,6 +1196,127 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
         options,
         true);
     return {discarded, runtime.active_shots};
+}
+
+BatchDetectorPostselectionResult execute_batch_postselected_page_pool_in_place(
+    std::vector<BatchFactoredExecutorState>& pages,
+    const FactoredInstructionProgram& program,
+    const BatchDetectorPostselectionPlan& postselection,
+    std::vector<BatchDetectorPostselectionScratch>& scratches,
+    BatchDetectorPostselectionOptions options) {
+    validate_batch_postselection_plan(program, postselection);
+    if (scratches.size() < pages.size()) {
+        scratches.resize(pages.size());
+    }
+    for (std::size_t page_index = 0; page_index < pages.size(); ++page_index) {
+        auto& page = pages[page_index];
+        if (page.n != program.n || page.k + page.ndormant != page.n) {
+            fail("batch page executor state does not match program");
+        }
+        if (page.batches != 64 || page.batch_words != 1) {
+            fail("paged batch postselection requires 64-shot physical pages");
+        }
+        prepare_batch_detector_postselection_scratch(scratches[page_index], page);
+        std::fill(scratches[page_index].dead_bits.begin(), scratches[page_index].dead_bits.end(), 0);
+        scratches[page_index].dead_count = 0;
+    }
+
+    std::vector<BatchPostselectionBoundaryPlan> local_boundary_plans;
+    const auto* boundary_plans = &postselection.boundary_plans;
+    if (boundary_plans->empty()) {
+        local_boundary_plans.reserve(program.instructions.size());
+        for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+            const int record = postselection.instruction_records_by_index[idx];
+            if (record <= 0) {
+                continue;
+            }
+            if (record >= static_cast<int>(postselection.detectors_by_record.size())) {
+                fail("batch postselection instruction record table references an out-of-range record");
+            }
+            if (!postselection.detectors_by_record[static_cast<std::size_t>(record)].empty()) {
+                local_boundary_plans.push_back(make_batch_postselection_boundary_plan(
+                    postselection,
+                    static_cast<int>(idx),
+                    false));
+            }
+        }
+        boundary_plans = &local_boundary_plans;
+    }
+
+    int discarded = 0;
+    std::size_t segment_start = 0;
+    for (std::size_t boundary_pos = 0; boundary_pos < boundary_plans->size(); ++boundary_pos) {
+        const auto& boundary_plan = (*boundary_plans)[boundary_pos];
+        const std::size_t boundary_idx = boundary_plan.instruction_index;
+        bool discarded_at_boundary = false;
+        for (std::size_t page_index = 0; page_index < pages.size(); ++page_index) {
+            auto& page = pages[page_index];
+            if (page.active_shots == 0) {
+                continue;
+            }
+            auto& scratch = scratches[page_index];
+            for (std::size_t idx = segment_start; idx <= boundary_idx; ++idx) {
+                execute_batch_instruction(page, program.instructions[idx]);
+            }
+            const int record = postselection.instruction_records_by_index[boundary_idx];
+            if (record >= static_cast<int>(postselection.detectors_by_record.size())) {
+                fail("batch postselection instruction record table references an out-of-range record");
+            }
+            const auto& detectors = postselection.detectors_by_record[static_cast<std::size_t>(record)];
+            const int discarded_now = apply_postselection_checks_for_record(page, detectors, scratch);
+            discarded += discarded_now;
+            discarded_at_boundary = discarded_at_boundary || discarded_now != 0;
+        }
+        if (discarded_at_boundary) {
+            for (std::size_t page_index = 0; page_index < pages.size(); ++page_index) {
+                auto& page = pages[page_index];
+                if (page.active_shots == 0) {
+                    continue;
+                }
+                compact_dead_shots_if_needed(
+                    page,
+                    scratches[page_index],
+                    postselection.condition_last_use_by_index,
+                    postselection.record_last_use_by_index,
+                    static_cast<int>(boundary_idx),
+                    false,
+                    options,
+                    true);
+            }
+            coalesce_partial_pages(
+                pages,
+                boundary_plan);
+        }
+        segment_start = boundary_idx + 1;
+    }
+
+    if (segment_start < program.instructions.size()) {
+        for (std::size_t page_index = 0; page_index < pages.size(); ++page_index) {
+            auto& page = pages[page_index];
+            if (page.active_shots == 0) {
+                continue;
+            }
+            for (std::size_t idx = segment_start; idx < program.instructions.size(); ++idx) {
+                execute_batch_instruction(page, program.instructions[idx]);
+            }
+        }
+    }
+
+    int accepted = 0;
+    for (std::size_t page_index = 0; page_index < pages.size(); ++page_index) {
+        auto& page = pages[page_index];
+        compact_dead_shots_if_needed(
+            page,
+            scratches[page_index],
+            postselection.condition_last_use_by_index,
+            postselection.record_last_use_by_index,
+            static_cast<int>(program.instructions.size()),
+            true,
+            options,
+            true);
+        accepted += page.active_shots;
+    }
+    return {discarded, accepted};
 }
 
 std::vector<std::vector<std::uint64_t>> sample_measurements_batch(
