@@ -14,10 +14,6 @@ void execute_batch_instruction(BatchFactoredExecutorState& runtime, const ApplyP
     rotate_pauli_batch(runtime, instruction.rotation_kernel, runtime.eval_scratch);
 }
 
-void execute_batch_instruction(BatchFactoredExecutorState& runtime, const ApplyActiveBasisChange& instruction) {
-    apply_active_basis_change_batch(runtime, instruction.kind, instruction.qubit);
-}
-
 void execute_batch_instruction(BatchFactoredExecutorState& runtime, const PromoteDormantRotation& instruction) {
     eval_symbolic_bool_batch(runtime.eval_scratch, instruction.sign_plan, runtime);
     promote_first_dormant_rotation_batch(runtime, instruction.theta, runtime.eval_scratch);

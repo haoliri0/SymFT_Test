@@ -129,23 +129,11 @@ void transform_pending_operations_by_basis_changes(PendingFactoredState& state, 
     }
 }
 
-void emit_active_basis_change_if_needed(PendingFactoredState& state, const BasisChange& change) {
-    if (change.kind != BasisChange::H && change.kind != BasisChange::S) {
-        return;
-    }
-    if (change.a >= state.k) {
-        return;
-    }
-    const char kind = change.kind == BasisChange::H ? 'H' : 'S';
-    push_instruction(state, ApplyActiveBasisChange{kind, change.a});
-}
-
 PendingPauliRotation rewrite_current_and_pending_by_basis_change(
     PendingFactoredState& state,
     const PendingPauliRotation& current,
     BasisChange change) {
     const std::vector<BasisChange> changes{change};
-    emit_active_basis_change_if_needed(state, change);
     transform_pending_operations_by_basis_changes(state, changes);
     return transform_operation_by_basis_changes(current, changes);
 }
@@ -155,7 +143,6 @@ PendingPauliMeasurement rewrite_current_and_pending_by_basis_change(
     const PendingPauliMeasurement& current,
     BasisChange change) {
     const std::vector<BasisChange> changes{change};
-    emit_active_basis_change_if_needed(state, change);
     transform_pending_operations_by_basis_changes(state, changes);
     return transform_operation_by_basis_changes(current, changes);
 }
@@ -240,30 +227,25 @@ std::optional<FactoredInstruction> process_diagonal_dormant_rotation(
     return push_instruction(state, active_rotation_instruction(active_body, current.theta, sign));
 }
 
-PendingPauliRotation prepare_active_qubit_for_dormant_rotation(
+PendingPauliRotation eliminate_active_support_for_dormant_rotation(
     PendingFactoredState& state,
-    const PendingPauliRotation& current,
-    int q) {
-    const bool xb = current.pauli.pauli.xbit(q);
-    const bool zb = current.pauli.pauli.zbit(q);
-    if (xb && zb) {
-        return rewrite_current_and_pending_by_basis_change(state, current, {BasisChange::S, q, 0});
-    }
-    if (zb) {
-        return rewrite_current_and_pending_by_basis_change(state, current, {BasisChange::H, q, 0});
-    }
-    return current;
-}
-
-PendingPauliRotation eliminate_active_x_for_dormant_rotation(
-    PendingFactoredState& state,
-    const PendingPauliRotation& current,
+    PendingPauliRotation current,
     int picked_dormant,
     int target_active) {
-    return rewrite_current_and_pending_by_basis_change(
-        state,
-        current,
-        {BasisChange::CX, state.k + picked_dormant, target_active});
+    const int control = state.k + picked_dormant;
+    if (current.pauli.pauli.xbit(target_active)) {
+        current = rewrite_current_and_pending_by_basis_change(
+            state,
+            current,
+            {BasisChange::CX, control, target_active});
+    }
+    if (current.pauli.pauli.zbit(target_active)) {
+        current = rewrite_current_and_pending_by_basis_change(
+            state,
+            current,
+            {BasisChange::CZ, control, target_active});
+    }
+    return current;
 }
 
 PendingPauliRotation eliminate_other_dormant_support_for_rotation(
@@ -305,10 +287,7 @@ std::optional<FactoredInstruction> process_nondiagonal_dormant_rotation(
     PendingPauliRotation current,
     int picked_dormant) {
     for (int q = 0; q < state.k; ++q) {
-        current = prepare_active_qubit_for_dormant_rotation(state, current, q);
-        if (current.pauli.pauli.xbit(q)) {
-            current = eliminate_active_x_for_dormant_rotation(state, current, picked_dormant, q);
-        }
+        current = eliminate_active_support_for_dormant_rotation(state, current, picked_dormant, q);
     }
     for (int d = 0; d < state.n - state.k; ++d) {
         if (d == picked_dormant) {
@@ -348,17 +327,23 @@ std::optional<FactoredInstruction> record_deterministic_measurement(
         });
 }
 
-PendingPauliMeasurement prepare_active_qubit_for_dormant_measurement(
+PendingPauliMeasurement eliminate_active_support_for_dormant_measurement(
     PendingFactoredState& state,
-    const PendingPauliMeasurement& current,
-    int q) {
-    const bool xb = current.pauli.pauli.xbit(q);
-    const bool zb = current.pauli.pauli.zbit(q);
-    if (xb && zb) {
-        return rewrite_current_and_pending_by_basis_change(state, current, {BasisChange::S, q, 0});
+    PendingPauliMeasurement current,
+    int picked_dormant,
+    int target_active) {
+    const int control = state.k + picked_dormant;
+    if (current.pauli.pauli.xbit(target_active)) {
+        current = rewrite_current_and_pending_by_basis_change(
+            state,
+            current,
+            {BasisChange::CX, control, target_active});
     }
-    if (zb) {
-        return rewrite_current_and_pending_by_basis_change(state, current, {BasisChange::H, q, 0});
+    if (current.pauli.pauli.zbit(target_active)) {
+        current = rewrite_current_and_pending_by_basis_change(
+            state,
+            current,
+            {BasisChange::CZ, control, target_active});
     }
     return current;
 }
@@ -401,13 +386,7 @@ std::optional<FactoredInstruction> measure_dormant_xy_pauli(
         }
     }
     for (int q = 0; q < state.k; ++q) {
-        current = prepare_active_qubit_for_dormant_measurement(state, current, q);
-        if (current.pauli.pauli.xbit(q)) {
-            current = rewrite_current_and_pending_by_basis_change(
-                state,
-                current,
-                {BasisChange::CX, state.k + picked_dormant, q});
-        }
+        current = eliminate_active_support_for_dormant_measurement(state, current, picked_dormant, q);
     }
     current = normalize_picked_dormant_measurement_to_z(state, current, picked_dormant);
     const SymbolicBool base_outcome = measurement_base_outcome(current.pauli);
@@ -591,8 +570,6 @@ namespace {
 void refresh_instruction_plans(ApplyPrecomputedActivePauliRotation& instruction) {
     instruction.sign_plan = SymbolicBoolEvaluationPlan(instruction.sign);
 }
-
-void refresh_instruction_plans(ApplyActiveBasisChange&) {}
 
 void refresh_instruction_plans(PromoteDormantRotation& instruction) {
     instruction.sign_plan = SymbolicBoolEvaluationPlan(instruction.sign);

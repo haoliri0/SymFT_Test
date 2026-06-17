@@ -34,10 +34,6 @@ bool operator==(const ApplyPrecomputedActivePauliRotation& lhs, const ApplyPreco
     return lhs.pauli == rhs.pauli && lhs.theta == rhs.theta && lhs.sign == rhs.sign;
 }
 
-bool operator==(const ApplyActiveBasisChange& lhs, const ApplyActiveBasisChange& rhs) {
-    return lhs.kind == rhs.kind && lhs.qubit == rhs.qubit;
-}
-
 bool operator==(const PromoteDormantRotation& lhs, const PromoteDormantRotation& rhs) {
     return lhs.theta == rhs.theta && lhs.sign == rhs.sign;
 }

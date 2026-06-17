@@ -239,52 +239,6 @@ void rotate_pauli_batch(
     }
 }
 
-void apply_active_basis_change_batch(BatchFactoredExecutorState& runtime, char kind, int q) {
-    if (q < 0 || q >= runtime.k) {
-        fail("active basis-change qubit is out of range");
-    }
-    const std::size_t dim = active_length(runtime.k);
-    const std::size_t mask = std::size_t{1} << q;
-    if (kind == 'H') {
-        const double inv_sqrt2 = 1.0 / std::sqrt(2.0);
-        for (std::size_t base = 0; base < dim; ++base) {
-            if ((base & mask) != 0) {
-                continue;
-            }
-            const std::size_t paired = base | mask;
-            SYMFT_BATCH_SIMD_LOOP
-            for (int shot = 0; shot < runtime.active_shots; ++shot) {
-                const std::size_t off0 = batch_active_offset(runtime, base, shot);
-                const std::size_t off1 = batch_active_offset(runtime, paired, shot);
-                const double r0 = runtime.active_re[off0];
-                const double i0 = runtime.active_im[off0];
-                const double r1 = runtime.active_re[off1];
-                const double i1 = runtime.active_im[off1];
-                runtime.active_re[off0] = (r0 + r1) * inv_sqrt2;
-                runtime.active_im[off0] = (i0 + i1) * inv_sqrt2;
-                runtime.active_re[off1] = (r0 - r1) * inv_sqrt2;
-                runtime.active_im[off1] = (i0 - i1) * inv_sqrt2;
-            }
-        }
-    } else if (kind == 'S') {
-        for (std::size_t basis = 0; basis < dim; ++basis) {
-            if ((basis & mask) == 0) {
-                continue;
-            }
-            SYMFT_BATCH_SIMD_LOOP
-            for (int shot = 0; shot < runtime.active_shots; ++shot) {
-                const std::size_t off = batch_active_offset(runtime, basis, shot);
-                const double r = runtime.active_re[off];
-                const double i = runtime.active_im[off];
-                runtime.active_re[off] = -i;
-                runtime.active_im[off] = r;
-            }
-        }
-    } else {
-        fail("unsupported active basis change");
-    }
-}
-
 void promote_first_dormant_rotation_batch(
     BatchFactoredExecutorState& runtime,
     double theta,

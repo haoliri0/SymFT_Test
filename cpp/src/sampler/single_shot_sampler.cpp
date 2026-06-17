@@ -181,10 +181,6 @@ const SymbolicBoolEvaluationPlan* instruction_expression_plan(const ApplyPrecomp
     return &instruction.sign_plan;
 }
 
-const SymbolicBoolEvaluationPlan* instruction_expression_plan(const ApplyActiveBasisChange&) {
-    return nullptr;
-}
-
 const SymbolicBoolEvaluationPlan* instruction_expression_plan(const PromoteDormantRotation& instruction) {
     return &instruction.sign_plan;
 }
@@ -518,47 +514,6 @@ void promote_first_dormant_rotation(FactoredExecutorState& runtime, double theta
     --runtime.ndormant;
 }
 
-void apply_active_basis_change(FactoredExecutorState& runtime, char kind, int q) {
-    if (q < 0 || q >= runtime.k) {
-        fail("active basis-change qubit is out of range");
-    }
-    const std::size_t dim = runtime_active_dim(runtime);
-    const std::size_t mask = std::size_t{1} << q;
-    if (kind == 'H') {
-        const double inv_sqrt2 = 1.0 / std::sqrt(2.0);
-        const std::size_t step = mask << 1;
-        for (std::size_t block = 0; block < dim; block += step) {
-            SYMFT_SINGLE_SIMD_LOOP
-            for (std::size_t offset = 0; offset < mask; ++offset) {
-                const std::size_t base = block + offset;
-                const std::size_t paired = base | mask;
-                const double r0 = runtime.active_re[base];
-                const double i0 = runtime.active_im[base];
-                const double r1 = runtime.active_re[paired];
-                const double i1 = runtime.active_im[paired];
-                runtime.active_re[base] = (r0 + r1) * inv_sqrt2;
-                runtime.active_im[base] = (i0 + i1) * inv_sqrt2;
-                runtime.active_re[paired] = (r0 - r1) * inv_sqrt2;
-                runtime.active_im[paired] = (i0 - i1) * inv_sqrt2;
-            }
-        }
-    } else if (kind == 'S') {
-        const std::size_t step = mask << 1;
-        for (std::size_t block = mask; block < dim; block += step) {
-            SYMFT_SINGLE_SIMD_LOOP
-            for (std::size_t offset = 0; offset < mask; ++offset) {
-                const std::size_t basis = block + offset;
-                const double r = runtime.active_re[basis];
-                const double i = runtime.active_im[basis];
-                runtime.active_re[basis] = -i;
-                runtime.active_im[basis] = r;
-            }
-        }
-    } else {
-        fail("unsupported active basis change");
-    }
-}
-
 void rotate_pauli(FactoredExecutorState& runtime, const PrecomputedActivePauliRotationKernel& kernel, bool sign) {
     if (kernel.action.nqubits != runtime.k) {
         fail("rotation kernel dimension does not match active state");
@@ -781,10 +736,6 @@ void execute_instruction(FactoredExecutorState& runtime, const ApplyPrecomputedA
     rotate_pauli(runtime, instruction.rotation_kernel, sign);
 }
 
-void execute_instruction(FactoredExecutorState& runtime, const ApplyActiveBasisChange& instruction) {
-    apply_active_basis_change(runtime, instruction.kind, instruction.qubit);
-}
-
 void execute_instruction(FactoredExecutorState& runtime, const PromoteDormantRotation& instruction) {
     const bool sign = eval_symbolic_bool_unchecked(instruction.sign_plan, runtime);
     promote_first_dormant_rotation(runtime, sign ? -instruction.theta : instruction.theta);
@@ -841,14 +792,6 @@ void execute_instruction_presampled(
     std::size_t instruction_index) {
     const bool sign = evaluator.eval(instruction_index, runtime);
     rotate_pauli(runtime, instruction.rotation_kernel, sign);
-}
-
-void execute_instruction_presampled(
-    FactoredExecutorState& runtime,
-    const ApplyActiveBasisChange& instruction,
-    const SingleShotExpressionEvaluator&,
-    std::size_t) {
-    apply_active_basis_change(runtime, instruction.kind, instruction.qubit);
 }
 
 void execute_instruction_presampled(

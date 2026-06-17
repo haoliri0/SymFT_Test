@@ -162,7 +162,6 @@ void rotate_pauli_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliRotationKernel& kernel,
     const std::vector<std::uint64_t>& sign_bits);
-void apply_active_basis_change_batch(BatchFactoredExecutorState& runtime, char kind, int q);
 void promote_first_dormant_rotation_batch(
     BatchFactoredExecutorState& runtime,
     double theta,

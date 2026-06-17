@@ -79,10 +79,6 @@ inline int max_condition(const ApplyPrecomputedActivePauliRotation& instruction)
     return instruction.sign.max_condition();
 }
 
-inline int max_condition(const ApplyActiveBasisChange&) {
-    return 0;
-}
-
 inline int max_condition(const PromoteDormantRotation& instruction) {
     return instruction.sign.max_condition();
 }
