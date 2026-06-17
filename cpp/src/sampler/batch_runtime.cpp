@@ -1,6 +1,9 @@
 #include "batch_internal.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <functional>
+#include <type_traits>
 #include <utility>
 
 #if (defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86))
@@ -64,6 +67,12 @@ void execute_batch_instruction(BatchFactoredExecutorState& runtime, const Factor
 }
 
 namespace {
+
+using Clock = std::chrono::steady_clock;
+
+double seconds_between(Clock::time_point start, Clock::time_point stop) {
+    return std::chrono::duration<double>(stop - start).count();
+}
 
 std::uint64_t live_word_mask_for_shots(int shots, std::size_t word) {
     return low_bits_mask(shots - static_cast<int>(word << 6));
@@ -544,12 +553,92 @@ void move_lanes_between_pages(
         count);
 }
 
+int estimate_min_moved_lanes_for_page_coalescing(
+    const std::vector<BatchFactoredExecutorState>& pages,
+    int target_pages,
+    int total_live) {
+    std::vector<int> live_counts;
+    live_counts.reserve(pages.size());
+    for (const auto& page : pages) {
+        if (page.active_shots > 0) {
+            live_counts.push_back(page.active_shots);
+        }
+    }
+    std::sort(live_counts.begin(), live_counts.end(), std::greater<int>());
+    int resident_lanes = 0;
+    const int kept_pages = std::min(target_pages, static_cast<int>(live_counts.size()));
+    for (int index = 0; index < kept_pages; ++index) {
+        resident_lanes += live_counts[static_cast<std::size_t>(index)];
+    }
+    return total_live - resident_lanes;
+}
+
+std::uint64_t estimated_aux_move_bytes_per_lane(const BatchPostselectionBoundaryPlan& transfer_plan) {
+    const std::uint64_t bit_columns =
+        static_cast<std::uint64_t>(transfer_plan.transfer_conditions.size() + transfer_plan.transfer_records.size());
+    return (bit_columns + 7) / 8;
+}
+
+bool should_coalesce_partial_pages(
+    const BatchPostselectionBoundaryPlan& transfer_plan,
+    const BatchDetectorPostselectionOptions& options,
+    int total_live,
+    int nonempty_pages,
+    int page_capacity,
+    int target_pages,
+    int saved_pages,
+    int keep_basis_columns,
+    int moved_lanes) {
+    auto* stats = options.coalescing_stats;
+    const std::uint64_t moved_lanes_u = static_cast<std::uint64_t>(std::max(0, moved_lanes));
+    const std::uint64_t keep_basis_u = static_cast<std::uint64_t>(std::max(0, keep_basis_columns));
+    const std::uint64_t state_move_units = moved_lanes_u * keep_basis_u;
+    const std::uint64_t saved_page_units =
+        static_cast<std::uint64_t>(std::max(0, saved_pages)) * transfer_plan.future_page_basis_touches;
+    const std::uint64_t estimated_move_bytes =
+        state_move_units * 16 + moved_lanes_u * estimated_aux_move_bytes_per_lane(transfer_plan);
+
+    if (stats != nullptr) {
+        ++stats->checks;
+        stats->old_nonempty_pages += static_cast<std::uint64_t>(std::max(0, nonempty_pages));
+        stats->new_pages_if_coalesced += static_cast<std::uint64_t>(std::max(0, target_pages));
+        stats->saved_pages += static_cast<std::uint64_t>(std::max(0, saved_pages));
+        stats->live_lanes += static_cast<std::uint64_t>(std::max(0, total_live));
+        stats->moved_lanes += moved_lanes_u;
+        stats->keep_basis_columns += keep_basis_u;
+        stats->future_page_basis_touches += transfer_plan.future_page_basis_touches;
+        stats->state_move_units += state_move_units;
+        stats->saved_page_units += saved_page_units;
+        stats->estimated_move_bytes += estimated_move_bytes;
+    }
+
+    if (total_live == 0 || page_capacity <= 0 || saved_pages < 2 || moved_lanes <= 0) {
+        if (stats != nullptr) {
+            ++stats->rejected_small_savings;
+        }
+        return false;
+    }
+    const int factor = options.cross_page_coalescing_benefit_factor;
+    if (factor > 0 && saved_page_units <= static_cast<std::uint64_t>(factor) * state_move_units) {
+        if (stats != nullptr) {
+            ++stats->rejected_cost;
+        }
+        return false;
+    }
+    if (stats != nullptr) {
+        ++stats->accepted;
+    }
+    return true;
+}
+
 void coalesce_partial_pages(
     std::vector<BatchFactoredExecutorState>& pages,
-    const BatchPostselectionBoundaryPlan& transfer_plan) {
+    const BatchPostselectionBoundaryPlan& transfer_plan,
+    const BatchDetectorPostselectionOptions& options) {
     int total_live = 0;
     int nonempty_pages = 0;
     int page_capacity = 0;
+    int keep_basis_columns = 0;
     for (const auto& page : pages) {
         if (page_capacity == 0) {
             page_capacity = page.batches;
@@ -557,19 +646,32 @@ void coalesce_partial_pages(
         if (page.active_shots == 0) {
             continue;
         }
+        if (keep_basis_columns == 0) {
+            keep_basis_columns = static_cast<int>(active_length(page.k));
+        }
         total_live += page.active_shots;
         ++nonempty_pages;
     }
-    if (total_live == 0 || page_capacity <= 0) {
+    if (total_live == 0 || page_capacity <= 0 || keep_basis_columns == 0) {
         return;
     }
     const int target_pages = (total_live + page_capacity - 1) / page_capacity;
     const int saved_pages = nonempty_pages - target_pages;
-    const int min_saved_pages = std::max(2, static_cast<int>(pages.size()) / 2);
-    if (saved_pages < min_saved_pages) {
+    const int moved_lanes = estimate_min_moved_lanes_for_page_coalescing(pages, target_pages, total_live);
+    if (!should_coalesce_partial_pages(
+            transfer_plan,
+            options,
+            total_live,
+            nonempty_pages,
+            page_capacity,
+            target_pages,
+            saved_pages,
+            keep_basis_columns,
+            moved_lanes)) {
         return;
     }
 
+    int actual_moved_lanes = 0;
     int tail_page = -1;
     for (int page_index = 0; page_index < static_cast<int>(pages.size()); ++page_index) {
         auto& page = pages[static_cast<std::size_t>(page_index)];
@@ -589,6 +691,7 @@ void coalesce_partial_pages(
         const int moved = std::min(room, src.active_shots);
         const int src0 = src.active_shots - moved;
         const int dst0 = dst.active_shots;
+        actual_moved_lanes += moved;
         move_lanes_between_pages(
             dst,
             dst0,
@@ -603,6 +706,9 @@ void coalesce_partial_pages(
         } else if (src.active_shots > 0) {
             fail("internal page coalescing did not fill the tail page");
         }
+    }
+    if (options.coalescing_stats != nullptr) {
+        options.coalescing_stats->actual_moved_lanes += static_cast<std::uint64_t>(actual_moved_lanes);
     }
 }
 
@@ -636,6 +742,37 @@ BatchPostselectionBoundaryPlan make_batch_postselection_boundary_plan(
         }
     }
     return plan;
+}
+
+std::uint64_t estimated_instruction_basis_touches(const FactoredInstruction& instruction, int max_k) {
+    return std::visit(
+        [&](const auto& inst) -> std::uint64_t {
+            using T = std::decay_t<decltype(inst)>;
+            if constexpr (std::is_same_v<T, ApplyPrecomputedActivePauliRotation>) {
+                return static_cast<std::uint64_t>(active_length(inst.action.nqubits));
+            } else if constexpr (std::is_same_v<T, PromoteDormantRotation>) {
+                return static_cast<std::uint64_t>(active_length(max_k));
+            } else if constexpr (std::is_same_v<T, MeasureActiveLastZ>) {
+                return static_cast<std::uint64_t>(active_length(max_k));
+            } else if constexpr (std::is_same_v<T, MeasurePrecomputedActivePauli>) {
+                return static_cast<std::uint64_t>(std::max<std::size_t>(1, inst.kernel.source0_false.size()));
+            } else {
+                return 0;
+            }
+        },
+        instruction);
+}
+
+std::uint64_t estimated_segment_basis_touches(
+    const FactoredInstructionProgram& program,
+    std::size_t first_instruction,
+    std::size_t end_instruction) {
+    std::uint64_t touches = 0;
+    const std::size_t end = std::min(end_instruction, program.instructions.size());
+    for (std::size_t idx = first_instruction; idx < end; ++idx) {
+        touches += estimated_instruction_basis_touches(program.instructions[idx], program.max_k);
+    }
+    return touches;
 }
 
 void tail_fill_symbol_columns(
@@ -887,9 +1024,12 @@ const char* active_batch_backend() {
     return batch_simd::scalar_table().name;
 }
 
-void prepare_batch_detector_postselection_boundaries(BatchDetectorPostselectionPlan& postselection) {
+void prepare_batch_detector_postselection_boundaries(
+    BatchDetectorPostselectionPlan& postselection,
+    const FactoredInstructionProgram& program) {
     postselection.boundary_plans.clear();
-    postselection.boundary_plans.reserve(postselection.instruction_records_by_index.size());
+    std::vector<std::size_t> boundary_indices;
+    boundary_indices.reserve(postselection.instruction_records_by_index.size());
     for (std::size_t idx = 0; idx < postselection.instruction_records_by_index.size(); ++idx) {
         const int record = postselection.instruction_records_by_index[idx];
         if (record <= 0) {
@@ -901,10 +1041,24 @@ void prepare_batch_detector_postselection_boundaries(BatchDetectorPostselectionP
         if (postselection.detectors_by_record[static_cast<std::size_t>(record)].empty()) {
             continue;
         }
-        postselection.boundary_plans.push_back(make_batch_postselection_boundary_plan(
+        boundary_indices.push_back(idx);
+    }
+    postselection.boundary_plans.reserve(boundary_indices.size());
+    for (std::size_t pos = 0; pos < boundary_indices.size(); ++pos) {
+        const std::size_t idx = boundary_indices[pos];
+        auto boundary_plan = make_batch_postselection_boundary_plan(
             postselection,
             static_cast<int>(idx),
-            false));
+            false);
+        const std::size_t next_boundary_end =
+            pos + 1 < boundary_indices.size()
+                ? boundary_indices[pos + 1] + 1
+                : program.instructions.size();
+        boundary_plan.future_page_basis_touches = estimated_segment_basis_touches(
+            program,
+            idx + 1,
+            next_boundary_end);
+        postselection.boundary_plans.push_back(std::move(boundary_plan));
     }
 }
 
@@ -1224,7 +1378,8 @@ BatchDetectorPostselectionResult execute_batch_postselected_page_pool_in_place(
     std::vector<BatchPostselectionBoundaryPlan> local_boundary_plans;
     const auto* boundary_plans = &postselection.boundary_plans;
     if (boundary_plans->empty()) {
-        local_boundary_plans.reserve(program.instructions.size());
+        std::vector<std::size_t> boundary_indices;
+        boundary_indices.reserve(program.instructions.size());
         for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
             const int record = postselection.instruction_records_by_index[idx];
             if (record <= 0) {
@@ -1234,11 +1389,25 @@ BatchDetectorPostselectionResult execute_batch_postselected_page_pool_in_place(
                 fail("batch postselection instruction record table references an out-of-range record");
             }
             if (!postselection.detectors_by_record[static_cast<std::size_t>(record)].empty()) {
-                local_boundary_plans.push_back(make_batch_postselection_boundary_plan(
+                boundary_indices.push_back(idx);
+            }
+        }
+        local_boundary_plans.reserve(boundary_indices.size());
+        for (std::size_t pos = 0; pos < boundary_indices.size(); ++pos) {
+            const std::size_t idx = boundary_indices[pos];
+            auto boundary_plan = make_batch_postselection_boundary_plan(
                     postselection,
                     static_cast<int>(idx),
-                    false));
-            }
+                    false);
+            const std::size_t next_boundary_end =
+                pos + 1 < boundary_indices.size()
+                    ? boundary_indices[pos + 1] + 1
+                    : program.instructions.size();
+            boundary_plan.future_page_basis_touches = estimated_segment_basis_touches(
+                program,
+                idx + 1,
+                next_boundary_end);
+            local_boundary_plans.push_back(std::move(boundary_plan));
         }
         boundary_plans = &local_boundary_plans;
     }
@@ -1254,9 +1423,22 @@ BatchDetectorPostselectionResult execute_batch_postselected_page_pool_in_place(
             if (page.active_shots == 0) {
                 continue;
             }
+            if (options.coalescing_stats != nullptr) {
+                if (page.active_shots == page.batches) {
+                    ++options.coalescing_stats->full_pages_executed;
+                } else {
+                    ++options.coalescing_stats->partial_pages_executed;
+                    options.coalescing_stats->partial_page_live_lanes +=
+                        static_cast<std::uint64_t>(page.active_shots);
+                }
+            }
             auto& scratch = scratches[page_index];
+            const auto segment_start_time = Clock::now();
             for (std::size_t idx = segment_start; idx <= boundary_idx; ++idx) {
                 execute_batch_instruction(page, program.instructions[idx]);
+            }
+            if (options.coalescing_stats != nullptr) {
+                options.coalescing_stats->segment_execution_s += seconds_between(segment_start_time, Clock::now());
             }
             const int record = postselection.instruction_records_by_index[boundary_idx];
             if (record >= static_cast<int>(postselection.detectors_by_record.size())) {
@@ -1268,6 +1450,7 @@ BatchDetectorPostselectionResult execute_batch_postselected_page_pool_in_place(
             discarded_at_boundary = discarded_at_boundary || discarded_now != 0;
         }
         if (discarded_at_boundary) {
+            const auto compaction_start_time = Clock::now();
             for (std::size_t page_index = 0; page_index < pages.size(); ++page_index) {
                 auto& page = pages[page_index];
                 if (page.active_shots == 0) {
@@ -1283,9 +1466,19 @@ BatchDetectorPostselectionResult execute_batch_postselected_page_pool_in_place(
                     options,
                     true);
             }
+            if (options.coalescing_stats != nullptr) {
+                options.coalescing_stats->page_local_compaction_s +=
+                    seconds_between(compaction_start_time, Clock::now());
+            }
+            const auto coalescing_start_time = Clock::now();
             coalesce_partial_pages(
                 pages,
-                boundary_plan);
+                boundary_plan,
+                options);
+            if (options.coalescing_stats != nullptr) {
+                options.coalescing_stats->cross_page_coalescing_s +=
+                    seconds_between(coalescing_start_time, Clock::now());
+            }
         }
         segment_start = boundary_idx + 1;
     }
@@ -1296,8 +1489,21 @@ BatchDetectorPostselectionResult execute_batch_postselected_page_pool_in_place(
             if (page.active_shots == 0) {
                 continue;
             }
+            if (options.coalescing_stats != nullptr) {
+                if (page.active_shots == page.batches) {
+                    ++options.coalescing_stats->full_pages_executed;
+                } else {
+                    ++options.coalescing_stats->partial_pages_executed;
+                    options.coalescing_stats->partial_page_live_lanes +=
+                        static_cast<std::uint64_t>(page.active_shots);
+                }
+            }
+            const auto segment_start_time = Clock::now();
             for (std::size_t idx = segment_start; idx < program.instructions.size(); ++idx) {
                 execute_batch_instruction(page, program.instructions[idx]);
+            }
+            if (options.coalescing_stats != nullptr) {
+                options.coalescing_stats->segment_execution_s += seconds_between(segment_start_time, Clock::now());
             }
         }
     }

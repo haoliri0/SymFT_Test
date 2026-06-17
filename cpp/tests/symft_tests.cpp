@@ -442,7 +442,7 @@ void test_batch_postselection() {
         prepare_presampled_exogenous_packed(samples, program);
         resample_prepared_exogenous_packed_in_place(samples, program, 1024, 47);
         auto plan = single_detector_plan(program, 1);
-        prepare_batch_detector_postselection_boundaries(plan);
+        prepare_batch_detector_postselection_boundaries(plan, program);
 
         int reference_discarded = 0;
         int reference_accepted = 0;
@@ -467,11 +467,16 @@ void test_batch_postselection() {
             assign_presampled_exogenous_batch_in_place(pages.back(), samples, page_index * 64);
         }
         std::vector<BatchDetectorPostselectionScratch> scratches;
+        BatchPostselectionCoalescingStats coalescing_stats;
+        BatchDetectorPostselectionOptions options;
+        options.cross_page_coalescing_benefit_factor = 0;
+        options.coalescing_stats = &coalescing_stats;
         const auto pooled_result = execute_batch_postselected_page_pool_in_place(
             pages,
             program,
             plan,
-            scratches);
+            scratches,
+            options);
         int live_pages = 0;
         for (const auto& page : pages) {
             if (page.active_shots > 0) {
@@ -480,6 +485,7 @@ void test_batch_postselection() {
         }
         require(pooled_result.discarded == reference_discarded, "paged postselection discarded count");
         require(pooled_result.accepted == reference_accepted, "paged postselection accepted count");
+        require(coalescing_stats.accepted > 0, "paged postselection debug mode coalesces");
         require(live_pages <= 8, "paged postselection coalesces survivor pages");
     }
 }
