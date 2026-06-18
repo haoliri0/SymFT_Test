@@ -1,4 +1,5 @@
 #include "frontend/stim.hpp"
+#include "frontend/stim_prepared_sampler.hpp"
 #include "sampler/batch_sampler.hpp"
 #include "sampler/exogenous.hpp"
 #include "sampler/single_shot.hpp"
@@ -6,7 +7,9 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -431,6 +434,38 @@ void test_detectors() {
     require(summary2.accepted == 0, "summary accepted count");
 }
 
+void test_prepared_circuit_sampler_reuse() {
+    using namespace symft;
+    const std::string path = "/tmp/symft_prepared_sampler_test.stim";
+    {
+        std::ofstream out(path);
+        out << "M 0\nOBSERVABLE_INCLUDE(0) rec[-1]\n";
+    }
+
+    CircuitSamplingOptions options;
+    options.batch_size = 16;
+    options.sample_chunk_shots = 64;
+    options.threads = 4;
+
+    auto batch = prepare_batch_sampler_from_stim_file(path, options);
+    const auto large = batch.sample(257);
+    require(large.counts.shots == 257, "prepared batch large shot count");
+    require(large.counts.accepted == 257, "prepared batch large accepted count");
+
+    const auto small = batch.sample(1);
+    require(small.counts.shots == 1, "prepared batch inactive workers do not leak shots");
+    require(small.counts.accepted == 1, "prepared batch inactive workers do not leak accepted count");
+    require(small.counts.discarded == 0, "prepared batch inactive workers do not leak discarded count");
+
+    auto single = prepare_single_shot_sampler_from_stim_file(path, options);
+    const auto single_a = single.sample(3);
+    const auto single_b = single.sample(4);
+    require(single_a.counts.shots == 3, "prepared single first shot count");
+    require(single_b.counts.shots == 4, "prepared single second shot count");
+
+    std::remove(path.c_str());
+}
+
 } // namespace
 
 int main() {
@@ -447,6 +482,7 @@ int main() {
     test_batch_sampler();
     test_batch_postselection();
     test_detectors();
+    test_prepared_circuit_sampler_reuse();
     std::cout << "symft_cpp_tests passed (SIMD backend: " << symft::active_simd_backend() << ")\n";
     return 0;
 }

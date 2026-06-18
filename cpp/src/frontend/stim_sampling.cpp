@@ -1,8 +1,10 @@
 #include "frontend/stim.hpp"
 
 #include "core/internal.hpp"
+#include "frontend/stim_prepared_sampler.hpp"
 #include "sampler/single_shot.hpp"
 
+#include <chrono>
 #include <limits>
 #include <utility>
 #include <vector>
@@ -11,6 +13,12 @@ namespace symft {
 namespace {
 
 using detail::fail;
+
+using Clock = std::chrono::steady_clock;
+
+double seconds_between(Clock::time_point start, Clock::time_point stop) {
+    return std::chrono::duration<double>(stop - start).count();
+}
 
 int instruction_checkpoint_for_pending_prefix(
     const FactoredInstructionProgram& program,
@@ -32,7 +40,7 @@ int instruction_checkpoint_for_pending_prefix(
 }
 
 SymbolicBool detector_expression(
-    const StimDetector& detector,
+    const CircuitDetector& detector,
     const std::vector<SymbolicBool>& measurement_records) {
     SymbolicBool out(false);
     for (int record : detector.records) {
@@ -46,7 +54,7 @@ SymbolicBool detector_expression(
 
 FactoredInstructionProgram insert_stim_detector_events(
     FactoredInstructionProgram program,
-    const std::vector<StimDetector>& detectors,
+    const std::vector<CircuitDetector>& detectors,
     const std::vector<SymbolicBool>& measurement_records) {
     if (detectors.empty()) {
         return program;
@@ -82,6 +90,21 @@ FactoredInstructionProgram insert_stim_detector_events(
         std::move(program.context));
 }
 
+std::vector<CircuitDetector> detectors_with_lowered_positions(
+    const QuantumCircuit& circuit,
+    const CircuitLoweringResult& lowered) {
+    std::vector<CircuitDetector> detectors = circuit.detectors;
+    for (auto& detector : detectors) {
+        if (detector.after_instruction < 0 ||
+            detector.after_instruction >= static_cast<int>(lowered.instruction_pending_operation_counts.size())) {
+            fail("detector source position is out of range");
+        }
+        detector.after_pending_operation =
+            lowered.instruction_pending_operation_counts[static_cast<std::size_t>(detector.after_instruction)];
+    }
+    return detectors;
+}
+
 } // namespace
 
 FactoredInstructionProgram plan_stim_factored_program(const StimParseResult& parsed) {
@@ -91,6 +114,56 @@ FactoredInstructionProgram plan_stim_factored_program(const StimParseResult& par
         std::move(program),
         parsed.detectors,
         parsed.measurement_records);
+}
+
+CircuitSamplingInput make_stim_circuit_sampling_input(
+    const QuantumCircuit& circuit,
+    const CircuitSamplingOptions& options) {
+    CircuitLoweringResult lowered = lower_circuit_to_factored(circuit);
+    auto detectors = detectors_with_lowered_positions(circuit, lowered);
+    StimParseResult parsed{
+        std::move(lowered.state),
+        std::move(lowered.measurement_records),
+        std::move(detectors),
+        circuit.observables};
+    auto program = plan_stim_factored_program(parsed);
+    return make_circuit_sampling_input(
+        std::move(program),
+        logical_records_for_observable(parsed.observables, options.observable),
+        options.observable,
+        static_cast<int>(parsed.observables.size()));
+}
+
+CircuitSamplingInput make_stim_circuit_sampling_input_from_file(
+    const std::string& path,
+    const CircuitSamplingOptions& options) {
+    CircuitSamplingInput input;
+    const auto parse_start = Clock::now();
+    const QuantumCircuit circuit = parse_stim_circuit_file(path);
+    const auto parse_stop = Clock::now();
+
+    const auto plan_start = Clock::now();
+    input = make_stim_circuit_sampling_input(circuit, options);
+    const auto plan_stop = Clock::now();
+    input.preprocessing_timing.parse_s = seconds_between(parse_start, parse_stop);
+    input.preprocessing_timing.plan_s = seconds_between(plan_start, plan_stop);
+    return input;
+}
+
+PreparedCircuitSingleShotSampler prepare_single_shot_sampler_from_stim_file(
+    const std::string& path,
+    CircuitSamplingOptions options) {
+    return PreparedCircuitSingleShotSampler(
+        make_stim_circuit_sampling_input_from_file(path, options),
+        options);
+}
+
+PreparedCircuitBatchSampler prepare_batch_sampler_from_stim_file(
+    const std::string& path,
+    CircuitSamplingOptions options) {
+    return PreparedCircuitBatchSampler(
+        make_stim_circuit_sampling_input_from_file(path, options),
+        options);
 }
 
 StimSampleSummary estimate_stim_logical_error_rate(const StimParseResult& parsed, int shots, std::uint64_t seed) {

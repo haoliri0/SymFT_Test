@@ -25,6 +25,7 @@ add_library(symft_cpp
     src/factored/factored_planner.cpp
     src/sampler/presampled_expression.cpp
     src/sampler/single_shot_sampler.cpp
+    src/sampler/prepared_sampler.cpp
     src/sampler/exogenous_presample.cpp
     src/frontend/stim_parser.cpp
     src/frontend/stim_sampling.cpp
@@ -37,6 +38,7 @@ add_library(symft_cpp
 )
 
 target_include_directories(symft_cpp PUBLIC src)
+target_link_libraries(symft_cpp PUBLIC Threads::Threads)
 target_compile_features(symft_cpp PUBLIC cxx_std_20)
 target_compile_options(symft_cpp PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic>
