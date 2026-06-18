@@ -10,7 +10,7 @@
 namespace symft::detail {
 
 inline constexpr std::size_t kNoSource = std::numeric_limits<std::size_t>::max();
-inline constexpr std::size_t kSimdPairRotationThreshold = 4096;
+inline constexpr std::size_t kSimdPairRotationThreshold = 16384;
 
 #if defined(__clang__)
 #define SYMFT_SINGLE_SIMD_LOOP _Pragma("clang loop vectorize(enable) interleave(enable)")
