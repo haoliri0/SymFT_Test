@@ -66,6 +66,31 @@ symft::BatchDetectorPostselectionPlan single_detector_plan(
     return plan;
 }
 
+symft::BatchDetectorPostselectionResult execute_expression_postselected_for_test(
+    symft::BatchFactoredExecutorState& runtime,
+    const symft::FactoredInstructionProgram& program,
+    const symft::PackedPresampledExogenous& samples,
+    const symft::BatchDetectorPostselectionPlan& postselection,
+    symft::BatchDetectorPostselectionScratch& scratch,
+    symft::BatchDetectorPostselectionOptions options = {}) {
+    symft::PresampledExpressionPlan expression_plan;
+    symft::prepare_presampled_expression_plan(expression_plan, program, samples);
+    symft::PresampledExpressionBlock expression_block;
+    symft::evaluate_presampled_expression_block(
+        expression_block,
+        expression_plan,
+        samples);
+    return symft::execute_batch_postselected_in_place(
+        runtime,
+        program,
+        expression_plan,
+        expression_block,
+        0,
+        postselection,
+        scratch,
+        options);
+}
+
 void test_pauli_algebra() {
     using namespace symft;
     require(pauli_x(1, 0) * pauli_x(1, 0) == pauli_identity(1), "X squares to I");
@@ -276,10 +301,10 @@ void test_presampled_exogenous() {
     const auto packed_samples = presample_exogenous_packed(program, 4, 17);
     require(packed_samples.nshots == 4, "packed presampled shot count");
     require(packed_samples.nsymbols == program.nsymbols, "packed presampled symbol count");
-    SingleShotPresampledExpressionPlan packed_expression_plan;
-    prepare_single_shot_presampled_expression_plan(packed_expression_plan, program, packed_samples);
-    SingleShotPresampledExpressionBlock packed_expression_block;
-    evaluate_single_shot_presampled_expression_block(
+    PresampledExpressionPlan packed_expression_plan;
+    prepare_presampled_expression_plan(packed_expression_plan, program, packed_samples);
+    PresampledExpressionBlock packed_expression_block;
+    evaluate_presampled_expression_block(
         packed_expression_block,
         packed_expression_plan,
         packed_samples);
@@ -290,6 +315,8 @@ void test_presampled_exogenous() {
     }
 
     require(default_single_shot_sample_chunk_shots() == 1024, "single-shot default sample chunk");
+    require(default_batch_count(10) == 64, "batch default keeps active footprint cap");
+    require(default_postselected_batch_count(10) == 256, "postselected batch default uses larger pages");
     const auto chunked_records = sample_measurements(program, 9, 17, 3);
     require(chunked_records.size() == 9, "chunked single-shot sample count");
     for (const auto& shot : chunked_records) {
@@ -357,10 +384,10 @@ void test_batch_postselection() {
         const auto parsed = parse_stim_text("M !0\nDETECTOR rec[-1]\n");
         PendingFactoredState pending(parsed.state);
         const auto program = plan_factored_updates(pending);
-        const auto samples = presample_exogenous(program, 8, 17);
+        const auto samples = presample_exogenous_packed(program, 8, 17);
         BatchFactoredExecutorState runtime(program, 8, 19);
         BatchDetectorPostselectionScratch scratch;
-        const auto result = execute_batch_postselected_in_place(
+        const auto result = execute_expression_postselected_for_test(
             runtime,
             program,
             samples,
@@ -374,10 +401,10 @@ void test_batch_postselection() {
         const auto parsed = parse_stim_text("M 0\nDETECTOR rec[-1]\n");
         PendingFactoredState pending(parsed.state);
         const auto program = plan_factored_updates(pending);
-        const auto samples = presample_exogenous(program, 8, 23);
+        const auto samples = presample_exogenous_packed(program, 8, 23);
         BatchFactoredExecutorState runtime(program, 8, 29);
         BatchDetectorPostselectionScratch scratch;
-        const auto result = execute_batch_postselected_in_place(
+        const auto result = execute_expression_postselected_for_test(
             runtime,
             program,
             samples,
@@ -400,10 +427,10 @@ void test_batch_postselection() {
             "M 1\n");
         PendingFactoredState pending(parsed.state);
         const auto program = plan_factored_updates(pending);
-        const auto samples = presample_exogenous(program, 64, 41);
+        const auto samples = presample_exogenous_packed(program, 64, 41);
         BatchDetectorPostselectionScratch default_scratch;
         BatchFactoredExecutorState default_runtime(program, 64, 43);
-        const auto default_result = execute_batch_postselected_in_place(
+        const auto default_result = execute_expression_postselected_for_test(
             default_runtime,
             program,
             samples,
@@ -411,7 +438,7 @@ void test_batch_postselection() {
             default_scratch);
         BatchDetectorPostselectionScratch alternate_scratch;
         BatchFactoredExecutorState alternate_runtime(program, 64, 43);
-        const auto alternate_result = execute_batch_postselected_in_place(
+        const auto alternate_result = execute_expression_postselected_for_test(
             alternate_runtime,
             program,
             samples,
@@ -419,7 +446,7 @@ void test_batch_postselection() {
             alternate_scratch,
             BatchDetectorPostselectionOptions{1});
         require(default_result.discarded > 0, "mask-threshold postselection test kills at least one lane");
-        require(default_result.discarded * 4 < 64, "mask-threshold postselection keeps a dirty active prefix");
+        require(default_runtime.active_shots == default_result.accepted, "default mask-threshold compacts dead lanes");
         require(default_result.discarded == alternate_result.discarded, "mask-threshold postselection discarded count");
         require(default_result.accepted == alternate_result.accepted, "mask-threshold postselection accepted count");
         require(

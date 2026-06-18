@@ -53,14 +53,13 @@ struct BenchResult {
     int observable_includes = 0;
     int observable = 0;
     int max_k = 0;
-    int block_shots = 0;
+    int batch_size = 0;
     int sample_chunk_shots = 0;
     int repeats = 1;
     int threads = 1;
     int requested_threads = 1;
     bool detector_postselection = false;
     int batch_mask_threshold_denominator = 0;
-    int batch_tail_fill_threshold_denominator = 0;
     std::string exogenous_mode;
     std::string rng_streams = "split_exogenous_branch";
     std::string phase_timing = "wall";
@@ -123,11 +122,11 @@ bool parse_bool_flag(const char* raw, const char* name) {
     throw std::runtime_error(std::string("invalid ") + name + ": " + raw);
 }
 
-int parse_block_shots(const char* raw) {
+int parse_batch_size(const char* raw) {
     if (std::string(raw) == "auto") {
         return 0;
     }
-    return parse_positive_int(raw, "block_shots");
+    return parse_positive_int(raw, "batch_size");
 }
 
 int parse_sample_chunk_shots(const char* raw) {
@@ -164,36 +163,36 @@ SamplerMode parse_sampler_mode(const char* raw) {
 struct Options {
     std::string path = "d3.stim";
     std::uint64_t shots = 100000000ULL;
-    int block_shots = 0;
+    int batch_size = 0;
     int sample_chunk_shots = 0;
     int repeats = 1;
     int observable = 0;
     int threads = 1;
     bool postselect_detectors = false;
     int batch_mask_threshold_denominator = 2;
-    int batch_tail_fill_threshold_denominator = 5;
     SamplerMode sampler = SamplerMode::Batch;
 };
 
 void print_usage(const char* argv0) {
     std::cerr
-        << "usage: " << argv0 << " [circuit.stim] [shots] [batch_size] [repeats] [observable] [postselect_detectors]\n"
-        << "       " << argv0 << " --circuit d5.stim --shots 1000000 --batch-size 64 --postselect-detectors\n"
+        << "usage: " << argv0 << " --circuit PATH --shots N [options]\n"
+        << "       " << argv0 << " --sampler batch --circuit d5.stim --shots 1000000 --batch-size auto --postselect-detectors\n"
         << "       " << argv0 << " --sampler both --circuit d5.stim --shots 1000000 --batch-size auto\n"
         << "\n"
-        << "options:\n"
+        << "common options:\n"
         << "  --circuit PATH, --file PATH        Stim circuit path\n"
         << "  --shots N                         Number of shots\n"
         << "  --sampler single|batch|both       Sampler to benchmark; default: batch\n"
-        << "  --batch-size N|auto               Batch size; --block-shots is accepted as an alias\n"
-        << "  --sample-chunk-size N|auto        Presample requested shots in reusable chunks; default: 1024 for packed streaming\n"
+        << "  --sample-chunk-shots N|auto       Presample requested shots in reusable chunks; default: 1024 for packed streaming\n"
         << "  --repeats N                       Number of repeats\n"
         << "  --observable N                    Observable index\n"
-        << "  --threads N|auto                  Parallel worker threads over independent batches\n"
         << "  --postselect-detectors            Stop discarded single shots or compact discarded batch shots after fired detectors\n"
         << "  --no-postselect-detectors         Disable detector postselection abort\n"
-        << "  --batch-mask-threshold-denominator N  Combined mode compacts before pure ops when dead/live >= 1/N; default: 2\n"
-        << "  --batch-tail-fill-threshold-denominator N  Use unordered tail-fill when dead/live <= 1/N; 0 disables; default: 5\n";
+        << "\n"
+        << "batch-only options:\n"
+        << "  --batch-size N|auto               Batch size; auto uses the postselection-tuned size when postselecting\n"
+        << "  --threads N|auto                  Parallel worker threads over independent chunks\n"
+        << "  --batch-mask-threshold-denominator N  Base batch postselection compaction threshold; expensive active-state ops compact more aggressively; default: 2\n";
 }
 
 std::string require_option_value(
@@ -220,7 +219,7 @@ void apply_positional_option(Options& options, int position, const char* value) 
         options.shots = parse_u64(value, "shots");
         break;
     case 2:
-        options.block_shots = parse_block_shots(value);
+        options.batch_size = parse_batch_size(value);
         break;
     case 3:
         options.repeats = parse_positive_int(value, "repeats");
@@ -266,12 +265,10 @@ Options parse_options(int argc, char** argv) {
         } else if (name == "--sampler") {
             const std::string raw = require_option_value(name, value, idx, argc, argv);
             options.sampler = parse_sampler_mode(raw.c_str());
-        } else if (name == "--batch-size" || name == "--block-shots") {
+        } else if (name == "--batch-size") {
             const std::string raw = require_option_value(name, value, idx, argc, argv);
-            options.block_shots = parse_block_shots(raw.c_str());
-        } else if (
-            name == "--sample-chunk-size" || name == "--sample-chunk-shots" ||
-            name == "--shot-chunk-size" || name == "--shot-chunk-shots") {
+            options.batch_size = parse_batch_size(raw.c_str());
+        } else if (name == "--sample-chunk-shots") {
             const std::string raw = require_option_value(name, value, idx, argc, argv);
             options.sample_chunk_shots = parse_sample_chunk_shots(raw.c_str());
         } else if (name == "--repeats") {
@@ -291,10 +288,6 @@ Options parse_options(int argc, char** argv) {
             const std::string raw = require_option_value(name, value, idx, argc, argv);
             options.batch_mask_threshold_denominator =
                 parse_positive_int(raw.c_str(), "batch_mask_threshold_denominator");
-        } else if (name == "--batch-tail-fill-threshold-denominator") {
-            const std::string raw = require_option_value(name, value, idx, argc, argv);
-            options.batch_tail_fill_threshold_denominator =
-                parse_nonnegative_int(raw.c_str(), "batch_tail_fill_threshold_denominator");
         } else {
             throw std::runtime_error("unknown option: " + name);
         }
@@ -305,7 +298,6 @@ Options parse_options(int argc, char** argv) {
 symft::BatchDetectorPostselectionOptions batch_postselection_options(const Options& options) {
     symft::BatchDetectorPostselectionOptions out;
     out.mask_dead_shots_min_fraction_denominator = options.batch_mask_threshold_denominator;
-    out.unordered_tail_fill_max_dead_fraction_denominator = options.batch_tail_fill_threshold_denominator;
     return out;
 }
 
@@ -635,13 +627,12 @@ struct RateBenchSetup {
     std::vector<int> record_last_use_by_index;
     symft::DetectorPostselectionPlan single_postselection_plan;
     symft::BatchDetectorPostselectionPlan batch_postselection_plan;
-    int block_shots = 0;
+    int batch_size = 0;
     int sample_chunk_shots = 0;
 };
 
 RateBenchSetup build_rate_bench_setup(
     const Options& options,
-    bool packed_streaming,
     double& parse_s,
     double& plan_s) {
     const auto parse_start = Clock::now();
@@ -654,11 +645,15 @@ RateBenchSetup build_rate_bench_setup(
     const auto plan_stop = Clock::now();
 
     RateBenchSetup setup;
-    setup.block_shots = options.block_shots > 0 ? options.block_shots : symft::default_batch_count(program.max_k);
+    setup.batch_size = options.batch_size > 0
+                           ? options.batch_size
+                           : (options.postselect_detectors
+                                  ? symft::default_postselected_batch_count(program.max_k)
+                                  : symft::default_batch_count(program.max_k));
     setup.sample_chunk_shots =
         options.sample_chunk_shots > 0
             ? options.sample_chunk_shots
-            : (packed_streaming ? symft::default_single_shot_sample_chunk_shots() : setup.block_shots);
+            : symft::default_single_shot_sample_chunk_shots();
     setup.logical_records = logical_records_for_observable(parsed.observables, options.observable);
     setup.postselection_detectors_by_record = detectors_by_max_record(parsed.detectors, program.nrecords);
     setup.instruction_records_by_index = instruction_records(program);
@@ -702,13 +697,13 @@ BenchResult run_single_sampler(const Options& options) {
 
     double parse_total = 0.0;
     double plan_total = 0.0;
-    const auto setup = build_rate_bench_setup(options, true, parse_total, plan_total);
+    const auto setup = build_rate_bench_setup(options, parse_total, plan_total);
     result.n = setup.parsed.state.n;
     result.records = setup.program.nrecords;
     result.max_k = setup.program.max_k;
     result.detectors = static_cast<int>(setup.parsed.detectors.size());
     result.observable_includes = static_cast<int>(setup.parsed.observables.size());
-    result.block_shots = setup.block_shots;
+    result.batch_size = setup.batch_size;
     result.sample_chunk_shots = setup.sample_chunk_shots;
 
     double presample_total = 0.0;
@@ -722,10 +717,10 @@ BenchResult run_single_sampler(const Options& options) {
             static_cast<std::uint64_t>(result.sample_chunk_shots));
         symft::FactoredExecutorState runtime(setup.program, block_seed(0x5eed1234ULL, repeat, 0));
         symft::PackedPresampledExogenous packed_samples;
-        symft::SingleShotPresampledExpressionPlan packed_expression_plan;
-        symft::SingleShotPresampledExpressionBlock packed_expression_block;
+        symft::PresampledExpressionPlan packed_expression_plan;
+        symft::PresampledExpressionBlock packed_expression_block;
         symft::prepare_presampled_exogenous_packed(packed_samples, setup.program);
-        symft::prepare_single_shot_presampled_expression_plan(
+        symft::prepare_presampled_expression_plan(
             packed_expression_plan,
             setup.program,
             packed_samples);
@@ -744,7 +739,7 @@ BenchResult run_single_sampler(const Options& options) {
                 setup.program,
                 chunk,
                 block_seed(0x7eed0000ULL, repeat, chunk_index));
-            symft::evaluate_single_shot_presampled_expression_block(
+            symft::evaluate_presampled_expression_block(
                 packed_expression_block,
                 packed_expression_plan,
                 packed_samples);
@@ -826,18 +821,18 @@ BenchResult run_batch_sampler(const Options& options) {
     result.detector_postselection = options.postselect_detectors;
     result.batch_mask_threshold_denominator =
         options.postselect_detectors ? options.batch_mask_threshold_denominator : 0;
-    result.batch_tail_fill_threshold_denominator =
-        options.postselect_detectors ? options.batch_tail_fill_threshold_denominator : 0;
-    result.exogenous_mode = "packed_presampled_streaming";
+    result.exogenous_mode = options.postselect_detectors
+                                 ? "packed_presampled_expression_streaming"
+                                 : "packed_presampled_streaming";
     result.rng_streams = "split_exogenous_branch";
 
     double parse_total = 0.0;
     double plan_total = 0.0;
-    const auto setup = build_rate_bench_setup(options, true, parse_total, plan_total);
+    const auto setup = build_rate_bench_setup(options, parse_total, plan_total);
     result.n = setup.parsed.state.n;
     result.records = setup.program.nrecords;
     result.max_k = setup.program.max_k;
-    result.block_shots = setup.block_shots;
+    result.batch_size = setup.batch_size;
     result.sample_chunk_shots = setup.sample_chunk_shots;
     result.detectors = static_cast<int>(setup.parsed.detectors.size());
     result.observable_includes = static_cast<int>(setup.parsed.observables.size());
@@ -851,11 +846,10 @@ BenchResult run_batch_sampler(const Options& options) {
         static_cast<std::uint64_t>(result.sample_chunk_shots));
     const std::uint64_t blocks_per_chunk = ceil_div_u64(
         static_cast<std::uint64_t>(result.sample_chunk_shots),
-        static_cast<std::uint64_t>(result.block_shots));
+        static_cast<std::uint64_t>(result.batch_size));
     const int active_threads = std::min<int>(
         options.threads,
         static_cast<int>(std::max<std::uint64_t>(1, nchunks)));
-    int active_threads_used = active_threads;
     const auto postselection_options = batch_postselection_options(options);
 
     for (int repeat = 0; repeat < options.repeats; ++repeat) {
@@ -866,7 +860,7 @@ BenchResult run_batch_sampler(const Options& options) {
             WorkerResult local;
             symft::BatchFactoredExecutorState runtime(
                 setup.program,
-                result.block_shots,
+                result.batch_size,
                 block_seed(0x5eed1234ULL, repeat, static_cast<std::uint64_t>(worker_id)));
             std::vector<std::uint64_t> discard_bits(runtime.batch_words, 0);
             std::vector<std::uint64_t> logical_bits(runtime.batch_words, 0);
@@ -875,6 +869,14 @@ BenchResult run_batch_sampler(const Options& options) {
             symft::prepare_batch_detector_postselection_scratch(postselection_scratch, runtime);
             symft::PackedPresampledExogenous samples;
             symft::prepare_presampled_exogenous_packed(samples, setup.program);
+            symft::PresampledExpressionPlan expression_plan;
+            symft::PresampledExpressionBlock expression_block;
+            if (options.postselect_detectors) {
+                symft::prepare_presampled_expression_plan(
+                    expression_plan,
+                    setup.program,
+                    samples);
+            }
             for (std::uint64_t chunk_index = static_cast<std::uint64_t>(worker_id);
                  chunk_index < nchunks;
                  chunk_index += static_cast<std::uint64_t>(active_threads)) {
@@ -890,23 +892,34 @@ BenchResult run_batch_sampler(const Options& options) {
                     setup.program,
                     chunk_shots,
                     block_seed(0x7eed0000ULL, repeat, chunk_index));
+                if (options.postselect_detectors) {
+                    symft::evaluate_presampled_expression_block(
+                        expression_block,
+                        expression_plan,
+                        samples);
+                }
                 const auto presample_stop = Clock::now();
                 local.presample_s += seconds_between(presample_start, presample_stop);
 
                 for (int chunk_local_offset = 0, local_block_index = 0;
                      chunk_local_offset < chunk_shots;
-                     chunk_local_offset += result.block_shots, ++local_block_index) {
-                    const int block = std::min(result.block_shots, chunk_shots - chunk_local_offset);
+                     chunk_local_offset += result.batch_size, ++local_block_index) {
+                    const int block = std::min(result.batch_size, chunk_shots - chunk_local_offset);
                     const std::uint64_t block_index =
                         chunk_index * blocks_per_chunk + static_cast<std::uint64_t>(local_block_index);
                     const auto execute_start = Clock::now();
-                    symft::reset_batch_executor(runtime, setup.program, block);
+                    symft::reset_batch_executor(
+                        runtime,
+                        setup.program,
+                        block,
+                        !options.postselect_detectors);
                     runtime.rng_state = block_seed(0x5eed1234ULL, repeat, block_index);
                     if (options.postselect_detectors) {
                         const auto postselection_result = symft::execute_batch_postselected_in_place(
                             runtime,
                             setup.program,
-                            samples,
+                            expression_plan,
+                            expression_block,
                             chunk_local_offset,
                             setup.batch_postselection_plan,
                             postselection_scratch,
@@ -971,8 +984,8 @@ BenchResult run_batch_sampler(const Options& options) {
 
     const double inv_repeats = 1.0 / static_cast<double>(options.repeats);
     result.sampler = options.postselect_detectors ? "batch_postselected" : "batch";
-    result.threads = active_threads_used;
-    result.phase_timing = active_threads_used > 1 ? "worker_sum" : "wall";
+    result.threads = active_threads;
+    result.phase_timing = active_threads > 1 ? "worker_sum" : "wall";
     result.parse_s = parse_total;
     result.plan_s = plan_total;
     result.presample_s = presample_total * inv_repeats;
@@ -983,6 +996,7 @@ BenchResult run_batch_sampler(const Options& options) {
 }
 
 void print_result(const BenchResult& result) {
+    const bool is_batch_sampler = result.sampler == "batch" || result.sampler == "batch_postselected";
     const double shots_per_s = result.sample_s > 0.0 ? static_cast<double>(result.requested_shots) / result.sample_s : 0.0;
     const double discard_rate = result.counts.shots == 0
                                     ? std::numeric_limits<double>::quiet_NaN()
@@ -991,43 +1005,31 @@ void print_result(const BenchResult& result) {
                                     ? std::numeric_limits<double>::quiet_NaN()
                                     : static_cast<double>(result.counts.logical_errors) / static_cast<double>(result.counts.accepted);
 
+    std::cout << "sampler " << result.sampler << "\n";
     std::cout << "file " << result.path << "\n";
-    std::cout << "qubits " << result.n << "\n";
-    std::cout << "records " << result.records << "\n";
-    std::cout << "detectors " << result.detectors << "\n";
-    std::cout << "observable_includes " << result.observable_includes << "\n";
-    std::cout << "observable " << result.observable << "\n";
-    std::cout << "max_active_qubits " << result.max_k << "\n";
-    std::cout << "simd_backend " << symft::active_simd_backend() << "\n";
-    std::cout << "batch_backend " << symft::active_batch_backend() << "\n";
     std::cout << "shots " << result.requested_shots << "\n";
     std::cout << "sampled_shots " << result.counts.shots << "\n";
-    std::cout << "batch_size " << result.block_shots << "\n";
-    std::cout << "block_shots " << result.block_shots << "\n";
+    std::cout << "detector_postselection " << (result.detector_postselection ? "enabled" : "disabled") << "\n";
+    if (is_batch_sampler) {
+        std::cout << "batch_size " << result.batch_size << "\n";
+    }
     std::cout << "sample_chunk_shots " << result.sample_chunk_shots << "\n";
     std::cout << "repeats " << result.repeats << "\n";
-    std::cout << "threads " << result.threads << "\n";
-    std::cout << "requested_threads " << result.requested_threads << "\n";
-    std::cout << "sampler " << result.sampler << "\n";
-    std::cout << "detector_postselection " << (result.detector_postselection ? "enabled" : "disabled") << "\n";
+    if (is_batch_sampler) {
+        std::cout << "threads " << result.threads << "\n";
+        if (result.requested_threads != result.threads) {
+            std::cout << "requested_threads " << result.requested_threads << "\n";
+        }
+    }
     if (result.sampler == "batch_postselected") {
-        std::cout << "batch_postselection_mode combined\n";
         std::cout << "batch_mask_threshold_denominator "
                   << result.batch_mask_threshold_denominator << "\n";
-        std::cout << "batch_tail_fill_threshold_denominator "
-                  << result.batch_tail_fill_threshold_denominator << "\n";
     }
-    std::cout << "exogenous_mode " << result.exogenous_mode << "\n";
-    std::cout << "rng_streams " << result.rng_streams << "\n";
-    std::cout << "phase_timing " << result.phase_timing << "\n";
-    std::cout << "parse_s_avg " << result.parse_s << "\n";
-    std::cout << "plan_s_avg " << result.plan_s << "\n";
+    std::cout << "sample_s_avg " << result.sample_s << "\n";
+    std::cout << "sample_shots_per_s " << shots_per_s << "\n";
     std::cout << "presample_s_avg " << result.presample_s << "\n";
     std::cout << "execute_s_avg " << result.execute_s << "\n";
     std::cout << "accumulate_s_avg " << result.accumulate_s << "\n";
-    std::cout << "sample_wall_s_avg " << result.sample_s << "\n";
-    std::cout << "sample_s_avg " << result.sample_s << "\n";
-    std::cout << "sample_shots_per_s " << shots_per_s << "\n";
     std::cout << "discarded " << result.counts.discarded << "\n";
     std::cout << "accepted " << result.counts.accepted << "\n";
     std::cout << "logical_errors " << result.counts.logical_errors << "\n";

@@ -8,8 +8,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <limits>
-#include <utility>
 
 namespace symft {
 using namespace detail;
@@ -133,20 +131,6 @@ bool eval_symbolic_bool_unchecked(const SymbolicBoolEvaluationPlan& plan, const 
     return eval_symbolic_bool_packed_unchecked(plan, runtime);
 }
 
-std::uint64_t low_bits_mask(int nbits) {
-    if (nbits <= 0) {
-        return 0;
-    }
-    if (nbits >= 64) {
-        return std::numeric_limits<std::uint64_t>::max();
-    }
-    return (std::uint64_t{1} << nbits) - 1;
-}
-
-std::uint64_t live_shot_word_mask(int shots, std::size_t word) {
-    return low_bits_mask(shots - static_cast<int>(word << 6));
-}
-
 int normalize_single_shot_sample_chunk_shots(int sample_chunk_shots) {
     if (sample_chunk_shots < 0) {
         fail("single-shot sample chunk count must be nonnegative");
@@ -154,101 +138,9 @@ int normalize_single_shot_sample_chunk_shots(int sample_chunk_shots) {
     return sample_chunk_shots > 0 ? sample_chunk_shots : kDefaultSingleShotSampleChunkShots;
 }
 
-SingleShotPresampledExpression split_presampled_expression(
-    const SymbolicBoolEvaluationPlan& source,
-    const std::vector<std::uint64_t>& exogenous_assigned_words) {
-    SingleShotPresampledExpression out;
-    out.constant = source.constant;
-    std::vector<int> residual_conditions;
-    residual_conditions.reserve(source.conditions.size());
-    for (int condition : source.conditions) {
-        const std::size_t word = symbol_word_index(condition);
-        const std::uint64_t mask = symbol_bit_mask(condition);
-        const bool exogenous =
-            word < exogenous_assigned_words.size() &&
-            (exogenous_assigned_words[word] & mask) != 0;
-        if (exogenous) {
-            out.exogenous_conditions.push_back(condition);
-        } else {
-            residual_conditions.push_back(condition);
-        }
-    }
-    out.residual_plan = SymbolicBoolEvaluationPlan(SymbolicBool(false, std::move(residual_conditions)));
-    return out;
-}
-
-const SymbolicBoolEvaluationPlan* instruction_expression_plan(const ApplyPrecomputedActivePauliRotation& instruction) {
-    return &instruction.sign_plan;
-}
-
-const SymbolicBoolEvaluationPlan* instruction_expression_plan(const PromoteDormantRotation& instruction) {
-    return &instruction.sign_plan;
-}
-
-const SymbolicBoolEvaluationPlan* instruction_expression_plan(const RecordMeasurement& instruction) {
-    return &instruction.outcome_plan;
-}
-
-const SymbolicBoolEvaluationPlan* instruction_expression_plan(const MeasureActiveLastZ& instruction) {
-    return &instruction.outcome_plan;
-}
-
-const SymbolicBoolEvaluationPlan* instruction_expression_plan(const MeasurePrecomputedActivePauli& instruction) {
-    return &instruction.outcome_plan;
-}
-
-const SymbolicBoolEvaluationPlan* instruction_expression_plan(const IntroduceDormantMeasurementBranch& instruction) {
-    return &instruction.outcome_plan;
-}
-
-const SymbolicBoolEvaluationPlan* instruction_expression_plan(const FactoredInstruction& instruction) {
-    return std::visit([](const auto& inst) { return instruction_expression_plan(inst); }, instruction);
-}
-
-std::size_t expression_block_offset(
-    const SingleShotPresampledExpressionBlock& block,
-    std::size_t expression_index,
-    std::size_t shot_word) {
-    return expression_index * block.shot_words + shot_word;
-}
-
-bool expression_block_bit(
-    const SingleShotPresampledExpressionBlock& block,
-    int block_expression_index,
-    int shot_index) {
-    const std::size_t word = static_cast<std::size_t>(shot_index >> 6);
-    const std::uint64_t mask = std::uint64_t{1} << (shot_index & 63);
-    return (block.expression_words[expression_block_offset(
-                block,
-                static_cast<std::size_t>(block_expression_index),
-                word)] & mask) != 0;
-}
-
-bool same_exogenous_partial(
-    const SingleShotPresampledExpression& lhs,
-    const SingleShotPresampledExpression& rhs) {
-    return lhs.constant == rhs.constant &&
-           lhs.exogenous_conditions == rhs.exogenous_conditions;
-}
-
-int intern_exogenous_partial(
-    std::vector<SingleShotPresampledExpression>& block_expressions,
-    const SingleShotPresampledExpression& expression) {
-    for (std::size_t idx = 0; idx < block_expressions.size(); ++idx) {
-        if (same_exogenous_partial(block_expressions[idx], expression)) {
-            return static_cast<int>(idx);
-        }
-    }
-    SingleShotPresampledExpression block_expression;
-    block_expression.constant = expression.constant;
-    block_expression.exogenous_conditions = expression.exogenous_conditions;
-    block_expressions.push_back(std::move(block_expression));
-    return static_cast<int>(block_expressions.size() - 1);
-}
-
 struct SingleShotExpressionEvaluator {
-    const SingleShotPresampledExpressionPlan& expression_plan;
-    const SingleShotPresampledExpressionBlock& expression_block;
+    const PresampledExpressionPlan& expression_plan;
+    const PresampledExpressionBlock& expression_block;
     int shot_index = 0;
 
     bool eval(std::size_t instruction_index, const FactoredExecutorState& runtime) const {
@@ -263,7 +155,10 @@ struct SingleShotExpressionEvaluator {
             expression.block_expression_index >= static_cast<int>(expression_plan.block_expressions.size())) {
             fail("single-shot presampled expression references an out-of-range block expression");
         }
-        bool out = expression_block_bit(expression_block, expression.block_expression_index, shot_index);
+        bool out = presampled_expression_block_bit(
+            expression_block,
+            expression.block_expression_index,
+            shot_index);
         if (!expression.residual_plan.conditions.empty()) {
             out = out != eval_symbolic_bool_unchecked(expression.residual_plan, runtime);
         }
@@ -1000,76 +895,11 @@ void execute_in_place(
     }
 }
 
-void prepare_single_shot_presampled_expression_plan(
-    SingleShotPresampledExpressionPlan& out,
-    const FactoredInstructionProgram& program,
-    const std::vector<std::uint64_t>& exogenous_assigned_words) {
-    out.instruction_expressions.clear();
-    out.block_expressions.clear();
-    out.instruction_expressions.reserve(program.instructions.size());
-    for (const auto& instruction : program.instructions) {
-        const auto* source = instruction_expression_plan(instruction);
-        SingleShotPresampledExpression expression;
-        if (source == nullptr) {
-            expression = SingleShotPresampledExpression();
-        } else {
-            expression = split_presampled_expression(*source, exogenous_assigned_words);
-        }
-        expression.block_expression_index =
-            intern_exogenous_partial(out.block_expressions, expression);
-        out.instruction_expressions.push_back(std::move(expression));
-    }
-}
-
-void prepare_single_shot_presampled_expression_plan(
-    SingleShotPresampledExpressionPlan& out,
-    const FactoredInstructionProgram& program,
-    const PackedPresampledExogenous& samples) {
-    if (samples.nsymbols != program.nsymbols ||
-        samples.exogenous_assigned_words.size() != symbol_word_count(program.nsymbols)) {
-        fail("packed presampled exogenous storage was not prepared for this program");
-    }
-    prepare_single_shot_presampled_expression_plan(out, program, samples.exogenous_assigned_words);
-}
-
-void evaluate_single_shot_presampled_expression_block(
-    SingleShotPresampledExpressionBlock& out,
-    const SingleShotPresampledExpressionPlan& plan,
-    const PackedPresampledExogenous& samples) {
-    if (samples.value_words.size() != static_cast<std::size_t>(samples.nsymbols) * samples.shot_words) {
-        fail("packed presampled exogenous values are not initialized");
-    }
-    out.nshots = samples.nshots;
-    out.shot_words = samples.shot_words;
-    const std::size_t nexpressions = plan.block_expressions.size();
-    const std::size_t total_words = nexpressions * out.shot_words;
-    if (out.expression_words.size() != total_words) {
-        out.expression_words.resize(total_words, 0);
-    }
-    for (std::size_t expression_index = 0; expression_index < nexpressions; ++expression_index) {
-        const auto& expression = plan.block_expressions[expression_index];
-        for (std::size_t shot_word = 0; shot_word < out.shot_words; ++shot_word) {
-            std::uint64_t value =
-                expression.constant ? live_shot_word_mask(samples.nshots, shot_word) : 0;
-            for (int condition : expression.exogenous_conditions) {
-                if (condition <= 0 || condition > samples.nsymbols) {
-                    fail("single-shot presampled expression references an out-of-range exogenous condition");
-                }
-                const std::size_t base =
-                    static_cast<std::size_t>(condition - 1) * samples.shot_words;
-                value ^= samples.value_words[base + shot_word];
-            }
-            out.expression_words[expression_block_offset(out, expression_index, shot_word)] =
-                value & live_shot_word_mask(samples.nshots, shot_word);
-        }
-    }
-}
-
 void execute_in_place(
     FactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
-    const SingleShotPresampledExpressionPlan& expression_plan,
-    const SingleShotPresampledExpressionBlock& expression_block,
+    const PresampledExpressionPlan& expression_plan,
+    const PresampledExpressionBlock& expression_block,
     int shot_index) {
     if (runtime.n != program.n || runtime.k + runtime.ndormant != runtime.n) {
         fail("executor state does not match program");
@@ -1146,8 +976,8 @@ bool execute_postselected_in_place(
 bool execute_postselected_in_place(
     FactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
-    const SingleShotPresampledExpressionPlan& expression_plan,
-    const SingleShotPresampledExpressionBlock& expression_block,
+    const PresampledExpressionPlan& expression_plan,
+    const PresampledExpressionBlock& expression_block,
     int shot_index,
     const DetectorPostselectionPlan& postselection) {
     if (runtime.n != program.n || runtime.k + runtime.ndormant != runtime.n) {
@@ -1220,9 +1050,9 @@ std::vector<std::vector<std::uint64_t>> sample_measurements(
     const int chunk_shots = normalize_single_shot_sample_chunk_shots(sample_chunk_shots);
     PackedPresampledExogenous packed_samples;
     prepare_presampled_exogenous_packed(packed_samples, program);
-    SingleShotPresampledExpressionPlan expression_plan;
-    prepare_single_shot_presampled_expression_plan(expression_plan, program, packed_samples);
-    SingleShotPresampledExpressionBlock expression_block;
+    PresampledExpressionPlan expression_plan;
+    prepare_presampled_expression_plan(expression_plan, program, packed_samples);
+    PresampledExpressionBlock expression_block;
     FactoredExecutorState runtime(program, seed ^ kSingleShotBranchSeedXor);
 
     std::vector<std::vector<std::uint64_t>> out;
@@ -1237,7 +1067,7 @@ std::vector<std::vector<std::uint64_t>> sample_measurements(
             chunk,
             exogenous_rng_state);
         exogenous_rng_state = packed_samples.next_rng_state;
-        evaluate_single_shot_presampled_expression_block(
+        evaluate_presampled_expression_block(
             expression_block,
             expression_plan,
             packed_samples);

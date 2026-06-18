@@ -52,7 +52,7 @@ void rotate_uniform_imag_pairs_batch(
         batch_simd::scalar_table().rotate_uniform_imag_xmask_const(
             runtime.active_re.data(),
             runtime.active_im.data(),
-            static_cast<std::size_t>(runtime.batches),
+            static_cast<std::size_t>(runtime.active_pitch),
             runtime.active_shots,
             kernel.action.xmask,
             kernel.pair_bit,
@@ -70,7 +70,7 @@ void rotate_uniform_imag_pairs_batch(
         batch_simd::scalar_table().rotate_uniform_imag_xmask(
             runtime.active_re.data(),
             runtime.active_im.data(),
-            static_cast<std::size_t>(runtime.batches),
+            static_cast<std::size_t>(runtime.active_pitch),
             runtime.active_shots,
             kernel.action.xmask,
             kernel.pair_bit,
@@ -82,7 +82,7 @@ void rotate_uniform_imag_pairs_batch(
     batch_simd::scalar_table().rotate_uniform_imag_pairs(
         runtime.active_re.data(),
         runtime.active_im.data(),
-        static_cast<std::size_t>(runtime.batches),
+        static_cast<std::size_t>(runtime.active_pitch),
         runtime.active_shots,
         kernel.pair_left_indices.data(),
         kernel.pair_right_indices.data(),
@@ -103,7 +103,7 @@ void rotate_real_pair_flip_batch(
         batch_simd::scalar_table().rotate_real_pair_flip_xmask_const(
             runtime.active_re.data(),
             runtime.active_im.data(),
-            static_cast<std::size_t>(runtime.batches),
+            static_cast<std::size_t>(runtime.active_pitch),
             runtime.active_shots,
             kernel.action.xmask,
             kernel.pair_bit,
@@ -122,7 +122,7 @@ void rotate_real_pair_flip_batch(
         batch_simd::scalar_table().rotate_real_pair_flip_xmask(
             runtime.active_re.data(),
             runtime.active_im.data(),
-            static_cast<std::size_t>(runtime.batches),
+            static_cast<std::size_t>(runtime.active_pitch),
             runtime.active_shots,
             kernel.action.xmask,
             kernel.pair_bit,
@@ -135,7 +135,7 @@ void rotate_real_pair_flip_batch(
     batch_simd::scalar_table().rotate_real_pair_flip(
         runtime.active_re.data(),
         runtime.active_im.data(),
-        static_cast<std::size_t>(runtime.batches),
+        static_cast<std::size_t>(runtime.active_pitch),
         runtime.active_shots,
         kernel.pair_left_indices.data(),
         kernel.pair_right_indices.data(),
@@ -160,7 +160,7 @@ void rotate_pauli_batch(
             batch_simd::scalar_table().rotate_diagonal_const(
                 runtime.active_re.data(),
                 runtime.active_im.data(),
-                static_cast<std::size_t>(runtime.batches),
+                static_cast<std::size_t>(runtime.active_pitch),
                 runtime.active_shots,
                 dim,
                 kernel.diagonal_minus_coefficients.data(),
@@ -169,7 +169,7 @@ void rotate_pauli_batch(
             batch_simd::scalar_table().rotate_diagonal_const(
                 runtime.active_re.data(),
                 runtime.active_im.data(),
-                static_cast<std::size_t>(runtime.batches),
+                static_cast<std::size_t>(runtime.active_pitch),
                 runtime.active_shots,
                 dim,
                 kernel.diagonal_plus_coefficients.data(),
@@ -178,7 +178,7 @@ void rotate_pauli_batch(
             batch_simd::scalar_table().rotate_diagonal_mixed(
                 runtime.active_re.data(),
                 runtime.active_im.data(),
-                static_cast<std::size_t>(runtime.batches),
+                static_cast<std::size_t>(runtime.active_pitch),
                 runtime.active_shots,
                 dim,
                 kernel.diagonal_minus_coefficients.data(),
@@ -201,7 +201,7 @@ void rotate_pauli_batch(
         batch_simd::scalar_table().rotate_general_xmask_const(
             runtime.active_re.data(),
             runtime.active_im.data(),
-            static_cast<std::size_t>(runtime.batches),
+            static_cast<std::size_t>(runtime.active_pitch),
             runtime.active_shots,
             kernel.action.xmask,
             kernel.pair_bit,
@@ -213,7 +213,7 @@ void rotate_pauli_batch(
         batch_simd::scalar_table().rotate_general_xmask_const(
             runtime.active_re.data(),
             runtime.active_im.data(),
-            static_cast<std::size_t>(runtime.batches),
+            static_cast<std::size_t>(runtime.active_pitch),
             runtime.active_shots,
             kernel.action.xmask,
             kernel.pair_bit,
@@ -225,7 +225,7 @@ void rotate_pauli_batch(
         batch_simd::scalar_table().rotate_general_xmask_mixed(
             runtime.active_re.data(),
             runtime.active_im.data(),
-            static_cast<std::size_t>(runtime.batches),
+            static_cast<std::size_t>(runtime.active_pitch),
             runtime.active_shots,
             kernel.action.xmask,
             kernel.pair_bit,
@@ -248,7 +248,7 @@ void promote_first_dormant_rotation_batch(
     }
     const std::size_t dim = active_length(runtime.k);
     const std::size_t promoted_dim = 2 * dim;
-    if (runtime.active_re.size() < promoted_dim * static_cast<std::size_t>(runtime.batches)) {
+    if (runtime.active_re.size() < promoted_dim * static_cast<std::size_t>(runtime.active_pitch)) {
         fail("batch active storage has too few columns for dormant promotion");
     }
     const double c = std::cos(theta);
@@ -257,7 +257,7 @@ void promote_first_dormant_rotation_batch(
     batch_simd::scalar_table().promote_first_dormant_rotation(
         runtime.active_re.data(),
         runtime.active_im.data(),
-        static_cast<std::size_t>(runtime.batches),
+        static_cast<std::size_t>(runtime.active_pitch),
         runtime.active_shots,
         dim,
         c,
@@ -286,12 +286,9 @@ void sample_batch_measurement_branches_from_true(
     }
 }
 
-void measure_active_last_z_batch(
+void measure_active_last_z_branch_batch(
     BatchFactoredExecutorState& runtime,
-    int branch_condition,
-    const SymbolicBoolEvaluationPlan& outcome_plan,
-    std::optional<int> record,
-    std::optional<int> record_condition) {
+    int branch_condition) {
     if (runtime.k <= 0) {
         fail("cannot measure the last active qubit when k == 0");
     }
@@ -300,7 +297,7 @@ void measure_active_last_z_batch(
     batch_simd::scalar_table().last_z_measure_true_prob(
         runtime.active_re.data(),
         runtime.active_im.data(),
-        static_cast<std::size_t>(runtime.batches),
+        static_cast<std::size_t>(runtime.active_pitch),
         runtime.active_shots,
         dim,
         runtime.branch_prob_true.data());
@@ -313,7 +310,7 @@ void measure_active_last_z_batch(
     batch_simd::scalar_table().last_z_project(
         runtime.active_re.data(),
         runtime.active_im.data(),
-        static_cast<std::size_t>(runtime.batches),
+        static_cast<std::size_t>(runtime.active_pitch),
         runtime.active_shots,
         dim,
         branch_bits.data(),
@@ -321,24 +318,30 @@ void measure_active_last_z_batch(
     runtime.k = new_k;
     ++runtime.ndormant;
     assign_batch_symbol(runtime, branch_condition, branch_bits);
-    eval_symbolic_bool_batch(runtime.eval_scratch, outcome_plan, runtime);
-    write_batch_measurement_record(runtime, record, runtime.eval_scratch, record_condition);
 }
 
-void measure_diagonal_active_pauli_batch(
+void measure_active_last_z_batch(
     BatchFactoredExecutorState& runtime,
-    const PrecomputedActivePauliMeasurementKernel& kernel,
     int branch_condition,
     const SymbolicBoolEvaluationPlan& outcome_plan,
     std::optional<int> record,
     std::optional<int> record_condition) {
+    measure_active_last_z_branch_batch(runtime, branch_condition);
+    eval_symbolic_bool_batch(runtime.eval_scratch, outcome_plan, runtime);
+    write_batch_measurement_record(runtime, record, runtime.eval_scratch, record_condition);
+}
+
+void measure_diagonal_active_pauli_branch_batch(
+    BatchFactoredExecutorState& runtime,
+    const PrecomputedActivePauliMeasurementKernel& kernel,
+    int branch_condition) {
     const auto& source_false = kernel.source0_false;
     const auto& source_true = kernel.source0_true;
     const std::size_t out_dim = source_false.size();
     batch_simd::scalar_table().diagonal_measure_true_prob(
         runtime.active_re.data(),
         runtime.active_im.data(),
-        static_cast<std::size_t>(runtime.batches),
+        static_cast<std::size_t>(runtime.active_pitch),
         runtime.active_shots,
         source_true.data(),
         out_dim,
@@ -352,7 +355,7 @@ void measure_diagonal_active_pauli_batch(
     batch_simd::scalar_table().diagonal_project(
         runtime.active_re.data(),
         runtime.active_im.data(),
-        static_cast<std::size_t>(runtime.batches),
+        static_cast<std::size_t>(runtime.active_pitch),
         runtime.active_shots,
         source_false.data(),
         source_true.data(),
@@ -362,22 +365,17 @@ void measure_diagonal_active_pauli_batch(
     --runtime.k;
     ++runtime.ndormant;
     assign_batch_symbol(runtime, branch_condition, branch_bits);
-    eval_symbolic_bool_batch(runtime.eval_scratch, outcome_plan, runtime);
-    write_batch_measurement_record(runtime, record, runtime.eval_scratch, record_condition);
 }
 
-void measure_nondiagonal_active_pauli_batch(
+void measure_nondiagonal_active_pauli_branch_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
-    int branch_condition,
-    const SymbolicBoolEvaluationPlan& outcome_plan,
-    std::optional<int> record,
-    std::optional<int> record_condition) {
+    int branch_condition) {
     const std::size_t out_dim = kernel.source0_false.size();
     batch_simd::scalar_table().nondiagonal_measure_true_prob(
         runtime.active_re.data(),
         runtime.active_im.data(),
-        static_cast<std::size_t>(runtime.batches),
+        static_cast<std::size_t>(runtime.active_pitch),
         runtime.active_shots,
         kernel.source0_false.data(),
         kernel.source1_false.data(),
@@ -396,7 +394,7 @@ void measure_nondiagonal_active_pauli_batch(
         runtime.active_im.data(),
         runtime.scratch_re.data(),
         runtime.scratch_im.data(),
-        static_cast<std::size_t>(runtime.batches),
+        static_cast<std::size_t>(runtime.active_pitch),
         runtime.active_shots,
         kernel.source0_false.data(),
         kernel.source1_false.data(),
@@ -405,14 +403,39 @@ void measure_nondiagonal_active_pauli_batch(
         out_dim,
         branch_bits.data(),
         runtime.branch_invnorms.data());
-    const std::size_t active_prefix_size = out_dim * static_cast<std::size_t>(runtime.batches);
-    std::copy_n(runtime.scratch_re.data(), active_prefix_size, runtime.active_re.data());
-    std::copy_n(runtime.scratch_im.data(), active_prefix_size, runtime.active_im.data());
+    if (runtime.active_shots == runtime.active_pitch) {
+        const std::size_t active_prefix_size = out_dim * static_cast<std::size_t>(runtime.active_pitch);
+        std::copy_n(runtime.scratch_re.data(), active_prefix_size, runtime.active_re.data());
+        std::copy_n(runtime.scratch_im.data(), active_prefix_size, runtime.active_im.data());
+    } else {
+        const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
+        const auto live = static_cast<std::size_t>(runtime.active_shots);
+        for (std::size_t basis = 0; basis < out_dim; ++basis) {
+            const std::size_t base = basis * pitch;
+            std::copy_n(runtime.scratch_re.data() + base, live, runtime.active_re.data() + base);
+            std::copy_n(runtime.scratch_im.data() + base, live, runtime.active_im.data() + base);
+        }
+    }
     --runtime.k;
     ++runtime.ndormant;
     assign_batch_symbol(runtime, branch_condition, branch_bits);
-    eval_symbolic_bool_batch(runtime.eval_scratch, outcome_plan, runtime);
-    write_batch_measurement_record(runtime, record, runtime.eval_scratch, record_condition);
+}
+
+void measure_precomputed_active_pauli_branch_batch(
+    BatchFactoredExecutorState& runtime,
+    const PrecomputedActivePauliMeasurementKernel& kernel,
+    int branch_condition) {
+    if (runtime.k <= 0) {
+        fail("cannot measure an active Pauli when k == 0");
+    }
+    if (kernel.action.nqubits != runtime.k) {
+        fail("measurement kernel dimension does not match batch active state");
+    }
+    if (kernel.is_diagonal) {
+        measure_diagonal_active_pauli_branch_batch(runtime, kernel, branch_condition);
+    } else {
+        measure_nondiagonal_active_pauli_branch_batch(runtime, kernel, branch_condition);
+    }
 }
 
 void measure_precomputed_active_pauli_batch(
@@ -422,17 +445,9 @@ void measure_precomputed_active_pauli_batch(
     const SymbolicBoolEvaluationPlan& outcome_plan,
     std::optional<int> record,
     std::optional<int> record_condition) {
-    if (runtime.k <= 0) {
-        fail("cannot measure an active Pauli when k == 0");
-    }
-    if (kernel.action.nqubits != runtime.k) {
-        fail("measurement kernel dimension does not match batch active state");
-    }
-    if (kernel.is_diagonal) {
-        measure_diagonal_active_pauli_batch(runtime, kernel, branch_condition, outcome_plan, record, record_condition);
-    } else {
-        measure_nondiagonal_active_pauli_batch(runtime, kernel, branch_condition, outcome_plan, record, record_condition);
-    }
+    measure_precomputed_active_pauli_branch_batch(runtime, kernel, branch_condition);
+    eval_symbolic_bool_batch(runtime.eval_scratch, outcome_plan, runtime);
+    write_batch_measurement_record(runtime, record, runtime.eval_scratch, record_condition);
 }
 
 } // namespace symft

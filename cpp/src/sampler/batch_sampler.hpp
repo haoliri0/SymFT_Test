@@ -1,6 +1,7 @@
 #pragma once
 
 #include "factored/factored.hpp"
+#include "sampler/presampled_expression.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -24,8 +25,8 @@ struct BatchDetectorPostselectionScratch {
     std::vector<std::uint64_t> keep_bits;
     std::vector<std::uint64_t> scratch;
     std::vector<std::uint64_t> compact_scratch;
+    std::vector<std::uint64_t> expression_words;
     std::vector<int> live_sources;
-    std::vector<int> tail_fill_moves;
     int dead_count = 0;
 };
 
@@ -36,19 +37,20 @@ struct BatchDetectorPostselectionResult {
 
 struct BatchDetectorPostselectionOptions {
     int mask_dead_shots_min_fraction_denominator = 2;
-    int unordered_tail_fill_max_dead_fraction_denominator = 5;
 };
 
 // Active storage is a Julia-column-major equivalent SoA layout:
-// active_re[basis * batches + shot] and active_im[basis * batches + shot].
-// Here batches is the fixed shot pitch/capacity. active_shots is only the
-// current dense live prefix length; it is never used as the active column pitch.
+// active_re[basis * active_pitch + shot] and active_im[basis * active_pitch + shot].
+// Here batches is the fixed shot capacity for bit columns, while active_pitch is
+// the dense active-state row pitch. Postselection compaction may shrink
+// active_pitch, but never above batches.
 struct BatchFactoredExecutorState {
     int n = 0;
     int k = 0;
     int ndormant = 0;
     int batches = 0;
     int active_shots = 0;
+    int active_pitch = 0;
     int nsymbols = 0;
     int nrecords = 0;
     int max_k = 0;
@@ -73,7 +75,12 @@ struct BatchFactoredExecutorState {
 };
 
 int default_batch_count(int max_k);
-void reset_batch_executor(BatchFactoredExecutorState& runtime, const FactoredInstructionProgram& program, int shots);
+int default_postselected_batch_count(int max_k);
+void reset_batch_executor(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    int shots,
+    bool clear_symbol_values = true);
 void execute_batch_in_place(BatchFactoredExecutorState& runtime, const FactoredInstructionProgram& program);
 void execute_batch_in_place(
     BatchFactoredExecutorState& runtime,
@@ -90,14 +97,8 @@ void prepare_batch_detector_postselection_scratch(
 BatchDetectorPostselectionResult execute_batch_postselected_in_place(
     BatchFactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
-    const PresampledExogenous& samples,
-    const BatchDetectorPostselectionPlan& postselection,
-    BatchDetectorPostselectionScratch& scratch,
-    BatchDetectorPostselectionOptions options = {});
-BatchDetectorPostselectionResult execute_batch_postselected_in_place(
-    BatchFactoredExecutorState& runtime,
-    const FactoredInstructionProgram& program,
-    const PackedPresampledExogenous& samples,
+    const PresampledExpressionPlan& expression_plan,
+    const PresampledExpressionBlock& expression_block,
     int first_sample_shot,
     const BatchDetectorPostselectionPlan& postselection,
     BatchDetectorPostselectionScratch& scratch,

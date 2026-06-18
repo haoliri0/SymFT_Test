@@ -3,8 +3,8 @@
 #include "sampler/active_internal.hpp"
 #include "sampler/batch_sampler.hpp"
 #include "sampler/exogenous.hpp"
+#include "sampler/presampled_expression.hpp"
 #include "sampler/random.hpp"
-#include "sampler/single_shot.hpp"
 #include "simd/batch_simd.hpp"
 
 #include <algorithm>
@@ -81,7 +81,7 @@ inline void set_batch_bit(std::vector<std::uint64_t>& bits, int shot) {
 }
 
 inline std::size_t batch_active_offset(const BatchFactoredExecutorState& runtime, std::size_t basis, int shot) {
-    return basis * static_cast<std::size_t>(runtime.batches) + static_cast<std::size_t>(shot);
+    return basis * static_cast<std::size_t>(runtime.active_pitch) + static_cast<std::size_t>(shot);
 }
 
 inline std::size_t batch_condition_offset(const BatchFactoredExecutorState& runtime, int condition, std::size_t word) {
@@ -176,6 +176,9 @@ void measure_active_last_z_batch(
     const SymbolicBoolEvaluationPlan& outcome_plan,
     std::optional<int> record,
     std::optional<int> record_condition);
+void measure_active_last_z_branch_batch(
+    BatchFactoredExecutorState& runtime,
+    int branch_condition);
 void measure_precomputed_active_pauli_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
@@ -183,4 +186,8 @@ void measure_precomputed_active_pauli_batch(
     const SymbolicBoolEvaluationPlan& outcome_plan,
     std::optional<int> record,
     std::optional<int> record_condition);
+void measure_precomputed_active_pauli_branch_batch(
+    BatchFactoredExecutorState& runtime,
+    const PrecomputedActivePauliMeasurementKernel& kernel,
+    int branch_condition);
 } // namespace symft
