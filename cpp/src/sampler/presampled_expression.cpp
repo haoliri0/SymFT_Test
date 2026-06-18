@@ -66,6 +66,9 @@ const SymbolicBoolEvaluationPlan* instruction_expression_plan(const RecordMeasur
 }
 
 const SymbolicBoolEvaluationPlan* instruction_expression_plan(const RecordDetector& instruction) {
+    if (!instruction.records.empty() || instruction.outcome.conditions.empty()) {
+        return nullptr;
+    }
     return &instruction.outcome_plan;
 }
 

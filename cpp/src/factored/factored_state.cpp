@@ -44,7 +44,7 @@ bool operator==(const RecordMeasurement& lhs, const RecordMeasurement& rhs) {
 }
 
 bool operator==(const RecordDetector& lhs, const RecordDetector& rhs) {
-    return lhs.outcome == rhs.outcome && lhs.detector == rhs.detector;
+    return lhs.outcome == rhs.outcome && lhs.records == rhs.records && lhs.detector == rhs.detector;
 }
 
 bool operator==(const MeasureActiveLastZ& lhs, const MeasureActiveLastZ& rhs) {

@@ -467,6 +467,20 @@ void accumulate_single_counts(
     }
 }
 
+void accumulate_accepted_single_counts(
+    RateCounts& counts,
+    const std::vector<std::uint64_t>& measurement_words,
+    const std::vector<std::vector<int>>& logical_records) {
+    ++counts.accepted;
+    bool logical = false;
+    for (const auto& records : logical_records) {
+        logical ^= record_parity(measurement_words, records);
+    }
+    if (logical) {
+        ++counts.logical_errors;
+    }
+}
+
 struct RateBenchSetup {
     symft::StimParseResult parsed;
     symft::FactoredInstructionProgram program;
@@ -571,7 +585,7 @@ BenchResult run_single_sampler(const Options& options) {
             runtime.rng_state = block_seed(0x5eed1234ULL, repeat, chunk_index);
             for (int shot = 0; shot < chunk; ++shot) {
                 const auto execute_start = Clock::now();
-                symft::reset_executor(runtime, setup.program);
+                symft::reset_executor(runtime, setup.program, !options.postselect_detectors);
                 if (options.postselect_detectors) {
                     const bool survived = symft::execute_postselected_in_place(
                         runtime,
@@ -583,11 +597,9 @@ BenchResult run_single_sampler(const Options& options) {
                     if (!survived) {
                         ++counts.discarded;
                     } else {
-                        accumulate_single_counts(
+                        accumulate_accepted_single_counts(
                             counts,
                             runtime.measurement_words,
-                            runtime.detector_words,
-                            setup.program.ndetectors,
                             setup.logical_records);
                     }
                     const auto accumulate_stop = Clock::now();

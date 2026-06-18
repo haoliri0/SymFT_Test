@@ -131,6 +131,32 @@ bool eval_symbolic_bool_unchecked(const SymbolicBoolEvaluationPlan& plan, const 
     return eval_symbolic_bool_packed_unchecked(plan, runtime);
 }
 
+bool record_parity_from_measurements(
+    const std::vector<std::uint64_t>& measurement_words,
+    int nrecords,
+    const std::vector<int>& records) {
+    bool parity = false;
+    for (int record : records) {
+        if (record <= 0 || record > nrecords) {
+            fail("detector references an out-of-range measurement record");
+        }
+        parity = parity != packed_bit(measurement_words, record - 1);
+    }
+    return parity;
+}
+
+bool detector_outcome_from_runtime(
+    const FactoredExecutorState& runtime,
+    const RecordDetector& instruction) {
+    if (!instruction.records.empty()) {
+        return record_parity_from_measurements(
+            runtime.measurement_words,
+            runtime.nrecords,
+            instruction.records);
+    }
+    return eval_symbolic_bool_unchecked(instruction.outcome_plan, runtime);
+}
+
 int normalize_single_shot_sample_chunk_shots(int sample_chunk_shots) {
     if (sample_chunk_shots < 0) {
         fail("single-shot sample chunk count must be nonnegative");
@@ -662,7 +688,7 @@ void execute_instruction(FactoredExecutorState& runtime, const RecordMeasurement
 }
 
 void execute_instruction(FactoredExecutorState& runtime, const RecordDetector& instruction) {
-    const bool outcome = eval_symbolic_bool_unchecked(instruction.outcome_plan, runtime);
+    const bool outcome = detector_outcome_from_runtime(runtime, instruction);
     write_detector_record(runtime, instruction.detector, outcome);
 }
 
@@ -737,7 +763,9 @@ void execute_instruction_presampled(
     const RecordDetector& instruction,
     const SingleShotExpressionEvaluator& evaluator,
     std::size_t instruction_index) {
-    const bool outcome = evaluator.eval(instruction_index, runtime);
+    const bool outcome = !instruction.records.empty() || instruction.outcome.conditions.empty()
+                             ? detector_outcome_from_runtime(runtime, instruction)
+                             : evaluator.eval(instruction_index, runtime);
     write_detector_record(runtime, instruction.detector, outcome);
 }
 
@@ -808,20 +836,14 @@ void execute_instruction_presampled(
         instruction);
 }
 
-bool detector_record_is_set(const FactoredExecutorState& runtime, int detector) {
-    if (detector <= 0) {
-        fail("detector id must be positive");
-    }
-    return packed_bit(runtime.detector_words, detector - 1);
-}
-
 template <typename Instruction>
 bool execute_instruction_postselected(FactoredExecutorState& runtime, const Instruction& instruction) {
     execute_instruction(runtime, instruction);
-    if constexpr (std::is_same_v<std::decay_t<Instruction>, RecordDetector>) {
-        return !detector_record_is_set(runtime, instruction.detector);
-    }
     return true;
+}
+
+bool execute_instruction_postselected(FactoredExecutorState& runtime, const RecordDetector& instruction) {
+    return !detector_outcome_from_runtime(runtime, instruction);
 }
 
 template <typename Instruction>
@@ -831,10 +853,18 @@ bool execute_instruction_postselected(
     const SingleShotExpressionEvaluator& evaluator,
     std::size_t instruction_index) {
     execute_instruction_presampled(runtime, instruction, evaluator, instruction_index);
-    if constexpr (std::is_same_v<std::decay_t<Instruction>, RecordDetector>) {
-        return !detector_record_is_set(runtime, instruction.detector);
-    }
     return true;
+}
+
+bool execute_instruction_postselected(
+    FactoredExecutorState& runtime,
+    const RecordDetector& instruction,
+    const SingleShotExpressionEvaluator& evaluator,
+    std::size_t instruction_index) {
+    const bool outcome = !instruction.records.empty() || instruction.outcome.conditions.empty()
+                             ? detector_outcome_from_runtime(runtime, instruction)
+                             : evaluator.eval(instruction_index, runtime);
+    return !outcome;
 }
 
 } // namespace
@@ -861,7 +891,10 @@ FactoredExecutorState::FactoredExecutorState(const FactoredInstructionProgram& p
     active_re[0] = 1.0;
 }
 
-void reset_executor(FactoredExecutorState& runtime, const FactoredInstructionProgram& program) {
+void reset_executor(
+    FactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    bool clear_detector_records) {
     runtime.n = program.n;
     runtime.k = program.initial_k;
     runtime.ndormant = program.n - program.initial_k;
@@ -891,7 +924,9 @@ void reset_executor(FactoredExecutorState& runtime, const FactoredInstructionPro
     if (runtime.detector_words.size() != detector_words) {
         runtime.detector_words.resize(detector_words);
     }
-    std::fill(runtime.detector_words.begin(), runtime.detector_words.end(), 0);
+    if (clear_detector_records) {
+        std::fill(runtime.detector_words.begin(), runtime.detector_words.end(), 0);
+    }
 }
 
 void execute_in_place(FactoredExecutorState& runtime, const FactoredInstructionProgram& program) {

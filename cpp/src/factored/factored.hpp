@@ -50,6 +50,7 @@ struct RecordMeasurement {
 
 struct RecordDetector {
     SymbolicBool outcome;
+    std::vector<int> records;
     int detector = 0;
     SymbolicBoolEvaluationPlan outcome_plan;
 };

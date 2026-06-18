@@ -31,7 +31,10 @@ struct FactoredExecutorState {
     explicit FactoredExecutorState(const FactoredInstructionProgram& program, std::uint64_t seed = 1);
 };
 
-void reset_executor(FactoredExecutorState& runtime, const FactoredInstructionProgram& program);
+void reset_executor(
+    FactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    bool clear_detector_records = true);
 void execute_in_place(FactoredExecutorState& runtime, const FactoredInstructionProgram& program);
 void execute_in_place(
     FactoredExecutorState& runtime,

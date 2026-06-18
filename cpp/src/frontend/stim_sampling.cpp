@@ -56,6 +56,7 @@ FactoredInstructionProgram insert_stim_detector_events(
         const auto& detector = detectors[idx];
         RecordDetector instruction;
         instruction.detector = static_cast<int>(idx + 1);
+        instruction.records = detector.records;
         instruction.outcome = detector_expression(detector, measurement_records);
         const int checkpoint = instruction_checkpoint_for_pending_prefix(program, detector.after_pending_operation);
         events[static_cast<std::size_t>(checkpoint)].push_back(std::move(instruction));
