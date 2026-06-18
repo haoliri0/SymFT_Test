@@ -193,6 +193,26 @@ void write_measurement_record(
     assign_symbol(runtime, record_condition, outcome);
 }
 
+void write_detector_record(FactoredExecutorState& runtime, int detector, bool outcome) {
+    if (detector <= 0) {
+        fail("detector id must be positive");
+    }
+    if (detector > runtime.ndetectors) {
+        runtime.ndetectors = detector;
+    }
+    const std::size_t nwords = symbol_word_count(runtime.ndetectors);
+    if (runtime.detector_words.size() < nwords) {
+        runtime.detector_words.resize(nwords, 0);
+    }
+    const std::size_t word = symbol_word_index(detector);
+    const std::uint64_t mask = symbol_bit_mask(detector);
+    if (outcome) {
+        runtime.detector_words[word] |= mask;
+    } else {
+        runtime.detector_words[word] &= ~mask;
+    }
+}
+
 void sample_categorical_distribution(
     FactoredExecutorState& runtime,
     const std::vector<int>& conditions,
@@ -641,6 +661,11 @@ void execute_instruction(FactoredExecutorState& runtime, const RecordMeasurement
     write_measurement_record(runtime, instruction.record, outcome, instruction.record_condition);
 }
 
+void execute_instruction(FactoredExecutorState& runtime, const RecordDetector& instruction) {
+    const bool outcome = eval_symbolic_bool_unchecked(instruction.outcome_plan, runtime);
+    write_detector_record(runtime, instruction.detector, outcome);
+}
+
 void execute_instruction(FactoredExecutorState& runtime, const MeasureActiveLastZ& instruction) {
     const double prob1 = active_last_z_probability_one(runtime);
     const bool branch = sample_bernoulli(runtime.rng_state, prob1);
@@ -705,6 +730,15 @@ void execute_instruction_presampled(
     std::size_t instruction_index) {
     const bool outcome = evaluator.eval(instruction_index, runtime);
     write_measurement_record(runtime, instruction.record, outcome, instruction.record_condition);
+}
+
+void execute_instruction_presampled(
+    FactoredExecutorState& runtime,
+    const RecordDetector& instruction,
+    const SingleShotExpressionEvaluator& evaluator,
+    std::size_t instruction_index) {
+    const bool outcome = evaluator.eval(instruction_index, runtime);
+    write_detector_record(runtime, instruction.detector, outcome);
 }
 
 void execute_instruction_presampled(
@@ -774,49 +808,33 @@ void execute_instruction_presampled(
         instruction);
 }
 
-bool record_parity_from_measurements(
-    const std::vector<std::uint64_t>& measurement_words,
-    const std::vector<int>& records) {
-    bool parity = false;
-    for (int record : records) {
-        if (record <= 0) {
-            fail("record ids must be positive");
-        }
-        parity ^= packed_bit(measurement_words, record - 1);
+bool detector_record_is_set(const FactoredExecutorState& runtime, int detector) {
+    if (detector <= 0) {
+        fail("detector id must be positive");
     }
-    return parity;
+    return packed_bit(runtime.detector_words, detector - 1);
 }
 
-bool any_postselected_detector_fires(
-    const std::vector<std::uint64_t>& measurement_words,
-    const std::vector<std::vector<int>>& detectors) {
-    for (const auto& records : detectors) {
-        if (record_parity_from_measurements(measurement_words, records)) {
-            return true;
-        }
+template <typename Instruction>
+bool execute_instruction_postselected(FactoredExecutorState& runtime, const Instruction& instruction) {
+    execute_instruction(runtime, instruction);
+    if constexpr (std::is_same_v<std::decay_t<Instruction>, RecordDetector>) {
+        return !detector_record_is_set(runtime, instruction.detector);
     }
-    return false;
+    return true;
 }
 
-bool detector_mask_fires(
-    const std::vector<std::uint64_t>& measurement_words,
-    const std::vector<std::uint64_t>& mask) {
-    std::uint64_t parity_bits = 0;
-    for (std::size_t word = 0; word < mask.size(); ++word) {
-        parity_bits ^= measurement_words[word] & mask[word];
+template <typename Instruction>
+bool execute_instruction_postselected(
+    FactoredExecutorState& runtime,
+    const Instruction& instruction,
+    const SingleShotExpressionEvaluator& evaluator,
+    std::size_t instruction_index) {
+    execute_instruction_presampled(runtime, instruction, evaluator, instruction_index);
+    if constexpr (std::is_same_v<std::decay_t<Instruction>, RecordDetector>) {
+        return !detector_record_is_set(runtime, instruction.detector);
     }
-    return is_odd_popcount(parity_bits);
-}
-
-bool any_postselected_detector_mask_fires(
-    const std::vector<std::uint64_t>& measurement_words,
-    const std::vector<std::vector<std::uint64_t>>& detector_masks) {
-    for (const auto& mask : detector_masks) {
-        if (detector_mask_fires(measurement_words, mask)) {
-            return true;
-        }
-    }
-    return false;
+    return true;
 }
 
 } // namespace
@@ -827,6 +845,7 @@ FactoredExecutorState::FactoredExecutorState(const FactoredInstructionProgram& p
       ndormant(program.n - program.initial_k),
       nsymbols(program.nsymbols),
       nrecords(program.nrecords),
+      ndetectors(program.ndetectors),
       active_re(active_length(program.max_k), 0.0),
       active_im(active_length(program.max_k), 0.0),
       active_scratch_re(active_length(program.max_k), 0.0),
@@ -834,6 +853,7 @@ FactoredExecutorState::FactoredExecutorState(const FactoredInstructionProgram& p
       value_words(symbol_word_count(program.nsymbols), 0),
       assigned_words(symbol_word_count(program.nsymbols), 0),
       measurement_words(symbol_word_count(program.nrecords), 0),
+      detector_words(symbol_word_count(program.ndetectors), 0),
       rng_state(seed) {
     const std::size_t dim = active_length(program.initial_k);
     std::fill_n(active_re.data(), dim, 0.0);
@@ -847,6 +867,7 @@ void reset_executor(FactoredExecutorState& runtime, const FactoredInstructionPro
     runtime.ndormant = program.n - program.initial_k;
     runtime.nsymbols = program.nsymbols;
     runtime.nrecords = program.nrecords;
+    runtime.ndetectors = program.ndetectors;
     ensure_runtime_active_capacity(runtime, program.max_k);
     const std::size_t dim = active_length(program.initial_k);
     std::fill_n(runtime.active_re.data(), dim, 0.0);
@@ -866,6 +887,11 @@ void reset_executor(FactoredExecutorState& runtime, const FactoredInstructionPro
         runtime.measurement_words.resize(record_words);
     }
     std::fill(runtime.measurement_words.begin(), runtime.measurement_words.end(), 0);
+    const std::size_t detector_words = symbol_word_count(program.ndetectors);
+    if (runtime.detector_words.size() != detector_words) {
+        runtime.detector_words.resize(detector_words);
+    }
+    std::fill(runtime.detector_words.begin(), runtime.detector_words.end(), 0);
 }
 
 void execute_in_place(FactoredExecutorState& runtime, const FactoredInstructionProgram& program) {
@@ -937,36 +963,18 @@ bool execute_postselected_in_place(
     FactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
     const PresampledExogenous& samples,
-    int shot_index,
-    const DetectorPostselectionPlan& postselection) {
+    int shot_index) {
     if (runtime.n != program.n || runtime.k + runtime.ndormant != runtime.n) {
         fail("executor state does not match program");
     }
-    if (postselection.instruction_records_by_index.size() != program.instructions.size()) {
-        fail("postselection instruction record table does not match program");
-    }
     assign_presampled_exogenous(runtime, samples, shot_index);
     for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
-        std::visit([&](const auto& inst) { execute_instruction(runtime, inst); }, program.instructions[idx]);
-        const int record = postselection.instruction_records_by_index[idx];
-        if (record <= 0 || record >= static_cast<int>(postselection.detectors_by_record.size())) {
-            continue;
-        }
-        if (static_cast<std::size_t>(record) < postselection.detector_masks_by_record.size() &&
-            !postselection.detector_masks_by_record[static_cast<std::size_t>(record)].empty()) {
-            if (postselection.record_words > runtime.measurement_words.size()) {
-                fail("postselection detector mask width exceeds measurement record storage");
-            }
-            if (any_postselected_detector_mask_fires(
-                    runtime.measurement_words,
-                    postselection.detector_masks_by_record[static_cast<std::size_t>(record)])) {
-                return false;
-            }
-            continue;
-        }
-        if (any_postselected_detector_fires(
-                runtime.measurement_words,
-                postselection.detectors_by_record[static_cast<std::size_t>(record)])) {
+        const bool survived = std::visit(
+            [&](const auto& inst) {
+                return execute_instruction_postselected(runtime, inst);
+            },
+            program.instructions[idx]);
+        if (!survived) {
             return false;
         }
     }
@@ -978,8 +986,7 @@ bool execute_postselected_in_place(
     const FactoredInstructionProgram& program,
     const PresampledExpressionPlan& expression_plan,
     const PresampledExpressionBlock& expression_block,
-    int shot_index,
-    const DetectorPostselectionPlan& postselection) {
+    int shot_index) {
     if (runtime.n != program.n || runtime.k + runtime.ndormant != runtime.n) {
         fail("executor state does not match program");
     }
@@ -989,35 +996,14 @@ bool execute_postselected_in_place(
     if (shot_index < 0 || shot_index >= expression_block.nshots) {
         fail("single-shot presampled expression shot index is out of range");
     }
-    if (postselection.instruction_records_by_index.size() != program.instructions.size()) {
-        fail("postselection instruction record table does not match program");
-    }
     SingleShotExpressionEvaluator evaluator{expression_plan, expression_block, shot_index};
     for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
-        execute_instruction_presampled(
-            runtime,
-            program.instructions[idx],
-            evaluator,
-            idx);
-        const int record = postselection.instruction_records_by_index[idx];
-        if (record <= 0 || record >= static_cast<int>(postselection.detectors_by_record.size())) {
-            continue;
-        }
-        if (static_cast<std::size_t>(record) < postselection.detector_masks_by_record.size() &&
-            !postselection.detector_masks_by_record[static_cast<std::size_t>(record)].empty()) {
-            if (postselection.record_words > runtime.measurement_words.size()) {
-                fail("postselection detector mask width exceeds measurement record storage");
-            }
-            if (any_postselected_detector_mask_fires(
-                    runtime.measurement_words,
-                    postselection.detector_masks_by_record[static_cast<std::size_t>(record)])) {
-                return false;
-            }
-            continue;
-        }
-        if (any_postselected_detector_fires(
-                runtime.measurement_words,
-                postselection.detectors_by_record[static_cast<std::size_t>(record)])) {
+        const bool survived = std::visit(
+            [&](const auto& inst) {
+                return execute_instruction_postselected(runtime, inst, evaluator, idx);
+            },
+            program.instructions[idx]);
+        if (!survived) {
             return false;
         }
     }

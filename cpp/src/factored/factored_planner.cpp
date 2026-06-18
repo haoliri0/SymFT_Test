@@ -417,6 +417,9 @@ std::optional<FactoredInstruction> process_next_pending_operation(PendingFactore
     if (state.pending_operations.empty()) {
         return std::nullopt;
     }
+    if (state.pending_prefix_instruction_indices.empty()) {
+        state.pending_prefix_instruction_indices.push_back(static_cast<int>(state.instructions.size()));
+    }
     const PendingOperation operation = state.pending_operations.front();
     const std::size_t start = state.instructions.size();
     std::optional<FactoredInstruction> result = std::visit(
@@ -429,6 +432,7 @@ std::optional<FactoredInstruction> process_next_pending_operation(PendingFactore
         },
         operation);
     state.pending_operations.erase(state.pending_operations.begin());
+    state.pending_prefix_instruction_indices.push_back(static_cast<int>(state.instructions.size()));
     if (state.instructions.size() == start) {
         return result;
     }
@@ -454,6 +458,10 @@ void refresh_instruction_plans(PromoteDormantRotation& instruction) {
 }
 
 void refresh_instruction_plans(RecordMeasurement& instruction) {
+    instruction.outcome_plan = SymbolicBoolEvaluationPlan(instruction.outcome);
+}
+
+void refresh_instruction_plans(RecordDetector& instruction) {
     instruction.outcome_plan = SymbolicBoolEvaluationPlan(instruction.outcome);
 }
 
@@ -570,16 +578,19 @@ FactoredInstructionProgram::FactoredInstructionProgram(
     int initial_k_,
     std::vector<FactoredInstruction> instructions_,
     int max_k_,
-    SymbolicContext context_)
+    SymbolicContext context_,
+    std::vector<int> pending_prefix_instruction_indices_)
     : n(checked_nqubits(n_)),
       initial_k(checked_nqubits(initial_k_)),
       max_k(checked_nqubits(max_k_)),
       instructions(std::move(instructions_)),
+      pending_prefix_instruction_indices(std::move(pending_prefix_instruction_indices_)),
       context(std::move(context_)) {
     if (initial_k > n || max_k > n || initial_k > max_k) {
         fail("invalid factored instruction program dimensions");
     }
     int record_count = 0;
+    int detector_count = 0;
     for (auto& instruction : instructions) {
         refresh_instruction_plans(instruction);
         context.bump_next_condition(max_condition(instruction));
@@ -589,12 +600,15 @@ FactoredInstructionProgram::FactoredInstructionProgram(
                     if (inst.record) {
                         record_count = std::max(record_count, *inst.record);
                     }
+                } else if constexpr (requires { inst.detector; }) {
+                    detector_count = std::max(detector_count, inst.detector);
                 }
             },
             instruction);
     }
     nsymbols = std::max(0, context.next_condition - 1);
     nrecords = record_count;
+    ndetectors = detector_count;
     build_categorical_sample_plan(
         context.categorical_distributions,
         sampled_categorical_distributions,
@@ -615,7 +629,8 @@ FactoredInstructionProgram factored_instruction_program(const PendingFactoredSta
         state.initial_k,
         state.instructions,
         state.max_k,
-        *state.context);
+        *state.context,
+        state.pending_prefix_instruction_indices);
 }
 
 FactoredInstructionProgram plan_factored_updates(PendingFactoredState& state) {

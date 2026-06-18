@@ -8,10 +8,7 @@
 #include <complex>
 #include <cstdlib>
 #include <iostream>
-#include <optional>
 #include <string>
-#include <type_traits>
-#include <variant>
 #include <vector>
 
 namespace {
@@ -27,52 +24,12 @@ bool approx(symft::Complex a, symft::Complex b, double eps = 1e-10) {
     return std::abs(a - b) <= eps;
 }
 
-std::optional<int> instruction_record(const symft::FactoredInstruction& instruction) {
-    return std::visit(
-        [](const auto& inst) -> std::optional<int> {
-            using T = std::decay_t<decltype(inst)>;
-            if constexpr (
-                std::is_same_v<T, symft::RecordMeasurement> ||
-                std::is_same_v<T, symft::MeasureActiveLastZ> ||
-                std::is_same_v<T, symft::MeasurePrecomputedActivePauli> ||
-                std::is_same_v<T, symft::IntroduceDormantMeasurementBranch>) {
-                return inst.record;
-            } else {
-                return std::nullopt;
-            }
-        },
-        instruction);
-}
-
-symft::BatchDetectorPostselectionPlan single_detector_plan(
-    const symft::FactoredInstructionProgram& program,
-    int record) {
-    symft::BatchDetectorPostselectionPlan plan;
-    plan.instruction_records_by_index.reserve(program.instructions.size());
-    int producer_instruction = -1;
-    for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
-        const int produced_record = instruction_record(program.instructions[idx]).value_or(0);
-        plan.instruction_records_by_index.push_back(produced_record);
-        if (produced_record == record) {
-            producer_instruction = static_cast<int>(idx);
-        }
-    }
-    require(producer_instruction >= 0, "postselection test record producer");
-    plan.detectors_by_record.resize(static_cast<std::size_t>(program.nrecords + 1));
-    plan.detectors_by_record[static_cast<std::size_t>(record)].push_back({record});
-    plan.condition_last_use_by_index.assign(static_cast<std::size_t>(program.nsymbols + 1), -1);
-    plan.record_last_use_by_index.assign(static_cast<std::size_t>(program.nrecords + 1), -1);
-    plan.record_last_use_by_index[static_cast<std::size_t>(record)] = producer_instruction;
-    return plan;
-}
-
 symft::BatchDetectorPostselectionResult execute_expression_postselected_for_test(
     symft::BatchFactoredExecutorState& runtime,
     const symft::FactoredInstructionProgram& program,
     const symft::PackedPresampledExogenous& samples,
-    const symft::BatchDetectorPostselectionPlan& postselection,
     symft::BatchDetectorPostselectionScratch& scratch,
-    symft::BatchDetectorPostselectionOptions options = {}) {
+    const symft::BatchDetectorPostselectionOptions& options = {}) {
     symft::PresampledExpressionPlan expression_plan;
     symft::prepare_presampled_expression_plan(expression_plan, program, samples);
     symft::PresampledExpressionBlock expression_block;
@@ -86,9 +43,13 @@ symft::BatchDetectorPostselectionResult execute_expression_postselected_for_test
         expression_plan,
         expression_block,
         0,
-        postselection,
         scratch,
         options);
+}
+
+symft::FactoredInstructionProgram planned_stim_program(
+    const symft::StimParseResult& parsed) {
+    return symft::plan_stim_factored_program(parsed);
 }
 
 void test_pauli_algebra() {
@@ -247,13 +208,21 @@ void test_stim_frontend_circuit_lowering() {
     require(circuit.instructions[0].measurement_targets[0].inverted, "circuit inverted measurement target");
     require(circuit.detectors.size() == 1, "circuit detector count");
     require(circuit.detectors[0].records[0] == 2 && circuit.detectors[0].records[1] == 1, "circuit detector records resolved");
+    require(circuit.detectors[0].after_instruction == 2, "circuit detector source position");
 
     const auto lowered = lower_circuit_to_factored(circuit);
     require(lowered.measurement_records.size() == 2, "lowered record count");
+    require(lowered.instruction_pending_operation_counts.size() == 3, "lowered instruction pending-count table");
+    require(lowered.instruction_pending_operation_counts[2] == 2, "lowered detector pending position");
     PendingFactoredState pending(lowered.state);
     const auto program = plan_factored_updates(pending);
+    require(program.pending_prefix_instruction_indices.size() == 3, "planned pending-prefix checkpoints");
     const auto records = sample_measurements(program);
     require(packed_bit(records, 0) && packed_bit(records, 1), "lowered circuit deterministic records");
+
+    const auto detector_after_clifford = parse_stim_text("M 0\nH 0\nDETECTOR rec[-1]\n");
+    require(detector_after_clifford.detectors[0].after_instruction == 2, "detector keeps source order after Clifford");
+    require(detector_after_clifford.detectors[0].after_pending_operation == 1, "Clifford does not shift pending detector position");
 
     const auto cy_feedback = parse_stim_text("M !0\nCY rec[-1] 1\nM 1\n");
     PendingFactoredState pending_cy(cy_feedback.state);
@@ -382,8 +351,7 @@ void test_batch_postselection() {
     using namespace symft;
     {
         const auto parsed = parse_stim_text("M !0\nDETECTOR rec[-1]\n");
-        PendingFactoredState pending(parsed.state);
-        const auto program = plan_factored_updates(pending);
+        const auto program = planned_stim_program(parsed);
         const auto samples = presample_exogenous_packed(program, 8, 17);
         BatchFactoredExecutorState runtime(program, 8, 19);
         BatchDetectorPostselectionScratch scratch;
@@ -391,7 +359,6 @@ void test_batch_postselection() {
             runtime,
             program,
             samples,
-            single_detector_plan(program, 1),
             scratch);
         require(result.discarded == 8, "batch postselection rejects fired detector");
         require(result.accepted == 0, "batch postselection no accepted shots after rejection");
@@ -399,8 +366,7 @@ void test_batch_postselection() {
     }
     {
         const auto parsed = parse_stim_text("M 0\nDETECTOR rec[-1]\n");
-        PendingFactoredState pending(parsed.state);
-        const auto program = plan_factored_updates(pending);
+        const auto program = planned_stim_program(parsed);
         const auto samples = presample_exogenous_packed(program, 8, 23);
         BatchFactoredExecutorState runtime(program, 8, 29);
         BatchDetectorPostselectionScratch scratch;
@@ -408,7 +374,6 @@ void test_batch_postselection() {
             runtime,
             program,
             samples,
-            single_detector_plan(program, 1),
             scratch);
         require(result.discarded == 0, "batch postselection keeps quiet detector");
         require(result.accepted == 8, "batch postselection accepted count");
@@ -425,8 +390,7 @@ void test_batch_postselection() {
             "T_DAG 1\n"
             "H 1\n"
             "M 1\n");
-        PendingFactoredState pending(parsed.state);
-        const auto program = plan_factored_updates(pending);
+        const auto program = planned_stim_program(parsed);
         const auto samples = presample_exogenous_packed(program, 64, 41);
         BatchDetectorPostselectionScratch default_scratch;
         BatchFactoredExecutorState default_runtime(program, 64, 43);
@@ -434,7 +398,6 @@ void test_batch_postselection() {
             default_runtime,
             program,
             samples,
-            single_detector_plan(program, 1),
             default_scratch);
         BatchDetectorPostselectionScratch alternate_scratch;
         BatchFactoredExecutorState alternate_runtime(program, 64, 43);
@@ -442,7 +405,6 @@ void test_batch_postselection() {
             alternate_runtime,
             program,
             samples,
-            single_detector_plan(program, 1),
             alternate_scratch,
             BatchDetectorPostselectionOptions{1});
         require(default_result.discarded > 0, "mask-threshold postselection test kills at least one lane");

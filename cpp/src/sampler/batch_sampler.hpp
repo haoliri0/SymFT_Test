@@ -12,21 +12,17 @@ namespace symft {
 struct PresampledExogenous;
 struct PackedPresampledExogenous;
 
-struct BatchDetectorPostselectionPlan {
-    std::vector<int> instruction_records_by_index;
-    std::vector<std::vector<std::vector<int>>> detectors_by_record;
-    std::vector<int> condition_last_use_by_index;
-    std::vector<int> record_last_use_by_index;
-};
-
 struct BatchDetectorPostselectionScratch {
-    std::vector<std::uint64_t> detector_bits;
     std::vector<std::uint64_t> dead_bits;
     std::vector<std::uint64_t> keep_bits;
     std::vector<std::uint64_t> scratch;
     std::vector<std::uint64_t> compact_scratch;
     std::vector<std::uint64_t> expression_words;
     std::vector<int> live_sources;
+    std::vector<int> condition_last_use_by_index;
+    std::vector<int> record_last_use_by_index;
+    const FactoredInstructionProgram* postselection_metadata_program = nullptr;
+    const std::vector<std::vector<int>>* postselection_metadata_retained_record_uses = nullptr;
     int dead_count = 0;
 };
 
@@ -37,6 +33,7 @@ struct BatchDetectorPostselectionResult {
 
 struct BatchDetectorPostselectionOptions {
     int mask_dead_shots_min_fraction_denominator = 2;
+    const std::vector<std::vector<int>>* retained_record_uses = nullptr;
 };
 
 // Active storage is a Julia-column-major equivalent SoA layout:
@@ -53,6 +50,7 @@ struct BatchFactoredExecutorState {
     int active_pitch = 0;
     int nsymbols = 0;
     int nrecords = 0;
+    int ndetectors = 0;
     int max_k = 0;
     std::size_t batch_words = 0;
     std::vector<double> active_re;
@@ -62,6 +60,7 @@ struct BatchFactoredExecutorState {
     std::vector<std::uint64_t> value_words;
     std::vector<std::uint64_t> assigned_words;
     std::vector<std::uint64_t> measurement_words;
+    std::vector<std::uint64_t> detector_words;
     std::vector<std::uint64_t> eval_scratch;
     std::vector<double> rotation_coefficients;
     std::vector<double> branch_prob_true;
@@ -94,15 +93,19 @@ void execute_batch_in_place(
 void prepare_batch_detector_postselection_scratch(
     BatchDetectorPostselectionScratch& scratch,
     const BatchFactoredExecutorState& runtime);
+void prepare_batch_detector_postselection_scratch(
+    BatchDetectorPostselectionScratch& scratch,
+    const BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    const BatchDetectorPostselectionOptions& options = {});
 BatchDetectorPostselectionResult execute_batch_postselected_in_place(
     BatchFactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
     const PresampledExpressionPlan& expression_plan,
     const PresampledExpressionBlock& expression_block,
     int first_sample_shot,
-    const BatchDetectorPostselectionPlan& postselection,
     BatchDetectorPostselectionScratch& scratch,
-    BatchDetectorPostselectionOptions options = {});
+    const BatchDetectorPostselectionOptions& options = {});
 const char* active_batch_backend();
 std::vector<std::vector<std::uint64_t>> sample_measurements_batch(
     const FactoredInstructionProgram& program,

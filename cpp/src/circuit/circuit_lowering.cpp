@@ -317,13 +317,17 @@ void apply_instruction(CircuitLoweringAccumulator& acc, const CircuitInstruction
 
 CircuitLoweringResult lower_circuit_to_factored(const QuantumCircuit& circuit) {
     CircuitLoweringAccumulator acc{FrameFactoredState(circuit.nqubits, 0), {}};
+    std::vector<int> pending_counts;
+    pending_counts.reserve(circuit.instructions.size() + 1);
+    pending_counts.push_back(0);
     for (const auto& instruction : circuit.instructions) {
         apply_instruction(acc, instruction);
+        pending_counts.push_back(static_cast<int>(acc.state.pending_operations.size()));
     }
     if (static_cast<int>(acc.records.size()) != circuit.nrecords) {
         fail("circuit measurement record count mismatch");
     }
-    return CircuitLoweringResult{std::move(acc.state), std::move(acc.records)};
+    return CircuitLoweringResult{std::move(acc.state), std::move(acc.records), std::move(pending_counts)};
 }
 
 } // namespace symft

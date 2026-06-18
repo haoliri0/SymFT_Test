@@ -10,12 +10,9 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <type_traits>
-#include <variant>
 #include <vector>
 
 namespace {
@@ -295,9 +292,12 @@ Options parse_options(int argc, char** argv) {
     return options;
 }
 
-symft::BatchDetectorPostselectionOptions batch_postselection_options(const Options& options) {
+symft::BatchDetectorPostselectionOptions batch_postselection_options(
+    const Options& options,
+    const std::vector<std::vector<int>>& retained_record_uses) {
     symft::BatchDetectorPostselectionOptions out;
     out.mask_dead_shots_min_fraction_denominator = options.batch_mask_threshold_denominator;
+    out.retained_record_uses = &retained_record_uses;
     return out;
 }
 
@@ -357,7 +357,6 @@ void accumulate_block_counts(
     RateCounts& counts,
     const symft::BatchFactoredExecutorState& runtime,
     int block,
-    const std::vector<symft::StimDetector>& detectors,
     const std::vector<std::vector<int>>& logical_records,
     std::vector<std::uint64_t>& discard_bits,
     std::vector<std::uint64_t>& logical_bits,
@@ -367,10 +366,10 @@ void accumulate_block_counts(
     std::fill(discard_bits.begin(), discard_bits.begin() + static_cast<std::ptrdiff_t>(nwords), 0);
     std::fill(logical_bits.begin(), logical_bits.begin() + static_cast<std::ptrdiff_t>(nwords), 0);
 
-    for (const auto& detector : detectors) {
-        xor_records_into(scratch, runtime.measurement_words, stride_words, nwords, detector.records);
+    for (int detector = 1; detector <= runtime.ndetectors; ++detector) {
+        const std::size_t base = static_cast<std::size_t>(detector - 1) * stride_words;
         for (std::size_t word = 0; word < nwords; ++word) {
-            discard_bits[word] |= scratch[word];
+            discard_bits[word] |= runtime.detector_words[base + word];
         }
     }
 
@@ -389,156 +388,6 @@ void accumulate_block_counts(
         counts.accepted += static_cast<std::uint64_t>(popcount64(accepted_word));
         counts.logical_errors += static_cast<std::uint64_t>(popcount64(logical_bits[word] & accepted_word));
     }
-}
-
-std::optional<int> instruction_record(const symft::FactoredInstruction& instruction) {
-    return std::visit(
-        [](const auto& inst) -> std::optional<int> {
-            using T = std::decay_t<decltype(inst)>;
-            if constexpr (
-                std::is_same_v<T, symft::RecordMeasurement> ||
-                std::is_same_v<T, symft::MeasureActiveLastZ> ||
-                std::is_same_v<T, symft::MeasurePrecomputedActivePauli> ||
-                std::is_same_v<T, symft::IntroduceDormantMeasurementBranch>) {
-                return inst.record;
-            } else {
-                return std::nullopt;
-            }
-        },
-        instruction);
-}
-
-std::vector<int> instruction_records(const symft::FactoredInstructionProgram& program) {
-    std::vector<int> out;
-    out.reserve(program.instructions.size());
-    for (const auto& instruction : program.instructions) {
-        const auto record = instruction_record(instruction);
-        out.push_back(record.value_or(0));
-    }
-    return out;
-}
-
-void mark_condition_uses(
-    std::vector<int>& last_use,
-    const symft::SymbolicBoolEvaluationPlan& plan,
-    int instruction_index) {
-    for (int condition : plan.conditions) {
-        if (condition > 0 && condition < static_cast<int>(last_use.size())) {
-            last_use[static_cast<std::size_t>(condition)] =
-                std::max(last_use[static_cast<std::size_t>(condition)], instruction_index);
-        }
-    }
-}
-
-std::vector<int> condition_last_uses(const symft::FactoredInstructionProgram& program) {
-    std::vector<int> last_use(static_cast<std::size_t>(program.nsymbols + 1), -1);
-    for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
-        const int instruction_index = static_cast<int>(idx);
-        std::visit(
-            [&](const auto& inst) {
-                using T = std::decay_t<decltype(inst)>;
-                if constexpr (
-                    std::is_same_v<T, symft::ApplyPrecomputedActivePauliRotation> ||
-                    std::is_same_v<T, symft::PromoteDormantRotation>) {
-                    mark_condition_uses(last_use, inst.sign_plan, instruction_index);
-                } else if constexpr (
-                    std::is_same_v<T, symft::RecordMeasurement> ||
-                    std::is_same_v<T, symft::MeasureActiveLastZ> ||
-                    std::is_same_v<T, symft::MeasurePrecomputedActivePauli> ||
-                    std::is_same_v<T, symft::IntroduceDormantMeasurementBranch>) {
-                    mark_condition_uses(last_use, inst.outcome_plan, instruction_index);
-                }
-            },
-            program.instructions[idx]);
-    }
-    return last_use;
-}
-
-std::vector<std::vector<std::vector<int>>> detectors_by_max_record(
-    const std::vector<symft::StimDetector>& detectors,
-    int nrecords) {
-    std::vector<std::vector<std::vector<int>>> out(static_cast<std::size_t>(nrecords + 1));
-    for (const auto& detector : detectors) {
-        if (detector.records.empty()) {
-            continue;
-        }
-        int max_record = 0;
-        for (int record : detector.records) {
-            if (record <= 0 || record > nrecords) {
-                throw std::runtime_error("detector references an out-of-range measurement record");
-            }
-            max_record = std::max(max_record, record);
-        }
-        out[static_cast<std::size_t>(max_record)].push_back(detector.records);
-    }
-    return out;
-}
-
-std::vector<std::vector<std::vector<std::uint64_t>>> detector_masks_by_record(
-    const std::vector<std::vector<std::vector<int>>>& detectors_by_record,
-    int nrecords) {
-    const std::size_t record_words = batch_word_count(nrecords);
-    std::vector<std::vector<std::vector<std::uint64_t>>> out(detectors_by_record.size());
-    for (std::size_t checkpoint = 0; checkpoint < detectors_by_record.size(); ++checkpoint) {
-        out[checkpoint].reserve(detectors_by_record[checkpoint].size());
-        for (const auto& records : detectors_by_record[checkpoint]) {
-            auto& mask = out[checkpoint].emplace_back(record_words, 0);
-            for (int record : records) {
-                if (record <= 0 || record > nrecords) {
-                    throw std::runtime_error("detector references an out-of-range measurement record");
-                }
-                const int bit = record - 1;
-                mask[static_cast<std::size_t>(bit >> 6)] |= std::uint64_t{1} << (bit & 63);
-            }
-        }
-    }
-    return out;
-}
-
-std::vector<int> record_producer_instructions(const std::vector<int>& records_by_instruction, int nrecords) {
-    std::vector<int> out(static_cast<std::size_t>(nrecords + 1), -1);
-    for (std::size_t idx = 0; idx < records_by_instruction.size(); ++idx) {
-        const int record = records_by_instruction[idx];
-        if (record > 0 && record <= nrecords) {
-            out[static_cast<std::size_t>(record)] = static_cast<int>(idx);
-        }
-    }
-    return out;
-}
-
-std::vector<int> measurement_record_last_uses(
-    int nrecords,
-    const std::vector<int>& record_producers,
-    const std::vector<std::vector<std::vector<int>>>& detectors_by_record,
-    const std::vector<std::vector<int>>& logical_records,
-    int final_instruction_index) {
-    std::vector<int> last_use(static_cast<std::size_t>(nrecords + 1), -1);
-    for (int max_record = 1; max_record <= nrecords; ++max_record) {
-        if (static_cast<std::size_t>(max_record) >= detectors_by_record.size() ||
-            detectors_by_record[static_cast<std::size_t>(max_record)].empty()) {
-            continue;
-        }
-        const int use_index = record_producers[static_cast<std::size_t>(max_record)];
-        if (use_index < 0) {
-            throw std::runtime_error("detector checkpoint record has no producing instruction");
-        }
-        for (const auto& records : detectors_by_record[static_cast<std::size_t>(max_record)]) {
-            for (int record : records) {
-                last_use[static_cast<std::size_t>(record)] =
-                    std::max(last_use[static_cast<std::size_t>(record)], use_index);
-            }
-        }
-    }
-    for (const auto& records : logical_records) {
-        for (int record : records) {
-            if (record <= 0 || record > nrecords) {
-                throw std::runtime_error("observable references an out-of-range measurement record");
-            }
-            last_use[static_cast<std::size_t>(record)] =
-                std::max(last_use[static_cast<std::size_t>(record)], final_instruction_index);
-        }
-    }
-    return last_use;
 }
 
 void accumulate_logical_counts_for_survivors(
@@ -597,11 +446,12 @@ bool record_parity(const std::vector<std::uint64_t>& words, const std::vector<in
 void accumulate_single_counts(
     RateCounts& counts,
     const std::vector<std::uint64_t>& measurement_words,
-    const std::vector<symft::StimDetector>& detectors,
+    const std::vector<std::uint64_t>& detector_words,
+    int ndetectors,
     const std::vector<std::vector<int>>& logical_records) {
     bool discarded = false;
-    for (const auto& detector : detectors) {
-        discarded = discarded || record_parity(measurement_words, detector.records);
+    for (int detector = 0; detector < ndetectors; ++detector) {
+        discarded = discarded || symft::packed_bit(detector_words, detector);
     }
     if (discarded) {
         ++counts.discarded;
@@ -621,12 +471,6 @@ struct RateBenchSetup {
     symft::StimParseResult parsed;
     symft::FactoredInstructionProgram program;
     std::vector<std::vector<int>> logical_records;
-    std::vector<std::vector<std::vector<int>>> postselection_detectors_by_record;
-    std::vector<int> instruction_records_by_index;
-    std::vector<int> condition_last_use_by_index;
-    std::vector<int> record_last_use_by_index;
-    symft::DetectorPostselectionPlan single_postselection_plan;
-    symft::BatchDetectorPostselectionPlan batch_postselection_plan;
     int batch_size = 0;
     int sample_chunk_shots = 0;
 };
@@ -640,8 +484,7 @@ RateBenchSetup build_rate_bench_setup(
     const auto parse_stop = Clock::now();
 
     const auto plan_start = Clock::now();
-    symft::PendingFactoredState pending(parsed.state);
-    auto program = symft::plan_factored_updates(pending);
+    auto program = symft::plan_stim_factored_program(parsed);
     const auto plan_stop = Clock::now();
 
     RateBenchSetup setup;
@@ -655,26 +498,6 @@ RateBenchSetup build_rate_bench_setup(
             ? options.sample_chunk_shots
             : symft::default_single_shot_sample_chunk_shots();
     setup.logical_records = logical_records_for_observable(parsed.observables, options.observable);
-    setup.postselection_detectors_by_record = detectors_by_max_record(parsed.detectors, program.nrecords);
-    setup.instruction_records_by_index = instruction_records(program);
-    setup.single_postselection_plan.instruction_records_by_index = setup.instruction_records_by_index;
-    setup.single_postselection_plan.detectors_by_record = setup.postselection_detectors_by_record;
-    setup.single_postselection_plan.detector_masks_by_record =
-        detector_masks_by_record(setup.postselection_detectors_by_record, program.nrecords);
-    setup.single_postselection_plan.record_words = batch_word_count(program.nrecords);
-    setup.condition_last_use_by_index = condition_last_uses(program);
-    const auto record_producers_by_index =
-        record_producer_instructions(setup.instruction_records_by_index, program.nrecords);
-    setup.record_last_use_by_index = measurement_record_last_uses(
-        program.nrecords,
-        record_producers_by_index,
-        setup.postselection_detectors_by_record,
-        setup.logical_records,
-        static_cast<int>(program.instructions.size()));
-    setup.batch_postselection_plan.instruction_records_by_index = setup.instruction_records_by_index;
-    setup.batch_postselection_plan.detectors_by_record = setup.postselection_detectors_by_record;
-    setup.batch_postselection_plan.condition_last_use_by_index = setup.condition_last_use_by_index;
-    setup.batch_postselection_plan.record_last_use_by_index = setup.record_last_use_by_index;
     setup.parsed = std::move(parsed);
     setup.program = std::move(program);
     parse_s = seconds_between(parse_start, parse_stop);
@@ -755,8 +578,7 @@ BenchResult run_single_sampler(const Options& options) {
                         setup.program,
                         packed_expression_plan,
                         packed_expression_block,
-                        shot,
-                        setup.single_postselection_plan);
+                        shot);
                     const auto execute_stop = Clock::now();
                     if (!survived) {
                         ++counts.discarded;
@@ -764,7 +586,8 @@ BenchResult run_single_sampler(const Options& options) {
                         accumulate_single_counts(
                             counts,
                             runtime.measurement_words,
-                            setup.parsed.detectors,
+                            runtime.detector_words,
+                            setup.program.ndetectors,
                             setup.logical_records);
                     }
                     const auto accumulate_stop = Clock::now();
@@ -783,7 +606,8 @@ BenchResult run_single_sampler(const Options& options) {
                 accumulate_single_counts(
                     counts,
                     runtime.measurement_words,
-                    setup.parsed.detectors,
+                    runtime.detector_words,
+                    setup.program.ndetectors,
                     setup.logical_records);
                 const auto accumulate_stop = Clock::now();
                 execute_total += seconds_between(execute_start, execute_stop);
@@ -850,33 +674,66 @@ BenchResult run_batch_sampler(const Options& options) {
     const int active_threads = std::min<int>(
         options.threads,
         static_cast<int>(std::max<std::uint64_t>(1, nchunks)));
-    const auto postselection_options = batch_postselection_options(options);
+    const auto postselection_options = batch_postselection_options(options, setup.logical_records);
 
     for (int repeat = 0; repeat < options.repeats; ++repeat) {
-        std::vector<WorkerResult> worker_results(static_cast<std::size_t>(active_threads));
+        struct BatchWorkerContext {
+            WorkerResult worker_result;
+            symft::BatchFactoredExecutorState runtime;
+            std::vector<std::uint64_t> discard_bits;
+            std::vector<std::uint64_t> logical_bits;
+            std::vector<std::uint64_t> scratch;
+            symft::BatchDetectorPostselectionScratch postselection_scratch;
+            symft::PackedPresampledExogenous samples;
+            symft::PresampledExpressionPlan expression_plan;
+            symft::PresampledExpressionBlock expression_block;
+
+            BatchWorkerContext(
+                const symft::FactoredInstructionProgram& program,
+                int batch_size,
+                std::uint64_t seed)
+                : runtime(program, batch_size, seed),
+                  discard_bits(runtime.batch_words, 0),
+                  logical_bits(runtime.batch_words, 0),
+                  scratch(runtime.batch_words, 0) {}
+        };
+
+        std::vector<BatchWorkerContext> worker_contexts;
+        worker_contexts.reserve(static_cast<std::size_t>(active_threads));
+        for (int worker_id = 0; worker_id < active_threads; ++worker_id) {
+            worker_contexts.emplace_back(
+                setup.program,
+                result.batch_size,
+                block_seed(0x5eed1234ULL, repeat, static_cast<std::uint64_t>(worker_id)));
+            auto& context = worker_contexts.back();
+            if (options.postselect_detectors) {
+                symft::prepare_batch_detector_postselection_scratch(
+                    context.postselection_scratch,
+                    context.runtime,
+                    setup.program,
+                    postselection_options);
+            }
+            symft::prepare_presampled_exogenous_packed(context.samples, setup.program);
+            if (options.postselect_detectors) {
+                symft::prepare_presampled_expression_plan(
+                    context.expression_plan,
+                    setup.program,
+                    context.samples);
+            }
+        }
 
         const auto sample_wall_start = Clock::now();
         auto run_worker = [&](int worker_id) {
             WorkerResult local;
-            symft::BatchFactoredExecutorState runtime(
-                setup.program,
-                result.batch_size,
-                block_seed(0x5eed1234ULL, repeat, static_cast<std::uint64_t>(worker_id)));
-            std::vector<std::uint64_t> discard_bits(runtime.batch_words, 0);
-            std::vector<std::uint64_t> logical_bits(runtime.batch_words, 0);
-            std::vector<std::uint64_t> scratch(runtime.batch_words, 0);
-            symft::BatchDetectorPostselectionScratch postselection_scratch;
-            symft::prepare_batch_detector_postselection_scratch(postselection_scratch, runtime);
-            symft::PackedPresampledExogenous samples;
-            symft::prepare_presampled_exogenous_packed(samples, setup.program);
-            symft::PresampledExpressionPlan expression_plan;
-            symft::PresampledExpressionBlock expression_block;
-            if (options.postselect_detectors) {
-                symft::prepare_presampled_expression_plan(
-                    expression_plan,
-                    setup.program,
-                    samples);
-            }
+            auto& context = worker_contexts[static_cast<std::size_t>(worker_id)];
+            auto& runtime = context.runtime;
+            auto& discard_bits = context.discard_bits;
+            auto& logical_bits = context.logical_bits;
+            auto& scratch = context.scratch;
+            auto& postselection_scratch = context.postselection_scratch;
+            auto& samples = context.samples;
+            auto& expression_plan = context.expression_plan;
+            auto& expression_block = context.expression_block;
             for (std::uint64_t chunk_index = static_cast<std::uint64_t>(worker_id);
                  chunk_index < nchunks;
                  chunk_index += static_cast<std::uint64_t>(active_threads)) {
@@ -921,7 +778,6 @@ BenchResult run_batch_sampler(const Options& options) {
                             expression_plan,
                             expression_block,
                             chunk_local_offset,
-                            setup.batch_postselection_plan,
                             postselection_scratch,
                             postselection_options);
                         local.counts.discarded +=
@@ -942,7 +798,6 @@ BenchResult run_batch_sampler(const Options& options) {
                             local.counts,
                             runtime,
                             block,
-                            setup.parsed.detectors,
                             setup.logical_records,
                             discard_bits,
                             logical_bits,
@@ -954,7 +809,7 @@ BenchResult run_batch_sampler(const Options& options) {
                     local.accumulate_s += seconds_between(execute_stop, accumulate_stop);
                 }
             }
-            worker_results[static_cast<std::size_t>(worker_id)] = local;
+            context.worker_result = local;
         };
         if (active_threads == 1) {
             run_worker(0);
@@ -970,14 +825,14 @@ BenchResult run_batch_sampler(const Options& options) {
         }
         const auto sample_wall_stop = Clock::now();
 
-        for (const auto& worker : worker_results) {
-            result.counts.shots += worker.counts.shots;
-            result.counts.discarded += worker.counts.discarded;
-            result.counts.accepted += worker.counts.accepted;
-            result.counts.logical_errors += worker.counts.logical_errors;
-            presample_total += worker.presample_s;
-            execute_total += worker.execute_s;
-            accumulate_total += worker.accumulate_s;
+        for (const auto& context : worker_contexts) {
+            result.counts.shots += context.worker_result.counts.shots;
+            result.counts.discarded += context.worker_result.counts.discarded;
+            result.counts.accepted += context.worker_result.counts.accepted;
+            result.counts.logical_errors += context.worker_result.counts.logical_errors;
+            presample_total += context.worker_result.presample_s;
+            execute_total += context.worker_result.execute_s;
+            accumulate_total += context.worker_result.accumulate_s;
         }
         sample_wall_total += seconds_between(sample_wall_start, sample_wall_stop);
     }

@@ -91,6 +91,10 @@ inline int max_condition(const RecordMeasurement& instruction) {
     return out;
 }
 
+inline int max_condition(const RecordDetector& instruction) {
+    return instruction.outcome.max_condition();
+}
+
 inline int max_condition(const MeasureActiveLastZ& instruction) {
     int out = std::max(instruction.branch, instruction.outcome.max_condition());
     if (instruction.record_condition) {

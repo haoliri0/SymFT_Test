@@ -11,19 +11,13 @@ namespace symft {
 struct PresampledExogenous;
 struct PackedPresampledExogenous;
 
-struct DetectorPostselectionPlan {
-    std::vector<int> instruction_records_by_index;
-    std::vector<std::vector<std::vector<int>>> detectors_by_record;
-    std::vector<std::vector<std::vector<std::uint64_t>>> detector_masks_by_record;
-    std::size_t record_words = 0;
-};
-
 struct FactoredExecutorState {
     int n = 0;
     int k = 0;
     int ndormant = 0;
     int nsymbols = 0;
     int nrecords = 0;
+    int ndetectors = 0;
     std::vector<double> active_re;
     std::vector<double> active_im;
     std::vector<double> active_scratch_re;
@@ -31,6 +25,7 @@ struct FactoredExecutorState {
     std::vector<std::uint64_t> value_words;
     std::vector<std::uint64_t> assigned_words;
     std::vector<std::uint64_t> measurement_words;
+    std::vector<std::uint64_t> detector_words;
     std::uint64_t rng_state = 1;
 
     explicit FactoredExecutorState(const FactoredInstructionProgram& program, std::uint64_t seed = 1);
@@ -63,15 +58,13 @@ bool execute_postselected_in_place(
     FactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
     const PresampledExogenous& samples,
-    int shot_index,
-    const DetectorPostselectionPlan& postselection);
+    int shot_index);
 bool execute_postselected_in_place(
     FactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
     const PresampledExpressionPlan& expression_plan,
     const PresampledExpressionBlock& expression_block,
-    int shot_index,
-    const DetectorPostselectionPlan& postselection);
+    int shot_index);
 int default_single_shot_sample_chunk_shots();
 std::vector<std::vector<std::uint64_t>> sample_measurements(
     const FactoredInstructionProgram& program,

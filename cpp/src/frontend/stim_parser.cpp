@@ -452,10 +452,12 @@ void append_instruction(StimCircuitBuilder& builder, const StimInstruction& inst
         return;
     }
     if (op == "DETECTOR") {
-        builder.circuit.detectors.push_back(
-            {stim_record_indices(inst, builder.circuit.nrecords),
-             coords_with_shift(inst.parens, builder.coord_shift),
-             inst.line});
+        CircuitDetector detector;
+        detector.records = stim_record_indices(inst, builder.circuit.nrecords);
+        detector.coords = coords_with_shift(inst.parens, builder.coord_shift);
+        detector.line = inst.line;
+        detector.after_instruction = static_cast<int>(builder.circuit.instructions.size());
+        builder.circuit.detectors.push_back(std::move(detector));
         return;
     }
     if (op == "OBSERVABLE_INCLUDE") {
@@ -556,6 +558,21 @@ void append_nodes(StimCircuitBuilder& builder, const std::vector<StimNode>& node
     }
 }
 
+std::vector<StimDetector> detectors_with_lowered_positions(
+    const QuantumCircuit& circuit,
+    const CircuitLoweringResult& lowered) {
+    std::vector<StimDetector> detectors = circuit.detectors;
+    for (auto& detector : detectors) {
+        if (detector.after_instruction < 0 ||
+            detector.after_instruction >= static_cast<int>(lowered.instruction_pending_operation_counts.size())) {
+            fail("detector source position is out of range");
+        }
+        detector.after_pending_operation =
+            lowered.instruction_pending_operation_counts[static_cast<std::size_t>(detector.after_instruction)];
+    }
+    return detectors;
+}
+
 } // namespace
 
 QuantumCircuit parse_stim_circuit_lines(const std::vector<std::string>& lines) {
@@ -593,30 +610,33 @@ QuantumCircuit parse_stim_circuit_file(const std::string& path) {
 StimParseResult parse_stim_lines(const std::vector<std::string>& lines) {
     const QuantumCircuit circuit = parse_stim_circuit_lines(lines);
     CircuitLoweringResult lowered = lower_circuit_to_factored(circuit);
+    auto detectors = detectors_with_lowered_positions(circuit, lowered);
     return StimParseResult{
         std::move(lowered.state),
         std::move(lowered.measurement_records),
-        circuit.detectors,
+        std::move(detectors),
         circuit.observables};
 }
 
 StimParseResult parse_stim_text(const std::string& text) {
     const QuantumCircuit circuit = parse_stim_circuit_text(text);
     CircuitLoweringResult lowered = lower_circuit_to_factored(circuit);
+    auto detectors = detectors_with_lowered_positions(circuit, lowered);
     return StimParseResult{
         std::move(lowered.state),
         std::move(lowered.measurement_records),
-        circuit.detectors,
+        std::move(detectors),
         circuit.observables};
 }
 
 StimParseResult parse_stim_file(const std::string& path) {
     const QuantumCircuit circuit = parse_stim_circuit_file(path);
     CircuitLoweringResult lowered = lower_circuit_to_factored(circuit);
+    auto detectors = detectors_with_lowered_positions(circuit, lowered);
     return StimParseResult{
         std::move(lowered.state),
         std::move(lowered.measurement_records),
-        circuit.detectors,
+        std::move(detectors),
         circuit.observables};
 }
 

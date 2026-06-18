@@ -48,6 +48,12 @@ struct RecordMeasurement {
     SymbolicBoolEvaluationPlan outcome_plan;
 };
 
+struct RecordDetector {
+    SymbolicBool outcome;
+    int detector = 0;
+    SymbolicBoolEvaluationPlan outcome_plan;
+};
+
 struct MeasureActiveLastZ {
     int branch = 0;
     SymbolicBool outcome;
@@ -78,6 +84,7 @@ using FactoredInstruction = std::variant<
     ApplyPrecomputedActivePauliRotation,
     PromoteDormantRotation,
     RecordMeasurement,
+    RecordDetector,
     MeasureActiveLastZ,
     MeasurePrecomputedActivePauli,
     IntroduceDormantMeasurementBranch>;
@@ -85,6 +92,7 @@ using FactoredInstruction = std::variant<
 bool operator==(const ApplyPrecomputedActivePauliRotation& lhs, const ApplyPrecomputedActivePauliRotation& rhs);
 bool operator==(const PromoteDormantRotation& lhs, const PromoteDormantRotation& rhs);
 bool operator==(const RecordMeasurement& lhs, const RecordMeasurement& rhs);
+bool operator==(const RecordDetector& lhs, const RecordDetector& rhs);
 bool operator==(const MeasureActiveLastZ& lhs, const MeasureActiveLastZ& rhs);
 bool operator==(const MeasurePrecomputedActivePauli& lhs, const MeasurePrecomputedActivePauli& rhs);
 bool operator==(const IntroduceDormantMeasurementBranch& lhs, const IntroduceDormantMeasurementBranch& rhs);
@@ -149,6 +157,7 @@ struct PendingFactoredState {
     std::shared_ptr<SymbolicContext> context;
     std::vector<PendingOperation> pending_operations;
     std::vector<FactoredInstruction> instructions;
+    std::vector<int> pending_prefix_instruction_indices;
     int next_record = 1;
 
     PendingFactoredState() = default;
@@ -168,9 +177,11 @@ struct FactoredInstructionProgram {
     int initial_k = 0;
     int max_k = 0;
     std::vector<FactoredInstruction> instructions;
+    std::vector<int> pending_prefix_instruction_indices;
     SymbolicContext context;
     int nsymbols = 0;
     int nrecords = 0;
+    int ndetectors = 0;
     std::vector<SymbolicCategoricalDistribution> sampled_categorical_distributions;
     std::vector<RareCategoricalSampleGroup> sampled_rare_categorical_groups;
     std::vector<int> sampled_bernoulli_conditions;
@@ -183,7 +194,8 @@ struct FactoredInstructionProgram {
         int initial_k,
         std::vector<FactoredInstruction> instructions,
         int max_k,
-        SymbolicContext context = SymbolicContext());
+        SymbolicContext context = SymbolicContext(),
+        std::vector<int> pending_prefix_instruction_indices = {});
 };
 
 FactoredInstructionProgram factored_instruction_program(const PendingFactoredState& state);

@@ -24,6 +24,7 @@ QuantumCircuit parse_stim_circuit_file(const std::string& path);
 StimParseResult parse_stim_lines(const std::vector<std::string>& lines);
 StimParseResult parse_stim_text(const std::string& text);
 StimParseResult parse_stim_file(const std::string& path);
+FactoredInstructionProgram plan_stim_factored_program(const StimParseResult& parsed);
 
 struct StimSampleSummary {
     int shots = 0;

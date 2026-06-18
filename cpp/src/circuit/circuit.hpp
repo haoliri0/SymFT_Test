@@ -69,6 +69,8 @@ struct CircuitDetector {
     std::vector<int> records;
     std::vector<double> coords;
     int line = 0;
+    int after_instruction = 0;
+    int after_pending_operation = 0;
 };
 
 struct CircuitObservableInclude {
@@ -88,6 +90,7 @@ struct QuantumCircuit {
 struct CircuitLoweringResult {
     FrameFactoredState state;
     std::vector<SymbolicBool> measurement_records;
+    std::vector<int> instruction_pending_operation_counts;
 };
 
 CircuitLoweringResult lower_circuit_to_factored(const QuantumCircuit& circuit);

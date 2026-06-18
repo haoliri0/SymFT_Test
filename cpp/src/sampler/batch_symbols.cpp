@@ -249,6 +249,23 @@ void ensure_batch_measurement_storage(BatchFactoredExecutorState& runtime, int r
     runtime.measurement_words = std::move(next);
 }
 
+void ensure_batch_detector_storage(BatchFactoredExecutorState& runtime, int detector) {
+    if (detector <= runtime.ndetectors) {
+        return;
+    }
+    std::vector<std::uint64_t> next(static_cast<std::size_t>(detector) * runtime.batch_words, 0);
+    for (int old_detector = 1; old_detector <= runtime.ndetectors; ++old_detector) {
+        const std::size_t old_base = batch_detector_offset(runtime, old_detector, 0);
+        const std::size_t new_base = static_cast<std::size_t>(old_detector - 1) * runtime.batch_words;
+        std::copy(
+            runtime.detector_words.begin() + static_cast<std::ptrdiff_t>(old_base),
+            runtime.detector_words.begin() + static_cast<std::ptrdiff_t>(old_base + runtime.batch_words),
+            next.begin() + static_cast<std::ptrdiff_t>(new_base));
+    }
+    runtime.ndetectors = detector;
+    runtime.detector_words = std::move(next);
+}
+
 void write_batch_measurement_record(
     BatchFactoredExecutorState& runtime,
     std::optional<int> record,
@@ -273,6 +290,28 @@ void write_batch_measurement_record(
         }
     }
     assign_batch_symbol(runtime, record_condition, outcome_bits);
+}
+
+void write_batch_detector_record(
+    BatchFactoredExecutorState& runtime,
+    int detector,
+    const std::vector<std::uint64_t>& outcome_bits) {
+    const std::size_t nwords = runtime_batch_word_count(runtime);
+    if (detector <= 0) {
+        fail("detector id must be positive");
+    }
+    ensure_batch_detector_storage(runtime, detector);
+    const std::size_t base = batch_detector_offset(runtime, detector, 0);
+    if (nwords == runtime.batch_words && (runtime.active_shots & 63) == 0) {
+        std::copy_n(outcome_bits.data(), nwords, runtime.detector_words.data() + base);
+    } else {
+        for (std::size_t word = 0; word < nwords; ++word) {
+            runtime.detector_words[base + word] = outcome_bits[word] & batch_live_word_mask(runtime, word);
+        }
+        for (std::size_t word = nwords; word < runtime.batch_words; ++word) {
+            runtime.detector_words[base + word] = 0;
+        }
+    }
 }
 
 void assign_presampled_exogenous_batch(

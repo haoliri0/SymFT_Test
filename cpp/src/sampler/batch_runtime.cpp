@@ -1,6 +1,7 @@
 #include "batch_internal.hpp"
 
 #include <algorithm>
+#include <type_traits>
 
 #if (defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86))
 #include <immintrin.h>
@@ -21,6 +22,11 @@ void execute_batch_instruction(BatchFactoredExecutorState& runtime, const Promot
 void execute_batch_instruction(BatchFactoredExecutorState& runtime, const RecordMeasurement& instruction) {
     eval_symbolic_bool_batch(runtime.eval_scratch, instruction.outcome_plan, runtime);
     write_batch_measurement_record(runtime, instruction.record, runtime.eval_scratch, instruction.record_condition);
+}
+
+void execute_batch_instruction(BatchFactoredExecutorState& runtime, const RecordDetector& instruction) {
+    eval_symbolic_bool_batch(runtime.eval_scratch, instruction.outcome_plan, runtime);
+    write_batch_detector_record(runtime, instruction.detector, runtime.eval_scratch);
 }
 
 void execute_batch_instruction(BatchFactoredExecutorState& runtime, const MeasureActiveLastZ& instruction) {
@@ -76,21 +82,83 @@ void ensure_word_scratch(std::vector<std::uint64_t>& words, std::size_t nwords) 
     }
 }
 
-void xor_records_into(
-    std::vector<std::uint64_t>& out,
-    const BatchFactoredExecutorState& runtime,
-    std::size_t nwords,
-    const std::vector<int>& records) {
-    ensure_word_scratch(out, runtime.batch_words);
-    std::fill(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(nwords), 0);
-    for (int record : records) {
-        if (record <= 0 || record > runtime.nrecords) {
-            fail("detector references an out-of-range measurement record");
-        }
-        for (std::size_t word = 0; word < nwords; ++word) {
-            out[word] ^= runtime.measurement_words[batch_record_offset(runtime, record, word)];
+void mark_condition_uses(
+    std::vector<int>& last_use,
+    const SymbolicBoolEvaluationPlan& plan,
+    int instruction_index) {
+    for (int condition : plan.conditions) {
+        if (condition > 0 && condition < static_cast<int>(last_use.size())) {
+            last_use[static_cast<std::size_t>(condition)] =
+                std::max(last_use[static_cast<std::size_t>(condition)], instruction_index);
         }
     }
+}
+
+std::vector<int> condition_last_uses(const FactoredInstructionProgram& program) {
+    std::vector<int> last_use(static_cast<std::size_t>(program.nsymbols + 1), -1);
+    for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+        const int instruction_index = static_cast<int>(idx);
+        std::visit(
+            [&](const auto& inst) {
+                using T = std::decay_t<decltype(inst)>;
+                if constexpr (
+                    std::is_same_v<T, ApplyPrecomputedActivePauliRotation> ||
+                    std::is_same_v<T, PromoteDormantRotation>) {
+                    mark_condition_uses(last_use, inst.sign_plan, instruction_index);
+                } else if constexpr (
+                    std::is_same_v<T, RecordMeasurement> ||
+                    std::is_same_v<T, RecordDetector> ||
+                    std::is_same_v<T, MeasureActiveLastZ> ||
+                    std::is_same_v<T, MeasurePrecomputedActivePauli> ||
+                    std::is_same_v<T, IntroduceDormantMeasurementBranch>) {
+                    mark_condition_uses(last_use, inst.outcome_plan, instruction_index);
+                }
+            },
+            program.instructions[idx]);
+    }
+    return last_use;
+}
+
+std::vector<int> measurement_record_last_uses(
+    int nrecords,
+    const std::vector<std::vector<int>>& retained_record_uses,
+    int final_instruction_index) {
+    std::vector<int> last_use(static_cast<std::size_t>(nrecords + 1), -1);
+    for (const auto& records : retained_record_uses) {
+        for (int record : records) {
+            if (record <= 0 || record > nrecords) {
+                fail("retained record use references an out-of-range measurement record");
+            }
+            last_use[static_cast<std::size_t>(record)] =
+                std::max(last_use[static_cast<std::size_t>(record)], final_instruction_index);
+        }
+    }
+    return last_use;
+}
+
+const std::vector<std::vector<int>>& empty_retained_record_uses() {
+    static const std::vector<std::vector<int>> empty;
+    return empty;
+}
+
+void refresh_batch_postselection_metadata(
+    BatchDetectorPostselectionScratch& scratch,
+    const FactoredInstructionProgram& program,
+    const BatchDetectorPostselectionOptions& options) {
+    if (scratch.postselection_metadata_program == &program &&
+        scratch.postselection_metadata_retained_record_uses == options.retained_record_uses) {
+        return;
+    }
+    const auto& retained_record_uses = options.retained_record_uses == nullptr
+                                           ? empty_retained_record_uses()
+                                           : *options.retained_record_uses;
+    scratch.condition_last_use_by_index = condition_last_uses(program);
+    scratch.record_last_use_by_index = measurement_record_last_uses(
+        program.nrecords,
+        retained_record_uses,
+        static_cast<int>(program.instructions.size()));
+    scratch.postselection_metadata_program = &program;
+    scratch.postselection_metadata_retained_record_uses = options.retained_record_uses;
 }
 
 int count_live_bits(const std::vector<std::uint64_t>& bits, int shots) {
@@ -134,6 +202,10 @@ bool instruction_is_pure_over_dead(const RecordMeasurement&) {
     return true;
 }
 
+bool instruction_is_pure_over_dead(const RecordDetector&) {
+    return true;
+}
+
 bool instruction_is_pure_over_dead(const MeasureActiveLastZ&) {
     return false;
 }
@@ -159,6 +231,10 @@ bool instruction_is_expensive_over_dead(const PromoteDormantRotation&) {
 }
 
 bool instruction_is_expensive_over_dead(const RecordMeasurement&) {
+    return false;
+}
+
+bool instruction_is_expensive_over_dead(const RecordDetector&) {
     return false;
 }
 
@@ -301,6 +377,53 @@ void compact_live_measurement_columns(
         }
         if (dest_bit != survivor_count) {
             fail("internal measurement compaction count mismatch");
+        }
+        std::copy_n(scratch.data(), stride_words, columns.data() + base);
+    }
+}
+
+void compact_live_detector_columns(
+    std::vector<std::uint64_t>& columns,
+    int ndetectors,
+    std::size_t stride_words,
+    int old_shots,
+    int survivor_count,
+    const std::vector<std::uint64_t>& keep_bits,
+    std::vector<std::uint64_t>& scratch) {
+    if (stride_words == 0 || old_shots == 0 || ndetectors <= 0) {
+        return;
+    }
+    if (old_shots <= 64) {
+        const std::uint64_t keep_mask = keep_bits.empty() ? 0 : keep_bits[0] & live_word_mask_for_shots(old_shots, 0);
+        for (int detector = 1; detector <= ndetectors; ++detector) {
+            const std::size_t base = static_cast<std::size_t>(detector - 1) * stride_words;
+            columns[base] = compress_bits(columns[base], keep_mask);
+            for (std::size_t word = 1; word < stride_words; ++word) {
+                columns[base + word] = 0;
+            }
+        }
+        return;
+    }
+    ensure_word_scratch(scratch, stride_words);
+    const std::size_t nwords = batch_word_count(old_shots);
+    for (int detector = 1; detector <= ndetectors; ++detector) {
+        std::fill(scratch.begin(), scratch.begin() + static_cast<std::ptrdiff_t>(stride_words), 0);
+        const std::size_t base = static_cast<std::size_t>(detector - 1) * stride_words;
+        int dest_bit = 0;
+        for (std::size_t word = 0; word < nwords; ++word) {
+            const std::uint64_t keep_mask = keep_bits[word] & live_word_mask_for_shots(old_shots, word);
+            if (keep_mask == 0) {
+                continue;
+            }
+            const int kept = detail::popcount64(keep_mask);
+            append_compressed_bits(
+                scratch,
+                dest_bit,
+                compress_bits(columns[base + word], keep_mask),
+                kept);
+        }
+        if (dest_bit != survivor_count) {
+            fail("internal detector compaction count mismatch");
         }
         std::copy_n(scratch.data(), stride_words, columns.data() + base);
     }
@@ -535,6 +658,14 @@ void compact_surviving_shots(
         survivor_count,
         keep_bits,
         scratch);
+    compact_live_detector_columns(
+        runtime.detector_words,
+        runtime.ndetectors,
+        runtime.batch_words,
+        old_shots,
+        survivor_count,
+        keep_bits,
+        scratch);
     runtime.active_shots = survivor_count;
 }
 
@@ -577,77 +708,26 @@ void compact_dead_shots_if_needed(
     scratch.dead_count = 0;
 }
 
-int apply_postselection_checks_for_record(
+int mark_dead_from_detector_bits(
     BatchFactoredExecutorState& runtime,
-    const std::vector<std::vector<int>>& detectors,
+    const std::vector<std::uint64_t>& detector_bits,
     BatchDetectorPostselectionScratch& scratch) {
-    if (detectors.empty() || runtime.active_shots == 0) {
+    if (runtime.active_shots == 0) {
         return 0;
     }
     const std::size_t nwords = batch_word_count(runtime.active_shots);
-    if (nwords == 1) {
-        const std::uint64_t live = live_word_mask_for_shots(runtime.active_shots, 0);
-        std::uint64_t detector_bits = 0;
-        for (const auto& records : detectors) {
-            std::uint64_t bits = 0;
-            for (int record : records) {
-                if (record <= 0 || record > runtime.nrecords) {
-                    fail("detector references an out-of-range measurement record");
-                }
-                bits ^= runtime.measurement_words[batch_record_offset(runtime, record, 0)];
-            }
-            detector_bits |= bits & live;
-        }
-        scratch.detector_bits[0] = detector_bits;
-        const std::uint64_t newly_dead = detector_bits & ~scratch.dead_bits[0] & live;
-        const int discarded_now = detail::popcount64(newly_dead);
-        if (discarded_now == 0) {
-            return 0;
-        }
-        scratch.dead_bits[0] |= detector_bits & live;
-        scratch.dead_count += discarded_now;
-        return discarded_now;
-    }
-    std::fill(
-        scratch.detector_bits.begin(),
-        scratch.detector_bits.begin() + static_cast<std::ptrdiff_t>(nwords),
-        0);
-    for (const auto& records : detectors) {
-        xor_records_into(scratch.scratch, runtime, nwords, records);
-        for (std::size_t word = 0; word < nwords; ++word) {
-            scratch.detector_bits[word] |=
-                scratch.scratch[word] & live_word_mask_for_shots(runtime.active_shots, word);
-        }
-    }
     int discarded_now = 0;
     for (std::size_t word = 0; word < nwords; ++word) {
         const std::uint64_t live = live_word_mask_for_shots(runtime.active_shots, word);
-        const std::uint64_t newly_dead = scratch.detector_bits[word] & ~scratch.dead_bits[word] & live;
+        const std::uint64_t fired = detector_bits[word] & live;
+        const std::uint64_t newly_dead = fired & ~scratch.dead_bits[word];
+        scratch.dead_bits[word] |= fired;
         discarded_now += detail::popcount64(newly_dead);
-        scratch.dead_bits[word] |= scratch.detector_bits[word] & live;
     }
-    if (discarded_now == 0) {
-        return 0;
+    if (discarded_now != 0) {
+        scratch.dead_count += discarded_now;
     }
-    scratch.dead_count += discarded_now;
     return discarded_now;
-}
-
-void validate_batch_postselection_plan(
-    const FactoredInstructionProgram& program,
-    const BatchDetectorPostselectionPlan& postselection) {
-    if (postselection.instruction_records_by_index.size() != program.instructions.size()) {
-        fail("batch postselection instruction record table does not match program");
-    }
-    if (postselection.condition_last_use_by_index.size() != static_cast<std::size_t>(program.nsymbols + 1)) {
-        fail("batch postselection condition last-use table does not match program");
-    }
-    if (postselection.record_last_use_by_index.size() != static_cast<std::size_t>(program.nrecords + 1)) {
-        fail("batch postselection record last-use table does not match program");
-    }
-    if (postselection.detectors_by_record.size() < static_cast<std::size_t>(program.nrecords + 1)) {
-        fail("batch postselection detector table does not match program");
-    }
 }
 
 std::uint64_t expression_slice_word(
@@ -740,6 +820,15 @@ void execute_batch_instruction_presampled(
 
 void execute_batch_instruction_presampled(
     BatchFactoredExecutorState& runtime,
+    const RecordDetector& instruction,
+    const BatchExpressionEvaluator& evaluator,
+    std::size_t instruction_index) {
+    const auto& outcome_bits = evaluator.eval(instruction_index, runtime);
+    write_batch_detector_record(runtime, instruction.detector, outcome_bits);
+}
+
+void execute_batch_instruction_presampled(
+    BatchFactoredExecutorState& runtime,
     const MeasureActiveLastZ& instruction,
     const BatchExpressionEvaluator& evaluator,
     std::size_t instruction_index) {
@@ -770,16 +859,18 @@ void execute_batch_instruction_presampled(
     write_batch_measurement_record(runtime, instruction.record, outcome_bits, instruction.record_condition);
 }
 
-void execute_batch_instruction_presampled(
+template <typename Instruction>
+int execute_batch_instruction_postselected(
     BatchFactoredExecutorState& runtime,
-    const FactoredInstruction& instruction,
+    const Instruction& instruction,
     const BatchExpressionEvaluator& evaluator,
-    std::size_t instruction_index) {
-    std::visit(
-        [&](const auto& inst) {
-            execute_batch_instruction_presampled(runtime, inst, evaluator, instruction_index);
-        },
-        instruction);
+    std::size_t instruction_index,
+    BatchDetectorPostselectionScratch& scratch) {
+    execute_batch_instruction_presampled(runtime, instruction, evaluator, instruction_index);
+    if constexpr (std::is_same_v<std::decay_t<Instruction>, RecordDetector>) {
+        return mark_dead_from_detector_bits(runtime, runtime.eval_scratch, scratch);
+    }
+    return 0;
 }
 
 void initialize_expression_workspace(
@@ -816,9 +907,8 @@ BatchDetectorPostselectionResult execute_batch_postselected_with_expressions(
     const PresampledExpressionPlan& expression_plan,
     const PresampledExpressionBlock& expression_block,
     int first_sample_shot,
-    const BatchDetectorPostselectionPlan& postselection,
     BatchDetectorPostselectionScratch& scratch,
-    BatchDetectorPostselectionOptions options) {
+    const BatchDetectorPostselectionOptions& options) {
     if (runtime.n != program.n || runtime.k + runtime.ndormant != runtime.n) {
         fail("batch executor state does not match program");
     }
@@ -828,8 +918,7 @@ BatchDetectorPostselectionResult execute_batch_postselected_with_expressions(
     if (expression_plan.block_expression_last_use_by_index.size() != expression_plan.block_expressions.size()) {
         fail("batch presampled expression last-use table does not match expression plan");
     }
-    validate_batch_postselection_plan(program, postselection);
-    prepare_batch_detector_postselection_scratch(scratch, runtime);
+    prepare_batch_detector_postselection_scratch(scratch, runtime, program, options);
     std::fill(scratch.dead_bits.begin(), scratch.dead_bits.end(), 0);
     scratch.dead_count = 0;
     if (runtime.active_shots == 0) {
@@ -858,8 +947,8 @@ BatchDetectorPostselectionResult execute_batch_postselected_with_expressions(
             compact_dead_shots_if_needed(
                 runtime,
                 scratch,
-                postselection.condition_last_use_by_index,
-                postselection.record_last_use_by_index,
+                scratch.condition_last_use_by_index,
+                scratch.record_last_use_by_index,
                 static_cast<int>(idx) - 1,
                 false,
                 &scratch.expression_words,
@@ -868,26 +957,22 @@ BatchDetectorPostselectionResult execute_batch_postselected_with_expressions(
                 break;
             }
         }
-        execute_batch_instruction_presampled(runtime, program.instructions[idx], evaluator, idx);
-        const int record = postselection.instruction_records_by_index[idx];
-        if (record <= 0) {
-            continue;
-        }
-        if (record >= static_cast<int>(postselection.detectors_by_record.size())) {
-            fail("batch postselection instruction record table references an out-of-range record");
-        }
-        const auto& detectors = postselection.detectors_by_record[static_cast<std::size_t>(record)];
-        const int discarded_now = apply_postselection_checks_for_record(
-            runtime,
-            detectors,
-            scratch);
-        discarded += discarded_now;
+        discarded += std::visit(
+            [&](const auto& inst) {
+                return execute_batch_instruction_postselected(
+                    runtime,
+                    inst,
+                    evaluator,
+                    idx,
+                    scratch);
+            },
+            program.instructions[idx]);
     }
     compact_dead_shots_if_needed(
         runtime,
         scratch,
-        postselection.condition_last_use_by_index,
-        postselection.record_last_use_by_index,
+        scratch.condition_last_use_by_index,
+        scratch.record_last_use_by_index,
         static_cast<int>(program.instructions.size()),
         true,
         &scratch.expression_words,
@@ -963,6 +1048,7 @@ void reset_batch_executor(
     runtime.active_pitch = runtime.batches;
     runtime.nsymbols = program.nsymbols;
     runtime.nrecords = program.nrecords;
+    runtime.ndetectors = program.ndetectors;
     runtime.max_k = program.max_k;
     runtime.batch_words = batch_word_count(runtime.batches);
 
@@ -998,6 +1084,11 @@ void reset_batch_executor(
         runtime.measurement_words.resize(measurement_size, 0);
     }
     std::fill(runtime.measurement_words.begin(), runtime.measurement_words.end(), 0);
+    const std::size_t detector_size = static_cast<std::size_t>(program.ndetectors) * runtime.batch_words;
+    if (runtime.detector_words.size() != detector_size) {
+        runtime.detector_words.resize(detector_size, 0);
+    }
+    std::fill(runtime.detector_words.begin(), runtime.detector_words.end(), 0);
     if (runtime.eval_scratch.size() != runtime.batch_words) {
         runtime.eval_scratch.resize(runtime.batch_words, 0);
     }
@@ -1073,7 +1164,6 @@ void prepare_batch_detector_postselection_scratch(
     BatchDetectorPostselectionScratch& scratch,
     const BatchFactoredExecutorState& runtime) {
     const std::size_t nwords = runtime.batch_words;
-    ensure_word_scratch(scratch.detector_bits, nwords);
     ensure_word_scratch(scratch.dead_bits, nwords);
     ensure_word_scratch(scratch.keep_bits, nwords);
     ensure_word_scratch(scratch.scratch, nwords);
@@ -1083,22 +1173,29 @@ void prepare_batch_detector_postselection_scratch(
     }
 }
 
+void prepare_batch_detector_postselection_scratch(
+    BatchDetectorPostselectionScratch& scratch,
+    const BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    const BatchDetectorPostselectionOptions& options) {
+    prepare_batch_detector_postselection_scratch(scratch, runtime);
+    refresh_batch_postselection_metadata(scratch, program, options);
+}
+
 BatchDetectorPostselectionResult execute_batch_postselected_in_place(
     BatchFactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
     const PresampledExpressionPlan& expression_plan,
     const PresampledExpressionBlock& expression_block,
     int first_sample_shot,
-    const BatchDetectorPostselectionPlan& postselection,
     BatchDetectorPostselectionScratch& scratch,
-    BatchDetectorPostselectionOptions options) {
+    const BatchDetectorPostselectionOptions& options) {
     return execute_batch_postselected_with_expressions(
         runtime,
         program,
         expression_plan,
         expression_block,
         first_sample_shot,
-        postselection,
         scratch,
         options);
 }

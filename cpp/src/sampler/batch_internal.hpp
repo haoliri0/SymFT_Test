@@ -92,6 +92,10 @@ inline std::size_t batch_record_offset(const BatchFactoredExecutorState& runtime
     return static_cast<std::size_t>(record - 1) * runtime.batch_words + word;
 }
 
+inline std::size_t batch_detector_offset(const BatchFactoredExecutorState& runtime, int detector, std::size_t word) {
+    return static_cast<std::size_t>(detector - 1) * runtime.batch_words + word;
+}
+
 inline void fill_batch_bits(std::vector<std::uint64_t>& bits, const BatchFactoredExecutorState& runtime, bool value) {
     const std::size_t nwords = runtime_batch_word_count(runtime);
     if (bits.size() < runtime.batch_words) {
@@ -156,6 +160,10 @@ void write_batch_measurement_record(
     std::optional<int> record,
     const std::vector<std::uint64_t>& outcome_bits,
     std::optional<int> record_condition);
+void write_batch_detector_record(
+    BatchFactoredExecutorState& runtime,
+    int detector,
+    const std::vector<std::uint64_t>& outcome_bits);
 void assign_presampled_exogenous_batch(BatchFactoredExecutorState& runtime, const PresampledExogenous& samples);
 void assign_presampled_exogenous_batch(
     BatchFactoredExecutorState& runtime,
