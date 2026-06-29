@@ -798,8 +798,10 @@ std::uint64_t expression_slice_word(
 
 struct BatchExpressionEvaluator {
     const PresampledExpressionPlan& expression_plan;
-    const std::vector<std::uint64_t>& expression_words;
+    const std::vector<std::uint64_t>* expression_words = nullptr;
+    const PresampledExpressionBlock* expression_block = nullptr;
     std::size_t expression_stride_words = 0;
+    int first_sample_shot = 0;
     std::vector<std::uint64_t>& out;
     std::vector<std::uint64_t>& residual_scratch;
 
@@ -816,15 +818,26 @@ struct BatchExpressionEvaluator {
         }
         const int block_expression_index = expression.block_expression_index;
         const std::size_t nwords = runtime_batch_word_count(runtime);
-        const std::size_t base = static_cast<std::size_t>(block_expression_index) * expression_stride_words;
-        if (expression_words.size() < base + expression_stride_words) {
-            fail("batch presampled expression workspace is too short");
-        }
         if (out.size() < runtime.batch_words) {
             out.resize(runtime.batch_words, 0);
         }
-        for (std::size_t word = 0; word < nwords; ++word) {
-            out[word] = expression_words[base + word] & live_word_mask_for_shots(runtime.active_shots, word);
+        if (expression_block != nullptr) {
+            for (std::size_t word = 0; word < nwords; ++word) {
+                out[word] = expression_slice_word(
+                    *expression_block,
+                    block_expression_index,
+                    first_sample_shot,
+                    runtime.active_shots,
+                    word);
+            }
+        } else {
+            const std::size_t base = static_cast<std::size_t>(block_expression_index) * expression_stride_words;
+            if (expression_words == nullptr || expression_words->size() < base + expression_stride_words) {
+                fail("batch presampled expression workspace is too short");
+            }
+            for (std::size_t word = 0; word < nwords; ++word) {
+                out[word] = (*expression_words)[base + word] & live_word_mask_for_shots(runtime.active_shots, word);
+            }
         }
         std::fill(out.begin() + static_cast<std::ptrdiff_t>(nwords), out.end(), 0);
         if (!expression.residual_plan.conditions.empty()) {
@@ -862,6 +875,17 @@ void execute_batch_instruction_presampled(
     std::size_t instruction_index) {
     const auto& outcome_bits = evaluator.eval(instruction_index, runtime);
     write_batch_measurement_record(runtime, instruction.record, outcome_bits, instruction.record_condition);
+}
+
+void execute_batch_instruction_presampled(
+    BatchFactoredExecutorState& runtime,
+    const RecordDetector& instruction,
+    const BatchExpressionEvaluator& evaluator,
+    std::size_t instruction_index) {
+    const auto& outcome_bits = !instruction.records.empty() || instruction.outcome.conditions.empty()
+                                   ? detector_record_outcome_bits(runtime, instruction, runtime.eval_scratch)
+                                   : evaluator.eval(instruction_index, runtime);
+    write_batch_detector_record(runtime, instruction.detector, outcome_bits);
 }
 
 int execute_batch_instruction_postselected(
@@ -904,6 +928,14 @@ void execute_batch_instruction_presampled(
     fill_batch_random_half_bits(runtime.eval_scratch, runtime);
     const auto& branch_bits = runtime.eval_scratch;
     assign_batch_symbol(runtime, instruction.branch, branch_bits);
+    if (instruction.outcome_plan.conditions.size() == 1 &&
+        instruction.outcome_plan.conditions.front() == instruction.branch) {
+        if (instruction.outcome_plan.constant) {
+            invert_batch_bits(runtime.eval_scratch, runtime);
+        }
+        write_batch_measurement_record(runtime, instruction.record, runtime.eval_scratch, instruction.record_condition);
+        return;
+    }
     const auto& outcome_bits = evaluator.eval(instruction_index, runtime);
     write_batch_measurement_record(runtime, instruction.record, outcome_bits, instruction.record_condition);
 }
@@ -983,8 +1015,10 @@ BatchDetectorPostselectionResult execute_batch_postselected_with_expressions(
     int discarded = 0;
     BatchExpressionEvaluator evaluator{
         expression_plan,
-        scratch.expression_words,
+        &scratch.expression_words,
+        nullptr,
         runtime.batch_words,
+        0,
         runtime.eval_scratch,
         scratch.scratch};
 
@@ -1216,6 +1250,39 @@ void execute_batch_in_place(
     assign_presampled_exogenous_batch(runtime, samples, first_sample_shot);
     for (const auto& instruction : program.instructions) {
         execute_batch_instruction(runtime, instruction);
+    }
+}
+
+void execute_batch_in_place(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    const PresampledExpressionPlan& expression_plan,
+    const PresampledExpressionBlock& expression_block,
+    int first_sample_shot) {
+    if (runtime.n != program.n || runtime.k + runtime.ndormant != runtime.n) {
+        fail("batch executor state does not match program");
+    }
+    if (expression_plan.instruction_expressions.size() != program.instructions.size()) {
+        fail("batch presampled expression plan does not match program");
+    }
+    if (runtime.active_shots == 0) {
+        return;
+    }
+    BatchExpressionEvaluator evaluator{
+        expression_plan,
+        nullptr,
+        &expression_block,
+        0,
+        first_sample_shot,
+        runtime.eval_scratch,
+        runtime.residual_scratch};
+    for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+        const auto& instruction = program.instructions[idx];
+        std::visit(
+            [&](const auto& inst) {
+                execute_batch_instruction_presampled(runtime, inst, evaluator, idx);
+            },
+            instruction);
     }
 }
 

@@ -4,6 +4,7 @@
 #include <chrono>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 namespace symft {
@@ -221,6 +222,116 @@ int batch_size_or_default(
                : default_batch_count(program.max_k);
 }
 
+std::size_t assigned_condition_count(const std::vector<std::uint64_t>& assigned_words) {
+    std::size_t out = 0;
+    for (std::uint64_t word : assigned_words) {
+        out += static_cast<std::size_t>(popcount64(word));
+    }
+    return out;
+}
+
+bool introduce_branch_outcome_is_direct(const IntroduceDormantMeasurementBranch& instruction) {
+    return instruction.outcome_plan.conditions.size() == 1 &&
+           instruction.outcome_plan.conditions.front() == instruction.branch;
+}
+
+std::size_t direct_symbolic_eval_word_terms(const FactoredInstruction& instruction) {
+    return std::visit(
+        [](const auto& inst) -> std::size_t {
+            using T = std::decay_t<decltype(inst)>;
+            if constexpr (
+                std::is_same_v<T, ApplyPrecomputedActivePauliRotation> ||
+                std::is_same_v<T, PromoteDormantRotation>) {
+                return 1 + inst.sign_plan.conditions.size();
+            } else if constexpr (std::is_same_v<T, IntroduceDormantMeasurementBranch>) {
+                return introduce_branch_outcome_is_direct(inst) ? 0 : 1 + inst.outcome_plan.conditions.size();
+            } else {
+                return 1 + inst.outcome_plan.conditions.size();
+            }
+        },
+        instruction);
+}
+
+std::size_t presampled_expression_eval_word_terms(
+    const FactoredInstruction& instruction,
+    const PresampledExpression& expression) {
+    return std::visit(
+        [&](const auto& inst) -> std::size_t {
+            using T = std::decay_t<decltype(inst)>;
+            if constexpr (std::is_same_v<T, RecordDetector>) {
+                if (!inst.records.empty()) {
+                    return inst.records.size();
+                }
+                if (inst.outcome.conditions.empty()) {
+                    return 1;
+                }
+            } else if constexpr (std::is_same_v<T, IntroduceDormantMeasurementBranch>) {
+                if (introduce_branch_outcome_is_direct(inst)) {
+                    return 0;
+                }
+            }
+            return 1 + expression.residual_plan.conditions.size();
+        },
+        instruction);
+}
+
+std::size_t presampled_expression_chunk_word_terms(const PresampledExpressionPlan& expression_plan) {
+    std::size_t terms = 0;
+    for (const auto& expression : expression_plan.block_expressions) {
+        terms += 1;
+        if (expression.parent_block_expression_index >= 0) {
+            terms += expression.parent_delta_constant ? 1 : 0;
+            terms += expression.parent_delta_exogenous_conditions.size();
+        } else {
+            terms += expression.exogenous_conditions.size();
+        }
+    }
+    return terms;
+}
+
+bool should_use_presampled_batch_expressions(
+    const FactoredInstructionProgram& program,
+    const PresampledExpressionPlan& expression_plan,
+    const PackedPresampledExogenous& samples,
+    int sample_chunk_shots,
+    int batch_size) {
+    const int typical_block = std::min(sample_chunk_shots, batch_size);
+    if (typical_block <= 0) {
+        return false;
+    }
+    const std::uint64_t blocks_per_chunk = ceil_div_u64(
+        static_cast<std::uint64_t>(sample_chunk_shots),
+        static_cast<std::uint64_t>(batch_size));
+    if (blocks_per_chunk <= 1) {
+        return false;
+    }
+    const std::size_t block_words = batch_word_count(typical_block);
+    const std::size_t chunk_words = batch_word_count(sample_chunk_shots);
+
+    std::size_t direct_terms = assigned_condition_count(samples.exogenous_assigned_words);
+    for (const auto& instruction : program.instructions) {
+        direct_terms += direct_symbolic_eval_word_terms(instruction);
+    }
+
+    std::size_t presampled_block_terms = expression_plan.block_expressions.size();
+    for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+        presampled_block_terms += presampled_expression_eval_word_terms(
+            program.instructions[idx],
+            expression_plan.instruction_expressions[idx]);
+    }
+
+    const std::uint64_t direct_cost =
+        blocks_per_chunk * static_cast<std::uint64_t>(block_words) * static_cast<std::uint64_t>(direct_terms);
+    const std::uint64_t presampled_cost =
+        static_cast<std::uint64_t>(chunk_words) *
+            static_cast<std::uint64_t>(presampled_expression_chunk_word_terms(expression_plan)) +
+        blocks_per_chunk * static_cast<std::uint64_t>(block_words) *
+            static_cast<std::uint64_t>(presampled_block_terms);
+
+    return static_cast<long double>(presampled_cost) * 4.0L <
+           static_cast<long double>(direct_cost);
+}
+
 } // namespace
 
 std::vector<std::vector<int>> logical_records_for_observable(
@@ -400,6 +511,20 @@ PreparedCircuitBatchSampler::PreparedCircuitBatchSampler(
     postselection_options_.mask_dead_shots_min_fraction_denominator =
         options_.batch_mask_threshold_denominator;
     postselection_options_.retained_record_uses = &logical_records_;
+
+    PackedPresampledExogenous selector_samples;
+    PresampledExpressionPlan selector_expression_plan;
+    prepare_presampled_exogenous_packed(selector_samples, program_);
+    prepare_presampled_expression_plan(selector_expression_plan, program_, selector_samples);
+    use_presampled_batch_expressions_ =
+        options_.postselect_detectors ||
+        should_use_presampled_batch_expressions(
+            program_,
+            selector_expression_plan,
+            selector_samples,
+            options_.sample_chunk_shots,
+            options_.batch_size);
+
     info_ = make_info(
         program_,
         input.observable,
@@ -423,7 +548,7 @@ PreparedCircuitBatchSampler::PreparedCircuitBatchSampler(
                 postselection_options_);
         }
         prepare_presampled_exogenous_packed(context->samples, program_);
-        if (options_.postselect_detectors) {
+        if (use_presampled_batch_expressions_) {
             prepare_presampled_expression_plan(context->expression_plan, program_, context->samples);
         }
         workers_.push_back(std::move(context));
@@ -473,7 +598,7 @@ CircuitSamplingRunResult PreparedCircuitBatchSampler::sample(
                 program_,
                 chunk_shots,
                 block_seed(0x7eed0000ULL, stream_id, chunk_index));
-            if (options_.postselect_detectors) {
+            if (use_presampled_batch_expressions_) {
                 evaluate_presampled_expression_block(
                     context.expression_block,
                     context.expression_plan,
@@ -507,11 +632,20 @@ CircuitSamplingRunResult PreparedCircuitBatchSampler::sample(
                     context.counts.discarded +=
                         static_cast<std::uint64_t>(postselection_result.discarded);
                 } else {
-                    execute_batch_in_place(
-                        context.runtime,
-                        program_,
-                        context.samples,
-                        chunk_local_offset);
+                    if (use_presampled_batch_expressions_) {
+                        execute_batch_in_place(
+                            context.runtime,
+                            program_,
+                            context.expression_plan,
+                            context.expression_block,
+                            chunk_local_offset);
+                    } else {
+                        execute_batch_in_place(
+                            context.runtime,
+                            program_,
+                            context.samples,
+                            chunk_local_offset);
+                    }
                 }
                 if (options_.postselect_detectors) {
                     accumulate_logical_counts_for_survivors(

@@ -62,6 +62,7 @@ struct BatchFactoredExecutorState {
     std::vector<std::uint64_t> measurement_words;
     std::vector<std::uint64_t> detector_words;
     std::vector<std::uint64_t> eval_scratch;
+    std::vector<std::uint64_t> residual_scratch;
     std::vector<double> rotation_coefficients;
     std::vector<double> branch_prob_true;
     std::vector<double> branch_invnorms;
@@ -89,6 +90,12 @@ void execute_batch_in_place(
     BatchFactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
     const PackedPresampledExogenous& samples,
+    int first_sample_shot = 0);
+void execute_batch_in_place(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    const PresampledExpressionPlan& expression_plan,
+    const PresampledExpressionBlock& expression_block,
     int first_sample_shot = 0);
 void prepare_batch_detector_postselection_scratch(
     BatchDetectorPostselectionScratch& scratch,

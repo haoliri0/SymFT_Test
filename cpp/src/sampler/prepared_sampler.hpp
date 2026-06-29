@@ -130,6 +130,7 @@ class PreparedCircuitBatchSampler {
     CircuitSamplingTiming preprocessing_timing_;
     BatchDetectorPostselectionOptions postselection_options_;
     std::vector<std::unique_ptr<WorkerContext>> workers_;
+    bool use_presampled_batch_expressions_ = false;
     std::uint64_t next_stream_id_ = 0;
 };
 

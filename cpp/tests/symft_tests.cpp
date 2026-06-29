@@ -587,6 +587,23 @@ void test_presampled_exogenous() {
     require(
         scalar_runtime.measurement_words == packed_runtime.measurement_words,
         "packed batch exogenous slice matches shot-major presample");
+    PresampledExpressionPlan random_expression_plan;
+    prepare_presampled_expression_plan(random_expression_plan, random_program, packed_random_samples);
+    PresampledExpressionBlock random_expression_block;
+    evaluate_presampled_expression_block(
+        random_expression_block,
+        random_expression_plan,
+        packed_random_samples);
+    BatchFactoredExecutorState expression_runtime(random_program, 5, 41);
+    execute_batch_in_place(
+        expression_runtime,
+        random_program,
+        random_expression_plan,
+        random_expression_block,
+        3);
+    require(
+        expression_runtime.measurement_words == packed_runtime.measurement_words,
+        "batch presampled expression slice matches packed exogenous execution");
 }
 
 void test_batch_sampler() {
