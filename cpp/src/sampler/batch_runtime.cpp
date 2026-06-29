@@ -52,12 +52,12 @@ void execute_batch_instruction(BatchFactoredExecutorState& runtime, const Introd
     fill_batch_random_half_bits(runtime.eval_scratch, runtime);
     const auto& branch_bits = runtime.eval_scratch;
     assign_batch_symbol(runtime, instruction.branch, branch_bits);
-    if (instruction.outcome_plan.conditions.size() == 1 &&
-        instruction.outcome_plan.conditions.front() == instruction.branch) {
-        if (instruction.outcome_plan.constant) {
-            invert_batch_bits(runtime.eval_scratch, runtime);
-        }
-        write_batch_measurement_record(runtime, instruction.record, runtime.eval_scratch, instruction.record_condition);
+    if (write_direct_branch_measurement_record(
+            runtime,
+            instruction.branch,
+            instruction.outcome_plan,
+            instruction.record,
+            instruction.record_condition)) {
         return;
     }
     eval_symbolic_bool_batch(runtime.eval_scratch, instruction.outcome_plan, runtime);

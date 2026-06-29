@@ -426,6 +426,14 @@ void measure_active_last_z_batch(
     std::optional<int> record,
     std::optional<int> record_condition) {
     measure_active_last_z_branch_batch(runtime, branch_condition);
+    if (write_direct_branch_measurement_record(
+            runtime,
+            branch_condition,
+            outcome_plan,
+            record,
+            record_condition)) {
+        return;
+    }
     eval_symbolic_bool_batch(runtime.eval_scratch, outcome_plan, runtime);
     write_batch_measurement_record(runtime, record, runtime.eval_scratch, record_condition);
 }
@@ -509,6 +517,14 @@ void measure_precomputed_active_pauli_batch(
     std::optional<int> record,
     std::optional<int> record_condition) {
     measure_precomputed_active_pauli_branch_batch(runtime, kernel, branch_condition);
+    if (write_direct_branch_measurement_record(
+            runtime,
+            branch_condition,
+            outcome_plan,
+            record,
+            record_condition)) {
+        return;
+    }
     eval_symbolic_bool_batch(runtime.eval_scratch, outcome_plan, runtime);
     write_batch_measurement_record(runtime, record, runtime.eval_scratch, record_condition);
 }

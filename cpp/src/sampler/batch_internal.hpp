@@ -160,6 +160,23 @@ void write_batch_measurement_record(
     std::optional<int> record,
     const std::vector<std::uint64_t>& outcome_bits,
     std::optional<int> record_condition);
+
+inline bool write_direct_branch_measurement_record(
+    BatchFactoredExecutorState& runtime,
+    int branch_condition,
+    const SymbolicBoolEvaluationPlan& outcome_plan,
+    std::optional<int> record,
+    std::optional<int> record_condition) {
+    if (outcome_plan.conditions.size() != 1 || outcome_plan.conditions.front() != branch_condition) {
+        return false;
+    }
+    if (outcome_plan.constant) {
+        invert_batch_bits(runtime.eval_scratch, runtime);
+    }
+    write_batch_measurement_record(runtime, record, runtime.eval_scratch, record_condition);
+    return true;
+}
+
 void write_batch_detector_record(
     BatchFactoredExecutorState& runtime,
     int detector,
