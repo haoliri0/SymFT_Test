@@ -647,14 +647,12 @@ void project_active_pauli_measurement(
         fail("sampled an impossible active measurement branch");
     }
     const auto& sources0 = branch ? kernel.source0_true : kernel.source0_false;
-    const auto& sources1 = branch ? kernel.source1_true : kernel.source1_false;
-    const auto& coeffs0 = branch ? kernel.coeff0_true : kernel.coeff0_false;
-    const auto& coeffs1 = branch ? kernel.coeff1_true : kernel.coeff1_false;
-    if (runtime.active_scratch_re.size() < sources0.size()) {
-        runtime.active_scratch_re.resize(sources0.size(), 0.0);
+    const std::size_t out_dim = sources0.size();
+    if (runtime.active_scratch_re.size() < out_dim) {
+        runtime.active_scratch_re.resize(out_dim, 0.0);
     }
-    if (runtime.active_scratch_im.size() < sources0.size()) {
-        runtime.active_scratch_im.resize(sources0.size(), 0.0);
+    if (runtime.active_scratch_im.size() < out_dim) {
+        runtime.active_scratch_im.resize(out_dim, 0.0);
     }
     const double invnorm = 1.0 / std::sqrt(probability);
     if (project_active_measurement_partner_permute_soa_inline(
@@ -665,15 +663,18 @@ void project_active_pauli_measurement(
             kernel,
             branch,
             invnorm)) {
-        std::copy_n(runtime.active_scratch_re.data(), sources0.size(), runtime.active_re.data());
-        std::copy_n(runtime.active_scratch_im.data(), sources0.size(), runtime.active_im.data());
+        std::copy_n(runtime.active_scratch_re.data(), out_dim, runtime.active_re.data());
+        std::copy_n(runtime.active_scratch_im.data(), out_dim, runtime.active_im.data());
         --runtime.k;
         return;
     }
+    const auto& sources1 = branch ? kernel.source1_true : kernel.source1_false;
+    const auto& coeffs0 = branch ? kernel.coeff0_true : kernel.coeff0_false;
+    const auto& coeffs1 = branch ? kernel.coeff1_true : kernel.coeff1_false;
     const auto* coeff0 = reinterpret_cast<const double*>(coeffs0.data());
     const auto* coeff1 = reinterpret_cast<const double*>(coeffs1.data());
     SYMFT_SINGLE_SIMD_LOOP
-    for (std::size_t idx = 0; idx < sources0.size(); ++idx) {
+    for (std::size_t idx = 0; idx < out_dim; ++idx) {
         const std::size_t source0 = sources0[idx];
         const double c0r = coeff0[2 * idx];
         const double c0i = coeff0[2 * idx + 1];
@@ -689,8 +690,8 @@ void project_active_pauli_measurement(
         runtime.active_scratch_re[idx] = ar * invnorm;
         runtime.active_scratch_im[idx] = ai * invnorm;
     }
-    std::copy_n(runtime.active_scratch_re.data(), sources0.size(), runtime.active_re.data());
-    std::copy_n(runtime.active_scratch_im.data(), sources0.size(), runtime.active_im.data());
+    std::copy_n(runtime.active_scratch_re.data(), out_dim, runtime.active_re.data());
+    std::copy_n(runtime.active_scratch_im.data(), out_dim, runtime.active_im.data());
     --runtime.k;
 }
 

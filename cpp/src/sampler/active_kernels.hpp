@@ -711,6 +711,32 @@ inline double horizontal_sum4_inline(__m256d value) {
     return _mm_cvtsd_f64(sum);
 }
 
+struct MeasurementAmplitudes4 {
+    __m256d re;
+    __m256d im;
+};
+
+inline MeasurementAmplitudes4 measurement_amplitudes4_inline(
+    const double* coeff0,
+    const double* coeff1,
+    std::size_t idx,
+    __m256d r0,
+    __m256d im0,
+    __m256d r1,
+    __m256d im1) {
+    const __m256d c0r = load_complex_re4_inline(coeff0 + 2 * idx);
+    const __m256d c0i = load_complex_im4_inline(coeff0 + 2 * idx);
+    const __m256d c1r = load_complex_re4_inline(coeff1 + 2 * idx);
+    const __m256d c1i = load_complex_im4_inline(coeff1 + 2 * idx);
+    __m256d ar = _mm256_fnmadd_pd(c0i, im0, _mm256_mul_pd(c0r, r0));
+    ar = _mm256_fmadd_pd(c1r, r1, ar);
+    ar = _mm256_fnmadd_pd(c1i, im1, ar);
+    __m256d ai = _mm256_fmadd_pd(c0i, r0, _mm256_mul_pd(c0r, im0));
+    ai = _mm256_fmadd_pd(c1r, im1, ai);
+    ai = _mm256_fmadd_pd(c1i, r1, ai);
+    return {ar, ai};
+}
+
 template <std::size_t LaneMask>
 inline double measure_probability_partner_permute_soa_inline(
     const double* re,
@@ -736,18 +762,9 @@ inline double measure_probability_partner_permute_soa_inline(
             const __m256d im0 = _mm256_loadu_pd(im + source0);
             const __m256d r1 = permute_lanes_xor2_inline(_mm256_loadu_pd(re + source1), LaneMask);
             const __m256d im1 = permute_lanes_xor2_inline(_mm256_loadu_pd(im + source1), LaneMask);
-            const __m256d c0r = load_complex_re4_inline(coeff0 + 2 * idx);
-            const __m256d c0i = load_complex_im4_inline(coeff0 + 2 * idx);
-            const __m256d c1r = load_complex_re4_inline(coeff1 + 2 * idx);
-            const __m256d c1i = load_complex_im4_inline(coeff1 + 2 * idx);
-            __m256d ar = _mm256_fnmadd_pd(c0i, im0, _mm256_mul_pd(c0r, r0));
-            ar = _mm256_fmadd_pd(c1r, r1, ar);
-            ar = _mm256_fnmadd_pd(c1i, im1, ar);
-            __m256d ai = _mm256_fmadd_pd(c0i, r0, _mm256_mul_pd(c0r, im0));
-            ai = _mm256_fmadd_pd(c1r, im1, ai);
-            ai = _mm256_fmadd_pd(c1i, r1, ai);
-            probability = _mm256_fmadd_pd(ar, ar, probability);
-            probability = _mm256_fmadd_pd(ai, ai, probability);
+            const MeasurementAmplitudes4 amplitudes = measurement_amplitudes4_inline(coeff0, coeff1, idx, r0, im0, r1, im1);
+            probability = _mm256_fmadd_pd(amplitudes.re, amplitudes.re, probability);
+            probability = _mm256_fmadd_pd(amplitudes.im, amplitudes.im, probability);
         }
     }
     return horizontal_sum4_inline(probability);
@@ -781,22 +798,22 @@ inline void project_measurement_partner_permute_soa_inline(
             const __m256d im0 = _mm256_loadu_pd(im + source0);
             const __m256d r1 = permute_lanes_xor2_inline(_mm256_loadu_pd(re + source1), LaneMask);
             const __m256d im1 = permute_lanes_xor2_inline(_mm256_loadu_pd(im + source1), LaneMask);
-            const __m256d c0r = load_complex_re4_inline(coeff0 + 2 * idx);
-            const __m256d c0i = load_complex_im4_inline(coeff0 + 2 * idx);
-            const __m256d c1r = load_complex_re4_inline(coeff1 + 2 * idx);
-            const __m256d c1i = load_complex_im4_inline(coeff1 + 2 * idx);
-            __m256d ar = _mm256_fnmadd_pd(c0i, im0, _mm256_mul_pd(c0r, r0));
-            ar = _mm256_fmadd_pd(c1r, r1, ar);
-            ar = _mm256_fnmadd_pd(c1i, im1, ar);
-            __m256d ai = _mm256_fmadd_pd(c0i, r0, _mm256_mul_pd(c0r, im0));
-            ai = _mm256_fmadd_pd(c1r, im1, ai);
-            ai = _mm256_fmadd_pd(c1i, r1, ai);
-            _mm256_storeu_pd(out_re + idx, _mm256_mul_pd(ar, vinvnorm));
-            _mm256_storeu_pd(out_im + idx, _mm256_mul_pd(ai, vinvnorm));
+            const MeasurementAmplitudes4 amplitudes = measurement_amplitudes4_inline(coeff0, coeff1, idx, r0, im0, r1, im1);
+            _mm256_storeu_pd(out_re + idx, _mm256_mul_pd(amplitudes.re, vinvnorm));
+            _mm256_storeu_pd(out_im + idx, _mm256_mul_pd(amplitudes.im, vinvnorm));
         }
     }
 }
 #endif
+
+inline bool can_measure_with_partner_permute_soa_inline(const PrecomputedActivePauliMeasurementKernel& kernel) {
+#if SYMFT_INLINE_AVX2
+    return !kernel.is_diagonal && kernel.pivot >= 2 && highest_set_bit64(kernel.action.xmask) == kernel.pivot;
+#else
+    (void)kernel;
+    return false;
+#endif
+}
 
 inline bool active_measurement_branch_probability_partner_permute_soa_inline(
     double& probability,
@@ -805,7 +822,7 @@ inline bool active_measurement_branch_probability_partner_permute_soa_inline(
     const PrecomputedActivePauliMeasurementKernel& kernel,
     bool branch) {
 #if SYMFT_INLINE_AVX2
-    if (kernel.is_diagonal || kernel.pivot < 2 || highest_set_bit64(kernel.action.xmask) != kernel.pivot) {
+    if (!can_measure_with_partner_permute_soa_inline(kernel)) {
         return false;
     }
     const std::size_t dim = active_length(kernel.action.nqubits);
@@ -851,7 +868,7 @@ inline bool project_active_measurement_partner_permute_soa_inline(
     bool branch,
     double invnorm) {
 #if SYMFT_INLINE_AVX2
-    if (kernel.is_diagonal || kernel.pivot < 2 || highest_set_bit64(kernel.action.xmask) != kernel.pivot) {
+    if (!can_measure_with_partner_permute_soa_inline(kernel)) {
         return false;
     }
     const std::size_t dim = active_length(kernel.action.nqubits);
