@@ -194,7 +194,7 @@ void apply_case(BatchState& state, const BenchCase& bench_case, int shots, SignP
                 shots,
                 kernel.action.xmask,
                 kernel.pair_bit,
-                kernel.pair_left_indices.size(),
+                kernel.pair_count,
                 kernel.cos_theta,
                 q.data());
         } else {
@@ -208,7 +208,7 @@ void apply_case(BatchState& state, const BenchCase& bench_case, int shots, SignP
                 shots,
                 kernel.action.xmask,
                 kernel.pair_bit,
-                kernel.pair_left_indices.size(),
+                kernel.pair_count,
                 kernel.cos_theta,
                 q);
         }
@@ -229,7 +229,7 @@ void apply_case(BatchState& state, const BenchCase& bench_case, int shots, SignP
                 kernel.action.xmask,
                 kernel.pair_bit,
                 kernel.real_pair_flip_basis_phase_signs.data(),
-                kernel.pair_left_indices.size(),
+                kernel.pair_count,
                 kernel.cos_theta,
                 q.data());
         } else {
@@ -244,7 +244,7 @@ void apply_case(BatchState& state, const BenchCase& bench_case, int shots, SignP
                 kernel.action.xmask,
                 kernel.pair_bit,
                 kernel.real_pair_flip_basis_phase_signs.data(),
-                kernel.pair_left_indices.size(),
+                kernel.pair_count,
                 kernel.cos_theta,
                 q);
         }
@@ -258,7 +258,7 @@ void apply_case(BatchState& state, const BenchCase& bench_case, int shots, SignP
             shots,
             kernel.action.xmask,
             kernel.pair_bit,
-            kernel.pair_left_indices.size(),
+            kernel.pair_count,
             kernel.pair_left_minus_coefficients.data(),
             kernel.pair_right_minus_coefficients.data(),
             kernel.cos_theta);
@@ -270,7 +270,7 @@ void apply_case(BatchState& state, const BenchCase& bench_case, int shots, SignP
             shots,
             kernel.action.xmask,
             kernel.pair_bit,
-            kernel.pair_left_indices.size(),
+            kernel.pair_count,
             kernel.pair_left_plus_coefficients.data(),
             kernel.pair_right_plus_coefficients.data(),
             kernel.cos_theta);
@@ -282,7 +282,7 @@ void apply_case(BatchState& state, const BenchCase& bench_case, int shots, SignP
             shots,
             kernel.action.xmask,
             kernel.pair_bit,
-            kernel.pair_left_indices.size(),
+            kernel.pair_count,
             kernel.pair_left_minus_coefficients.data(),
             kernel.pair_right_minus_coefficients.data(),
             kernel.pair_left_plus_coefficients.data(),

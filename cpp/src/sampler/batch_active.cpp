@@ -56,7 +56,7 @@ void rotate_uniform_imag_pairs_batch(
             runtime.active_shots,
             kernel.action.xmask,
             kernel.pair_bit,
-            kernel.pair_left_indices.size(),
+            kernel.pair_count,
             kernel.cos_theta,
             q);
         return;
@@ -66,27 +66,27 @@ void rotate_uniform_imag_pairs_batch(
         sign_bits,
         kernel.pair_left_minus_coefficients.front().imag(),
         kernel.pair_left_plus_coefficients.front().imag());
-    if (kernel.pair_left_indices.size() >= kXmaskRotationPairThreshold) {
-        batch_simd::scalar_table().rotate_uniform_imag_xmask(
+    if (kernel.pair_count < kXmaskRotationPairThreshold) {
+        batch_simd::scalar_table().rotate_uniform_imag_pairs(
             runtime.active_re.data(),
             runtime.active_im.data(),
             static_cast<std::size_t>(runtime.active_pitch),
             runtime.active_shots,
             kernel.action.xmask,
             kernel.pair_bit,
-            kernel.pair_left_indices.size(),
+            kernel.pair_count,
             kernel.cos_theta,
             coeffs.data());
         return;
     }
-    batch_simd::scalar_table().rotate_uniform_imag_pairs(
+    batch_simd::scalar_table().rotate_uniform_imag_xmask(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.active_pitch),
         runtime.active_shots,
-        kernel.pair_left_indices.data(),
-        kernel.pair_right_indices.data(),
-        kernel.pair_left_indices.size(),
+        kernel.action.xmask,
+        kernel.pair_bit,
+        kernel.pair_count,
         kernel.cos_theta,
         coeffs.data());
 }
@@ -108,7 +108,7 @@ void rotate_real_pair_flip_batch(
             kernel.action.xmask,
             kernel.pair_bit,
             kernel.real_pair_flip_basis_phase_signs.data(),
-            kernel.pair_left_indices.size(),
+            kernel.pair_count,
             kernel.cos_theta,
             q);
         return;
@@ -118,8 +118,8 @@ void rotate_real_pair_flip_batch(
         sign_bits,
         kernel.pair_left_minus_coefficients.front().real(),
         kernel.pair_left_plus_coefficients.front().real());
-    if (kernel.pair_left_indices.size() >= kXmaskRotationPairThreshold) {
-        batch_simd::scalar_table().rotate_real_pair_flip_xmask(
+    if (kernel.pair_count < kXmaskRotationPairThreshold) {
+        batch_simd::scalar_table().rotate_real_pair_flip(
             runtime.active_re.data(),
             runtime.active_im.data(),
             static_cast<std::size_t>(runtime.active_pitch),
@@ -127,20 +127,20 @@ void rotate_real_pair_flip_batch(
             kernel.action.xmask,
             kernel.pair_bit,
             kernel.real_pair_flip_basis_phase_signs.data(),
-            kernel.pair_left_indices.size(),
+            kernel.pair_count,
             kernel.cos_theta,
             coeffs.data());
         return;
     }
-    batch_simd::scalar_table().rotate_real_pair_flip(
+    batch_simd::scalar_table().rotate_real_pair_flip_xmask(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.active_pitch),
         runtime.active_shots,
-        kernel.pair_left_indices.data(),
-        kernel.pair_right_indices.data(),
+        kernel.action.xmask,
+        kernel.pair_bit,
         kernel.real_pair_flip_basis_phase_signs.data(),
-        kernel.pair_left_indices.size(),
+        kernel.pair_count,
         kernel.cos_theta,
         coeffs.data());
 }
@@ -205,7 +205,7 @@ void rotate_pauli_batch(
             runtime.active_shots,
             kernel.action.xmask,
             kernel.pair_bit,
-            kernel.pair_left_indices.size(),
+            kernel.pair_count,
             kernel.pair_left_minus_coefficients.data(),
             kernel.pair_right_minus_coefficients.data(),
             c);
@@ -217,7 +217,7 @@ void rotate_pauli_batch(
             runtime.active_shots,
             kernel.action.xmask,
             kernel.pair_bit,
-            kernel.pair_left_indices.size(),
+            kernel.pair_count,
             kernel.pair_left_plus_coefficients.data(),
             kernel.pair_right_plus_coefficients.data(),
             c);
@@ -229,7 +229,7 @@ void rotate_pauli_batch(
             runtime.active_shots,
             kernel.action.xmask,
             kernel.pair_bit,
-            kernel.pair_left_indices.size(),
+            kernel.pair_count,
             kernel.pair_left_minus_coefficients.data(),
             kernel.pair_right_minus_coefficients.data(),
             kernel.pair_left_plus_coefficients.data(),

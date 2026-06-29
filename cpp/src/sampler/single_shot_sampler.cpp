@@ -473,7 +473,7 @@ void rotate_pauli(FactoredExecutorState& runtime, const PrecomputedActivePauliRo
         return;
     }
     const std::size_t dim = runtime_active_dim(runtime);
-    const std::size_t npairs = kernel.pair_left_indices.size();
+    const std::size_t npairs = kernel.pair_count;
     if (kernel.uniform_imag_pairs) {
         const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
         if (npairs < kSimdPairRotationThreshold) {

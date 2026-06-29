@@ -39,12 +39,11 @@ struct PrecomputedActivePauliRotationKernel {
     bool uniform_imag_pairs = false;
     bool real_pair_flip = false;
     unsigned pair_bit = 0;
+    std::size_t pair_count = 0;
     double theta = 0.0;
     double cos_theta = 1.0;
     std::vector<Complex> diagonal_minus_coefficients;
     std::vector<Complex> diagonal_plus_coefficients;
-    std::vector<std::size_t> pair_left_indices;
-    std::vector<std::size_t> pair_right_indices;
     std::vector<double> real_pair_flip_basis_phase_signs;
     std::vector<Complex> pair_left_minus_coefficients;
     std::vector<Complex> pair_right_minus_coefficients;

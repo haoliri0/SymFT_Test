@@ -65,14 +65,10 @@ PrecomputedActivePauliRotationKernel::PrecomputedActivePauliRotationKernel(const
     uniform_imag_pairs = action.zmask == 0;
     real_pair_flip = can_rotate_real_pair_flip(action);
     pair_bit = static_cast<unsigned>(highest_set_bit64(action.xmask));
-    const std::size_t pair_selector = std::size_t{1} << pair_bit;
-    for (std::size_t left = 0; left < dim; ++left) {
-        if ((left & pair_selector) != 0) {
-            continue;
-        }
+    pair_count = dim >> 1;
+    for (std::size_t pair_idx = 0; pair_idx < pair_count; ++pair_idx) {
+        const std::size_t left = insert_zero_bit(pair_idx, static_cast<int>(pair_bit));
         const std::size_t right = left ^ action.xmask;
-        pair_left_indices.push_back(left);
-        pair_right_indices.push_back(right);
         if (real_pair_flip) {
             real_pair_flip_basis_phase_signs.push_back(
                 is_odd_popcount(static_cast<std::uint64_t>(left) & action.zmask) ? -1.0 : 1.0);
@@ -269,55 +265,32 @@ void rotate_pauli(ActiveState& state, const PrecomputedActivePauliRotationKernel
     }
     if (kernel.uniform_imag_pairs) {
         const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
-        const std::size_t npairs = kernel.pair_left_indices.size();
-        if (npairs < kSimdPairRotationThreshold) {
-            rotate_uniform_imag_pairs_scalar(
-                state.alpha.data(),
-                kernel.pair_left_indices.data(),
-                kernel.pair_right_indices.data(),
-                npairs,
-                c,
-                coefficient.imag());
-        } else {
-            simd::dispatch_table().rotate_uniform_imag_pairs(
-                state.alpha.data(),
-                kernel.pair_left_indices.data(),
-                kernel.pair_right_indices.data(),
-                npairs,
-                c,
-                coefficient.imag());
-        }
+        rotate_uniform_imag_pairs_scalar(
+            state.alpha.data(),
+            kernel.action.xmask,
+            kernel.pair_bit,
+            kernel.pair_count,
+            c,
+            coefficient.imag());
         return;
     }
     if (kernel.real_pair_flip) {
         const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
-        const std::size_t npairs = kernel.pair_left_indices.size();
-        if (npairs < kSimdPairRotationThreshold) {
-            rotate_real_pair_flip_scalar(
-                state.alpha.data(),
-                kernel.pair_left_indices.data(),
-                kernel.pair_right_indices.data(),
-                npairs,
-                c,
-                coefficient.real(),
-                kernel.action.zmask);
-        } else {
-            simd::dispatch_table().rotate_real_pair_flip(
-                state.alpha.data(),
-                kernel.pair_left_indices.data(),
-                kernel.pair_right_indices.data(),
-                npairs,
-                c,
-                coefficient.real(),
-                kernel.action.zmask);
-        }
+        rotate_real_pair_flip_scalar(
+            state.alpha.data(),
+            kernel.action.xmask,
+            kernel.pair_bit,
+            kernel.real_pair_flip_basis_phase_signs.data(),
+            kernel.pair_count,
+            c,
+            coefficient.real());
         return;
     }
     const auto& left_coeff = sign ? kernel.pair_left_plus_coefficients : kernel.pair_left_minus_coefficients;
     const auto& right_coeff = sign ? kernel.pair_right_plus_coefficients : kernel.pair_right_minus_coefficients;
-    for (std::size_t idx = 0; idx < kernel.pair_left_indices.size(); ++idx) {
-        const std::size_t i0 = kernel.pair_left_indices[idx];
-        const std::size_t i1 = kernel.pair_right_indices[idx];
+    for (std::size_t idx = 0; idx < kernel.pair_count; ++idx) {
+        const std::size_t i0 = insert_zero_bit(idx, static_cast<int>(kernel.pair_bit));
+        const std::size_t i1 = i0 ^ static_cast<std::size_t>(kernel.action.xmask);
         const Complex a0 = state.alpha[i0];
         const Complex a1 = state.alpha[i1];
         state.alpha[i0] = c * a0 + right_coeff[idx] * a1;

@@ -17,41 +17,43 @@ namespace symft::detail {
 
 inline void rotate_uniform_imag_pairs_scalar(
     Complex* alpha,
-    const std::size_t* left_indices,
-    const std::size_t* right_indices,
+    std::uint64_t xmask,
+    unsigned pair_bit,
     std::size_t npairs,
     double c,
     double q) {
     auto* raw = reinterpret_cast<double*>(alpha);
     SYMFT_SINGLE_SIMD_LOOP
     for (std::size_t idx = 0; idx < npairs; ++idx) {
-        double* a0 = raw + 2 * left_indices[idx];
-        double* a1 = raw + 2 * right_indices[idx];
+        const std::size_t i0 = insert_zero_bit(idx, static_cast<int>(pair_bit));
+        const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
+        double* a0 = raw + 2 * i0;
+        double* a1 = raw + 2 * i1;
         const double r0 = a0[0];
-        const double i0 = a0[1];
+        const double i0v = a0[1];
         const double r1 = a1[0];
-        const double i1 = a1[1];
-        a0[0] = c * r0 - q * i1;
-        a0[1] = c * i0 + q * r1;
-        a1[0] = c * r1 - q * i0;
-        a1[1] = c * i1 + q * r0;
+        const double i1v = a1[1];
+        a0[0] = c * r0 - q * i1v;
+        a0[1] = c * i0v + q * r1;
+        a1[0] = c * r1 - q * i0v;
+        a1[1] = c * i1v + q * r0;
     }
 }
 
 inline void rotate_real_pair_flip_scalar(
     Complex* alpha,
-    const std::size_t* left_indices,
-    const std::size_t* right_indices,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    const double* phase_signs,
     std::size_t npairs,
     double c,
-    double base_coeff,
-    std::uint64_t zmask) {
+    double base_coeff) {
     auto* raw = reinterpret_cast<double*>(alpha);
     SYMFT_SINGLE_SIMD_LOOP
     for (std::size_t idx = 0; idx < npairs; ++idx) {
-        const std::size_t i0 = left_indices[idx];
-        const std::size_t i1 = right_indices[idx];
-        const double q = is_odd_popcount(static_cast<std::uint64_t>(i0) & zmask) ? -base_coeff : base_coeff;
+        const std::size_t i0 = insert_zero_bit(idx, static_cast<int>(pair_bit));
+        const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
+        const double q = phase_signs[idx] * base_coeff;
         double* a0 = raw + 2 * i0;
         double* a1 = raw + 2 * i1;
         const double r0 = a0[0];

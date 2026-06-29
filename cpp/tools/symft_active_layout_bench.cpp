@@ -132,84 +132,6 @@ double checksum_soa(const SoAState& state) {
     return out;
 }
 
-void apply_soa_indexed(SoAState& state, const symft::PrecomputedActivePauliRotationKernel& kernel, bool sign) {
-    const double c = kernel.cos_theta;
-    double* re = state.re.data();
-    double* im = state.im.data();
-    if (kernel.is_diagonal) {
-        const auto& coefficients = sign ? kernel.diagonal_plus_coefficients : kernel.diagonal_minus_coefficients;
-        const auto* coeff = reinterpret_cast<const double*>(coefficients.data());
-        SYMFT_BENCH_SIMD_LOOP
-        for (std::size_t basis = 0; basis < coefficients.size(); ++basis) {
-            const double fr = c + coeff[2 * basis];
-            const double fi = coeff[2 * basis + 1];
-            const double r = re[basis];
-            const double v = im[basis];
-            re[basis] = fr * r - fi * v;
-            im[basis] = fr * v + fi * r;
-        }
-        return;
-    }
-    if (kernel.uniform_imag_pairs) {
-        const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
-        const double q = coefficient.imag();
-        SYMFT_BENCH_SIMD_LOOP
-        for (std::size_t idx = 0; idx < kernel.pair_left_indices.size(); ++idx) {
-            const std::size_t i0 = kernel.pair_left_indices[idx];
-            const std::size_t i1 = kernel.pair_right_indices[idx];
-            const double r0 = re[i0];
-            const double im0 = im[i0];
-            const double r1 = re[i1];
-            const double im1 = im[i1];
-            re[i0] = c * r0 - q * im1;
-            im[i0] = c * im0 + q * r1;
-            re[i1] = c * r1 - q * im0;
-            im[i1] = c * im1 + q * r0;
-        }
-        return;
-    }
-    if (kernel.real_pair_flip) {
-        const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
-        const double base_coeff = coefficient.real();
-        SYMFT_BENCH_SIMD_LOOP
-        for (std::size_t idx = 0; idx < kernel.pair_left_indices.size(); ++idx) {
-            const std::size_t i0 = kernel.pair_left_indices[idx];
-            const std::size_t i1 = kernel.pair_right_indices[idx];
-            const double q = kernel.real_pair_flip_basis_phase_signs[idx] * base_coeff;
-            const double r0 = re[i0];
-            const double im0 = im[i0];
-            const double r1 = re[i1];
-            const double im1 = im[i1];
-            re[i0] = c * r0 - q * r1;
-            im[i0] = c * im0 - q * im1;
-            re[i1] = c * r1 + q * r0;
-            im[i1] = c * im1 + q * im0;
-        }
-        return;
-    }
-    const auto& left_coeff = sign ? kernel.pair_left_plus_coefficients : kernel.pair_left_minus_coefficients;
-    const auto& right_coeff = sign ? kernel.pair_right_plus_coefficients : kernel.pair_right_minus_coefficients;
-    const auto* left = reinterpret_cast<const double*>(left_coeff.data());
-    const auto* right = reinterpret_cast<const double*>(right_coeff.data());
-    SYMFT_BENCH_SIMD_LOOP
-    for (std::size_t idx = 0; idx < kernel.pair_left_indices.size(); ++idx) {
-        const std::size_t i0 = kernel.pair_left_indices[idx];
-        const std::size_t i1 = kernel.pair_right_indices[idx];
-        const double r0 = re[i0];
-        const double im0 = im[i0];
-        const double r1 = re[i1];
-        const double im1 = im[i1];
-        const double lr = left[2 * idx];
-        const double li = left[2 * idx + 1];
-        const double rr = right[2 * idx];
-        const double ri = right[2 * idx + 1];
-        re[i0] = c * r0 + rr * r1 - ri * im1;
-        im[i0] = c * im0 + rr * im1 + ri * r1;
-        re[i1] = c * r1 + lr * r0 - li * im0;
-        im[i1] = c * im1 + lr * im0 + li * r0;
-    }
-}
-
 void apply_soa_block(SoAState& state, const symft::PrecomputedActivePauliRotationKernel& kernel, bool sign) {
     const double c = kernel.cos_theta;
     double* re = state.re.data();
@@ -574,12 +496,6 @@ int main(int argc, char** argv) {
             for (const auto& bench_case : cases) {
                 for (int repeat = 0; repeat < repeats; ++repeat) {
                     print_result(k, bench_case, "aos_complex", iterations, bench_aos(initial, bench_case.kernel, k, iterations));
-                    print_result(
-                        k,
-                        bench_case,
-                        "soa_indexed",
-                        iterations,
-                        bench_soa(initial, bench_case.kernel, iterations, apply_soa_indexed));
                     print_result(
                         k,
                         bench_case,

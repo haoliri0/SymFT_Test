@@ -47,58 +47,6 @@ double avx2_norm_sum(const Complex* alpha, const std::size_t* indices, std::size
     return out;
 }
 
-void avx2_rotate_uniform_imag_pairs(
-    Complex* alpha,
-    const std::size_t* left_indices,
-    const std::size_t* right_indices,
-    std::size_t npairs,
-    double c,
-    double q) {
-    auto* raw = reinterpret_cast<double*>(alpha);
-    const __m256d vc = _mm256_set1_pd(c);
-    const __m256d vq = _mm256_setr_pd(-q, q, -q, q);
-    SYMFT_SIMD_LOOP
-    for (std::size_t idx = 0; idx < npairs; ++idx) {
-        double* a0 = raw + 2 * left_indices[idx];
-        double* a1 = raw + 2 * right_indices[idx];
-        const __m128d lo = _mm_loadu_pd(a0);
-        const __m128d hi = _mm_loadu_pd(a1);
-        const __m256d v = _mm256_insertf128_pd(_mm256_castpd128_pd256(lo), hi, 1);
-        const __m256d cross = _mm256_permute4x64_pd(v, 0x1b);
-        const __m256d result = _mm256_fmadd_pd(vq, cross, _mm256_mul_pd(vc, v));
-        _mm_storeu_pd(a0, _mm256_castpd256_pd128(result));
-        _mm_storeu_pd(a1, _mm256_extractf128_pd(result, 1));
-    }
-}
-
-void avx2_rotate_real_pair_flip(
-    Complex* alpha,
-    const std::size_t* left_indices,
-    const std::size_t* right_indices,
-    std::size_t npairs,
-    double c,
-    double base_coeff,
-    std::uint64_t zmask) {
-    auto* raw = reinterpret_cast<double*>(alpha);
-    const __m256d vc = _mm256_set1_pd(c);
-    SYMFT_SIMD_LOOP
-    for (std::size_t idx = 0; idx < npairs; ++idx) {
-        const std::size_t i0 = left_indices[idx];
-        const std::size_t i1 = right_indices[idx];
-        const double q = (__builtin_popcountll(static_cast<std::uint64_t>(i0) & zmask) & 1) != 0 ? -base_coeff : base_coeff;
-        double* a0 = raw + 2 * i0;
-        double* a1 = raw + 2 * i1;
-        const __m128d lo = _mm_loadu_pd(a0);
-        const __m128d hi = _mm_loadu_pd(a1);
-        const __m256d v = _mm256_insertf128_pd(_mm256_castpd128_pd256(lo), hi, 1);
-        const __m256d cross = _mm256_permute4x64_pd(v, 0x4e);
-        const __m256d vq = _mm256_setr_pd(-q, -q, q, q);
-        const __m256d result = _mm256_fmadd_pd(vq, cross, _mm256_mul_pd(vc, v));
-        _mm_storeu_pd(a0, _mm256_castpd256_pd128(result));
-        _mm_storeu_pd(a1, _mm256_extractf128_pd(result, 1));
-    }
-}
-
 __m256d load_complex_re4(const double* coeff) {
     const __m256d c0 = _mm256_loadu_pd(coeff);
     const __m256d c1 = _mm256_loadu_pd(coeff + 4);
@@ -556,8 +504,6 @@ const KernelTable table = {
     "avx2",
     avx2_mul_assign,
     avx2_norm_sum,
-    avx2_rotate_uniform_imag_pairs,
-    avx2_rotate_real_pair_flip,
     avx2_mul_assign_soa,
     avx2_norm_sum_soa,
     avx2_rotate_uniform_imag_pairs_soa,
