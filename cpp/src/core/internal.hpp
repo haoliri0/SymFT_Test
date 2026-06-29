@@ -91,6 +91,21 @@ inline int trailing_zeros64(std::uint64_t value) {
 #endif
 }
 
+inline int highest_set_bit64(std::uint64_t value) {
+    if (value == 0) {
+        fail("highest_set_bit64 called with zero");
+    }
+#if defined(__GNUC__) || defined(__clang__)
+    return 63 - __builtin_clzll(value);
+#else
+    int bit = 0;
+    while ((value >>= 1) != 0) {
+        ++bit;
+    }
+    return bit;
+#endif
+}
+
 inline bool is_odd_popcount(std::uint64_t value) {
     return (popcount64(value) & 1) != 0;
 }

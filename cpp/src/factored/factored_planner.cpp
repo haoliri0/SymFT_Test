@@ -84,8 +84,8 @@ void push_symbolic_pauli_through_pending_from(
     }
 }
 
-std::optional<int> first_dormant_x_qubit(const PendingFactoredState& state, const PauliString& pauli) {
-    for (int q = state.k; q < state.n; ++q) {
+std::optional<int> highest_dormant_x_qubit(const PendingFactoredState& state, const PauliString& pauli) {
+    for (int q = state.n; q-- > state.k;) {
         if (pauli.xbit(q)) {
             return q - state.k;
         }
@@ -390,7 +390,7 @@ std::optional<FactoredInstruction> measure_active_pauli_branches(
 std::optional<FactoredInstruction> process_pending_rotation(PendingFactoredState& state, const PendingPauliRotation& rotation) {
     state.context->bump_next_condition(max_condition(rotation));
     PendingPauliRotation current = rotation;
-    const auto picked = first_dormant_x_qubit(state, current.pauli.pauli);
+    const auto picked = highest_dormant_x_qubit(state, current.pauli.pauli);
     if (!picked) {
         return process_diagonal_dormant_rotation(state, current);
     }
@@ -402,7 +402,7 @@ std::optional<FactoredInstruction> process_pending_measurement(PendingFactoredSt
     const bool queued_first = !state.pending_operations.empty() && state.pending_operations.front() == PendingOperation(measurement);
     PendingPauliMeasurement current = measurement;
     const PauliString active_body = project_pauli_body(current.pauli.pauli, 0, state.k);
-    const auto picked = first_dormant_x_qubit(state, current.pauli.pauli);
+    const auto picked = highest_dormant_x_qubit(state, current.pauli.pauli);
     if (picked) {
         return measure_dormant_xy_pauli(state, current, *picked, queued_first);
     }

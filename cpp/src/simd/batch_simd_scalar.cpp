@@ -147,10 +147,9 @@ void scalar_rotate_uniform_imag_xmask(
     const std::size_t dim = npairs << 1;
     const std::size_t step = selector << 1;
     for (std::size_t block = 0; block < dim; block += step) {
-        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
         for (std::size_t offset = 0; offset < selector; ++offset) {
             const std::size_t i0 = block + offset;
-            const std::size_t i1 = right_base + offset;
+            const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
             double* r0p = re + i0 * leading_shots;
             double* i0p = im + i0 * leading_shots;
             double* r1p = re + i1 * leading_shots;
@@ -185,10 +184,9 @@ void scalar_rotate_uniform_imag_xmask_const(
     const std::size_t dim = npairs << 1;
     const std::size_t step = selector << 1;
     for (std::size_t block = 0; block < dim; block += step) {
-        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
         for (std::size_t offset = 0; offset < selector; ++offset) {
             const std::size_t i0 = block + offset;
-            const std::size_t i1 = right_base + offset;
+            const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
             rotate_uniform_imag_pair_const(
                 re + i0 * leading_shots,
                 im + i0 * leading_shots,
@@ -250,10 +248,9 @@ void scalar_rotate_real_pair_flip_xmask(
     const std::size_t step = selector << 1;
     std::size_t pair_idx = 0;
     for (std::size_t block = 0; block < dim; block += step) {
-        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
         for (std::size_t offset = 0; offset < selector; ++offset) {
             const std::size_t i0 = block + offset;
-            const std::size_t i1 = right_base + offset;
+            const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
             const double basis_phase_sign = basis_phase_signs[pair_idx++];
             double* r0p = re + i0 * leading_shots;
             double* i0p = im + i0 * leading_shots;
@@ -291,10 +288,9 @@ void scalar_rotate_real_pair_flip_xmask_const(
     const std::size_t step = selector << 1;
     std::size_t pair_idx = 0;
     for (std::size_t block = 0; block < dim; block += step) {
-        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
         for (std::size_t offset = 0; offset < selector; ++offset) {
             const std::size_t i0 = block + offset;
-            const std::size_t i1 = right_base + offset;
+            const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
             rotate_real_pair_flip_const(
                 re + i0 * leading_shots,
                 im + i0 * leading_shots,
@@ -405,10 +401,9 @@ void scalar_rotate_general_xmask_const(
     const std::size_t step = selector << 1;
     std::size_t pair_idx = 0;
     for (std::size_t block = 0; block < dim; block += step) {
-        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
         for (std::size_t offset = 0; offset < selector; ++offset) {
             const std::size_t i0 = block + offset;
-            const std::size_t i1 = right_base + offset;
+            const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
             rotate_general_pair_const(
                 re + i0 * leading_shots,
                 im + i0 * leading_shots,
@@ -444,10 +439,9 @@ void scalar_rotate_general_xmask_mixed(
     const std::size_t nwords = static_cast<std::size_t>((active_shots + 63) >> 6);
     std::size_t pair_idx = 0;
     for (std::size_t block = 0; block < dim; block += step) {
-        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
         for (std::size_t offset = 0; offset < selector; ++offset) {
             const std::size_t i0 = block + offset;
-            const std::size_t i1 = right_base + offset;
+            const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
             double* r0p = re + i0 * leading_shots;
             double* i0p = im + i0 * leading_shots;
             double* r1p = re + i1 * leading_shots;

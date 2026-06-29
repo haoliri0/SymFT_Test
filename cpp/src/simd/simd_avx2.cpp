@@ -111,6 +111,29 @@ __m256d load_complex_im4(const double* coeff) {
     return _mm256_permute4x64_pd(_mm256_unpackhi_pd(c0, c1), 0xd8);
 }
 
+__m256i pair_indices4(std::size_t i0, std::uint64_t xmask) {
+    const auto mask = static_cast<std::size_t>(xmask);
+    return _mm256_set_epi64x(
+        static_cast<long long>((i0 + 3) ^ mask),
+        static_cast<long long>((i0 + 2) ^ mask),
+        static_cast<long long>((i0 + 1) ^ mask),
+        static_cast<long long>(i0 ^ mask));
+}
+
+__m256d gather_pair4(const double* values, std::size_t i0, std::uint64_t xmask) {
+    return _mm256_i64gather_pd(values, pair_indices4(i0, xmask), 8);
+}
+
+void scatter_pair4(double* values, std::size_t i0, std::uint64_t xmask, __m256d lanes) {
+    alignas(32) double tmp[4];
+    _mm256_store_pd(tmp, lanes);
+    const auto mask = static_cast<std::size_t>(xmask);
+    values[i0 ^ mask] = tmp[0];
+    values[(i0 + 1) ^ mask] = tmp[1];
+    values[(i0 + 2) ^ mask] = tmp[2];
+    values[(i0 + 3) ^ mask] = tmp[3];
+}
+
 void avx2_mul_assign_soa(double* re, double* im, const Complex* coeff, double c, std::size_t n) {
     const auto* cr = reinterpret_cast<const double*>(coeff);
     const __m256d vc = _mm256_set1_pd(c);
@@ -155,6 +178,7 @@ void avx2_rotate_uniform_imag_pairs_soa(
     double q) {
     const std::size_t selector = std::size_t{1} << pair_bit;
     const std::size_t step = selector << 1;
+    const bool contiguous_partner = (static_cast<std::size_t>(xmask) & (selector - 1)) == 0;
     const __m256d vc = _mm256_set1_pd(c);
     const __m256d vq = _mm256_set1_pd(q);
     if (selector == 1 && xmask == 1 && dim >= 4) {
@@ -180,23 +204,38 @@ void avx2_rotate_uniform_imag_pairs_soa(
         return;
     }
     for (std::size_t block = 0; block < dim; block += step) {
-        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
         std::size_t offset = 0;
-        for (; offset + 4 <= selector; offset += 4) {
-            const std::size_t i0 = block + offset;
-            const std::size_t i1 = right_base + offset;
-            const __m256d r0 = _mm256_loadu_pd(re + i0);
-            const __m256d im0 = _mm256_loadu_pd(im + i0);
-            const __m256d r1 = _mm256_loadu_pd(re + i1);
-            const __m256d im1 = _mm256_loadu_pd(im + i1);
-            _mm256_storeu_pd(re + i0, _mm256_fnmadd_pd(vq, im1, _mm256_mul_pd(vc, r0)));
-            _mm256_storeu_pd(im + i0, _mm256_fmadd_pd(vq, r1, _mm256_mul_pd(vc, im0)));
-            _mm256_storeu_pd(re + i1, _mm256_fnmadd_pd(vq, im0, _mm256_mul_pd(vc, r1)));
-            _mm256_storeu_pd(im + i1, _mm256_fmadd_pd(vq, r0, _mm256_mul_pd(vc, im1)));
+        if (contiguous_partner) {
+            const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
+            for (; offset + 4 <= selector; offset += 4) {
+                const std::size_t i0 = block + offset;
+                const std::size_t i1 = right_base + offset;
+                const __m256d r0 = _mm256_loadu_pd(re + i0);
+                const __m256d im0 = _mm256_loadu_pd(im + i0);
+                const __m256d r1 = _mm256_loadu_pd(re + i1);
+                const __m256d im1 = _mm256_loadu_pd(im + i1);
+                _mm256_storeu_pd(re + i0, _mm256_fnmadd_pd(vq, im1, _mm256_mul_pd(vc, r0)));
+                _mm256_storeu_pd(im + i0, _mm256_fmadd_pd(vq, r1, _mm256_mul_pd(vc, im0)));
+                _mm256_storeu_pd(re + i1, _mm256_fnmadd_pd(vq, im0, _mm256_mul_pd(vc, r1)));
+                _mm256_storeu_pd(im + i1, _mm256_fmadd_pd(vq, r0, _mm256_mul_pd(vc, im1)));
+            }
+        }
+        if (!contiguous_partner) {
+            for (; offset + 4 <= selector; offset += 4) {
+                const std::size_t i0 = block + offset;
+                const __m256d r0 = _mm256_loadu_pd(re + i0);
+                const __m256d im0 = _mm256_loadu_pd(im + i0);
+                const __m256d r1 = gather_pair4(re, i0, xmask);
+                const __m256d im1 = gather_pair4(im, i0, xmask);
+                _mm256_storeu_pd(re + i0, _mm256_fnmadd_pd(vq, im1, _mm256_mul_pd(vc, r0)));
+                _mm256_storeu_pd(im + i0, _mm256_fmadd_pd(vq, r1, _mm256_mul_pd(vc, im0)));
+                scatter_pair4(re, i0, xmask, _mm256_fnmadd_pd(vq, im0, _mm256_mul_pd(vc, r1)));
+                scatter_pair4(im, i0, xmask, _mm256_fmadd_pd(vq, r0, _mm256_mul_pd(vc, im1)));
+            }
         }
         for (; offset < selector; ++offset) {
             const std::size_t i0 = block + offset;
-            const std::size_t i1 = right_base + offset;
+            const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
             const double r0 = re[i0];
             const double im0 = im[i0];
             const double r1 = re[i1];
@@ -220,6 +259,7 @@ void avx2_rotate_real_pair_flip_soa(
     double base_coeff) {
     const std::size_t selector = std::size_t{1} << pair_bit;
     const std::size_t step = selector << 1;
+    const bool contiguous_partner = (static_cast<std::size_t>(xmask) & (selector - 1)) == 0;
     const __m256d vc = _mm256_set1_pd(c);
     const __m256d vbase = _mm256_set1_pd(base_coeff);
     if (selector == 1 && xmask == 1 && dim >= 4) {
@@ -250,25 +290,42 @@ void avx2_rotate_real_pair_flip_soa(
     }
     std::size_t pair_idx = 0;
     for (std::size_t block = 0; block < dim; block += step) {
-        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
         std::size_t offset = 0;
-        for (; offset + 4 <= selector; offset += 4) {
-            const std::size_t i0 = block + offset;
-            const std::size_t i1 = right_base + offset;
-            const __m256d q = _mm256_mul_pd(_mm256_loadu_pd(phase_signs + pair_idx), vbase);
-            const __m256d r0 = _mm256_loadu_pd(re + i0);
-            const __m256d im0 = _mm256_loadu_pd(im + i0);
-            const __m256d r1 = _mm256_loadu_pd(re + i1);
-            const __m256d im1 = _mm256_loadu_pd(im + i1);
-            _mm256_storeu_pd(re + i0, _mm256_fnmadd_pd(q, r1, _mm256_mul_pd(vc, r0)));
-            _mm256_storeu_pd(im + i0, _mm256_fnmadd_pd(q, im1, _mm256_mul_pd(vc, im0)));
-            _mm256_storeu_pd(re + i1, _mm256_fmadd_pd(q, r0, _mm256_mul_pd(vc, r1)));
-            _mm256_storeu_pd(im + i1, _mm256_fmadd_pd(q, im0, _mm256_mul_pd(vc, im1)));
-            pair_idx += 4;
+        if (contiguous_partner) {
+            const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
+            for (; offset + 4 <= selector; offset += 4) {
+                const std::size_t i0 = block + offset;
+                const std::size_t i1 = right_base + offset;
+                const __m256d q = _mm256_mul_pd(_mm256_loadu_pd(phase_signs + pair_idx), vbase);
+                const __m256d r0 = _mm256_loadu_pd(re + i0);
+                const __m256d im0 = _mm256_loadu_pd(im + i0);
+                const __m256d r1 = _mm256_loadu_pd(re + i1);
+                const __m256d im1 = _mm256_loadu_pd(im + i1);
+                _mm256_storeu_pd(re + i0, _mm256_fnmadd_pd(q, r1, _mm256_mul_pd(vc, r0)));
+                _mm256_storeu_pd(im + i0, _mm256_fnmadd_pd(q, im1, _mm256_mul_pd(vc, im0)));
+                _mm256_storeu_pd(re + i1, _mm256_fmadd_pd(q, r0, _mm256_mul_pd(vc, r1)));
+                _mm256_storeu_pd(im + i1, _mm256_fmadd_pd(q, im0, _mm256_mul_pd(vc, im1)));
+                pair_idx += 4;
+            }
+        }
+        if (!contiguous_partner) {
+            for (; offset + 4 <= selector; offset += 4) {
+                const std::size_t i0 = block + offset;
+                const __m256d q = _mm256_mul_pd(_mm256_loadu_pd(phase_signs + pair_idx), vbase);
+                const __m256d r0 = _mm256_loadu_pd(re + i0);
+                const __m256d im0 = _mm256_loadu_pd(im + i0);
+                const __m256d r1 = gather_pair4(re, i0, xmask);
+                const __m256d im1 = gather_pair4(im, i0, xmask);
+                _mm256_storeu_pd(re + i0, _mm256_fnmadd_pd(q, r1, _mm256_mul_pd(vc, r0)));
+                _mm256_storeu_pd(im + i0, _mm256_fnmadd_pd(q, im1, _mm256_mul_pd(vc, im0)));
+                scatter_pair4(re, i0, xmask, _mm256_fmadd_pd(q, r0, _mm256_mul_pd(vc, r1)));
+                scatter_pair4(im, i0, xmask, _mm256_fmadd_pd(q, im0, _mm256_mul_pd(vc, im1)));
+                pair_idx += 4;
+            }
         }
         for (; offset < selector; ++offset) {
             const std::size_t i0 = block + offset;
-            const std::size_t i1 = right_base + offset;
+            const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
             const double q = phase_signs[pair_idx++] * base_coeff;
             const double r0 = re[i0];
             const double im0 = im[i0];
@@ -295,6 +352,7 @@ void avx2_rotate_general_pairs_soa(
     const auto* right = reinterpret_cast<const double*>(right_coeff);
     const std::size_t selector = std::size_t{1} << pair_bit;
     const std::size_t step = selector << 1;
+    const bool contiguous_partner = (static_cast<std::size_t>(xmask) & (selector - 1)) == 0;
     const __m256d vc = _mm256_set1_pd(c);
     if (selector == 1 && xmask == 1 && dim >= 4) {
         std::size_t basis = 0;
@@ -337,36 +395,64 @@ void avx2_rotate_general_pairs_soa(
     }
     std::size_t pair_idx = 0;
     for (std::size_t block = 0; block < dim; block += step) {
-        const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
         std::size_t offset = 0;
-        for (; offset + 4 <= selector; offset += 4) {
-            const std::size_t i0 = block + offset;
-            const std::size_t i1 = right_base + offset;
-            const __m256d r0 = _mm256_loadu_pd(re + i0);
-            const __m256d im0 = _mm256_loadu_pd(im + i0);
-            const __m256d r1 = _mm256_loadu_pd(re + i1);
-            const __m256d im1 = _mm256_loadu_pd(im + i1);
-            const __m256d lr = load_complex_re4(left + 2 * pair_idx);
-            const __m256d li = load_complex_im4(left + 2 * pair_idx);
-            const __m256d rr = load_complex_re4(right + 2 * pair_idx);
-            const __m256d ri = load_complex_im4(right + 2 * pair_idx);
-            __m256d out_r0 = _mm256_fmadd_pd(vc, r0, _mm256_mul_pd(rr, r1));
-            out_r0 = _mm256_fnmadd_pd(ri, im1, out_r0);
-            __m256d out_i0 = _mm256_fmadd_pd(vc, im0, _mm256_mul_pd(rr, im1));
-            out_i0 = _mm256_fmadd_pd(ri, r1, out_i0);
-            __m256d out_r1 = _mm256_fmadd_pd(vc, r1, _mm256_mul_pd(lr, r0));
-            out_r1 = _mm256_fnmadd_pd(li, im0, out_r1);
-            __m256d out_i1 = _mm256_fmadd_pd(vc, im1, _mm256_mul_pd(lr, im0));
-            out_i1 = _mm256_fmadd_pd(li, r0, out_i1);
-            _mm256_storeu_pd(re + i0, out_r0);
-            _mm256_storeu_pd(im + i0, out_i0);
-            _mm256_storeu_pd(re + i1, out_r1);
-            _mm256_storeu_pd(im + i1, out_i1);
-            pair_idx += 4;
+        if (contiguous_partner) {
+            const std::size_t right_base = block ^ static_cast<std::size_t>(xmask);
+            for (; offset + 4 <= selector; offset += 4) {
+                const std::size_t i0 = block + offset;
+                const std::size_t i1 = right_base + offset;
+                const __m256d r0 = _mm256_loadu_pd(re + i0);
+                const __m256d im0 = _mm256_loadu_pd(im + i0);
+                const __m256d r1 = _mm256_loadu_pd(re + i1);
+                const __m256d im1 = _mm256_loadu_pd(im + i1);
+                const __m256d lr = load_complex_re4(left + 2 * pair_idx);
+                const __m256d li = load_complex_im4(left + 2 * pair_idx);
+                const __m256d rr = load_complex_re4(right + 2 * pair_idx);
+                const __m256d ri = load_complex_im4(right + 2 * pair_idx);
+                __m256d out_r0 = _mm256_fmadd_pd(vc, r0, _mm256_mul_pd(rr, r1));
+                out_r0 = _mm256_fnmadd_pd(ri, im1, out_r0);
+                __m256d out_i0 = _mm256_fmadd_pd(vc, im0, _mm256_mul_pd(rr, im1));
+                out_i0 = _mm256_fmadd_pd(ri, r1, out_i0);
+                __m256d out_r1 = _mm256_fmadd_pd(vc, r1, _mm256_mul_pd(lr, r0));
+                out_r1 = _mm256_fnmadd_pd(li, im0, out_r1);
+                __m256d out_i1 = _mm256_fmadd_pd(vc, im1, _mm256_mul_pd(lr, im0));
+                out_i1 = _mm256_fmadd_pd(li, r0, out_i1);
+                _mm256_storeu_pd(re + i0, out_r0);
+                _mm256_storeu_pd(im + i0, out_i0);
+                _mm256_storeu_pd(re + i1, out_r1);
+                _mm256_storeu_pd(im + i1, out_i1);
+                pair_idx += 4;
+            }
+        }
+        if (!contiguous_partner) {
+            for (; offset + 4 <= selector; offset += 4) {
+                const std::size_t i0 = block + offset;
+                const __m256d r0 = _mm256_loadu_pd(re + i0);
+                const __m256d im0 = _mm256_loadu_pd(im + i0);
+                const __m256d r1 = gather_pair4(re, i0, xmask);
+                const __m256d im1 = gather_pair4(im, i0, xmask);
+                const __m256d lr = load_complex_re4(left + 2 * pair_idx);
+                const __m256d li = load_complex_im4(left + 2 * pair_idx);
+                const __m256d rr = load_complex_re4(right + 2 * pair_idx);
+                const __m256d ri = load_complex_im4(right + 2 * pair_idx);
+                __m256d out_r0 = _mm256_fmadd_pd(vc, r0, _mm256_mul_pd(rr, r1));
+                out_r0 = _mm256_fnmadd_pd(ri, im1, out_r0);
+                __m256d out_i0 = _mm256_fmadd_pd(vc, im0, _mm256_mul_pd(rr, im1));
+                out_i0 = _mm256_fmadd_pd(ri, r1, out_i0);
+                __m256d out_r1 = _mm256_fmadd_pd(vc, r1, _mm256_mul_pd(lr, r0));
+                out_r1 = _mm256_fnmadd_pd(li, im0, out_r1);
+                __m256d out_i1 = _mm256_fmadd_pd(vc, im1, _mm256_mul_pd(lr, im0));
+                out_i1 = _mm256_fmadd_pd(li, r0, out_i1);
+                _mm256_storeu_pd(re + i0, out_r0);
+                _mm256_storeu_pd(im + i0, out_i0);
+                scatter_pair4(re, i0, xmask, out_r1);
+                scatter_pair4(im, i0, xmask, out_i1);
+                pair_idx += 4;
+            }
         }
         for (; offset < selector; ++offset) {
             const std::size_t i0 = block + offset;
-            const std::size_t i1 = right_base + offset;
+            const std::size_t i1 = i0 ^ static_cast<std::size_t>(xmask);
             const double r0 = re[i0];
             const double im0 = im[i0];
             const double r1 = re[i1];

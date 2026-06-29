@@ -1,5 +1,6 @@
 #include "frontend/stim.hpp"
 #include "frontend/stim_prepared_sampler.hpp"
+#include "sampler/batch_internal.hpp"
 #include "sampler/batch_sampler.hpp"
 #include "sampler/exogenous.hpp"
 #include "sampler/single_shot.hpp"
@@ -12,6 +13,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -25,6 +27,120 @@ void require(bool condition, const std::string& message) {
 
 bool approx(symft::Complex a, symft::Complex b, double eps = 1e-10) {
     return std::abs(a - b) <= eps;
+}
+
+symft::Complex deterministic_amplitude(std::size_t basis, int shot = 0) {
+    const double re = 0.001 * static_cast<double>((basis % 97) + 1 + 3 * shot);
+    const double im = -0.0015 * static_cast<double>(((basis + 5 * static_cast<std::size_t>(shot)) % 89) + 1);
+    return {re, im};
+}
+
+std::vector<symft::Complex> deterministic_alpha(int k, int shot = 0) {
+    const std::size_t dim = std::size_t{1} << k;
+    std::vector<symft::Complex> alpha(dim);
+    for (std::size_t basis = 0; basis < dim; ++basis) {
+        alpha[basis] = deterministic_amplitude(basis, shot);
+    }
+    return alpha;
+}
+
+symft::FactoredInstructionProgram active_only_program(int k) {
+    return symft::FactoredInstructionProgram(
+        k,
+        k,
+        std::vector<symft::FactoredInstruction>{},
+        k);
+}
+
+symft::ApplyPrecomputedActivePauliRotation high_pivot_rotation_instruction(
+    const symft::PauliString& pauli,
+    double theta,
+    bool sign = false) {
+    symft::ActivePauliAction action(pauli);
+    symft::PrecomputedActivePauliRotationKernel kernel(action, theta);
+    const symft::SymbolicBool sign_expr(sign);
+    return symft::ApplyPrecomputedActivePauliRotation{
+        pauli,
+        action,
+        kernel,
+        theta,
+        sign_expr,
+        symft::SymbolicBoolEvaluationPlan(sign_expr),
+    };
+}
+
+void check_high_pivot_single_rotation_kernel(const symft::PauliString& pauli, double theta, int k) {
+    using namespace symft;
+    auto alpha = deterministic_alpha(k);
+    ActiveState expected(k, alpha);
+    rotate_pauli(expected, pauli, theta);
+
+    ActivePauliAction action(pauli);
+    PrecomputedActivePauliRotationKernel kernel(action, theta);
+    require(kernel.pair_bit == static_cast<unsigned>(k - 1), "active rotation kernel uses highest X pivot bit");
+
+    ActiveState aos_fast(k, alpha);
+    rotate_pauli(aos_fast, kernel, false);
+    for (std::size_t basis = 0; basis < alpha.size(); ++basis) {
+        require(approx(aos_fast.alpha[basis], expected.alpha[basis], 1e-9), "AoS high-pivot rotation kernel matches generic rotation");
+    }
+
+    const auto program = active_only_program(k);
+    FactoredExecutorState runtime(program, 123);
+    for (std::size_t basis = 0; basis < alpha.size(); ++basis) {
+        runtime.active_re[basis] = alpha[basis].real();
+        runtime.active_im[basis] = alpha[basis].imag();
+    }
+    auto instruction = high_pivot_rotation_instruction(pauli, theta);
+    execute_instruction_in_place(runtime, FactoredInstruction(instruction));
+    for (std::size_t basis = 0; basis < alpha.size(); ++basis) {
+        require(
+            approx({runtime.active_re[basis], runtime.active_im[basis]}, expected.alpha[basis], 1e-9),
+            "SoA high-pivot rotation kernel matches generic rotation");
+    }
+}
+
+void check_high_pivot_batch_rotation_kernel(const symft::PauliString& pauli, double theta, int k, bool mixed_signs) {
+    using namespace symft;
+    constexpr int shots = 5;
+    const auto program = active_only_program(k);
+    BatchFactoredExecutorState runtime(program, shots, 321);
+    const std::size_t dim = std::size_t{1} << k;
+    std::vector<std::vector<Complex>> expected_by_shot;
+    expected_by_shot.reserve(shots);
+    for (int shot = 0; shot < shots; ++shot) {
+        auto alpha = deterministic_alpha(k, shot);
+        ActiveState expected(k, alpha);
+        const bool sign = mixed_signs && ((shot & 1) != 0);
+        rotate_pauli(expected, pauli, sign ? -theta : theta);
+        expected_by_shot.push_back(std::move(expected.alpha));
+        for (std::size_t basis = 0; basis < dim; ++basis) {
+            const std::size_t offset = basis * static_cast<std::size_t>(runtime.active_pitch) + static_cast<std::size_t>(shot);
+            runtime.active_re[offset] = alpha[basis].real();
+            runtime.active_im[offset] = alpha[basis].imag();
+        }
+    }
+
+    ActivePauliAction action(pauli);
+    PrecomputedActivePauliRotationKernel kernel(action, theta);
+    require(kernel.pair_bit == static_cast<unsigned>(k - 1), "batch rotation kernel uses highest X pivot bit");
+    std::vector<std::uint64_t> sign_bits(runtime.batch_words, 0);
+    if (mixed_signs) {
+        for (int shot = 0; shot < shots; ++shot) {
+            if ((shot & 1) != 0) {
+                sign_bits[static_cast<std::size_t>(shot >> 6)] |= std::uint64_t{1} << (shot & 63);
+            }
+        }
+    }
+    rotate_pauli_batch(runtime, kernel, sign_bits);
+    for (int shot = 0; shot < shots; ++shot) {
+        for (std::size_t basis = 0; basis < dim; ++basis) {
+            const std::size_t offset = basis * static_cast<std::size_t>(runtime.active_pitch) + static_cast<std::size_t>(shot);
+            require(
+                approx({runtime.active_re[offset], runtime.active_im[offset]}, expected_by_shot[static_cast<std::size_t>(shot)][basis], 1e-9),
+                "batch high-pivot rotation kernel matches generic rotation");
+        }
+    }
 }
 
 symft::BatchDetectorPostselectionResult execute_expression_postselected_for_test(
@@ -138,6 +254,54 @@ void test_active_rotation() {
     for (std::size_t i = 0; i < alpha6.size(); ++i) {
         require(approx(y6_fast.alpha[i], y6_expected.alpha[i]), "precomputed multi-qubit Y fast rotation");
     }
+}
+
+void test_high_pivot_selection() {
+    using namespace symft;
+    const auto x1x3 = pauli_x(4, 1) * pauli_x(4, 3);
+    const PrecomputedActivePauliRotationKernel rotation_kernel(ActivePauliAction(x1x3), 0.125);
+    require(rotation_kernel.pair_bit == 3, "active rotation uses highest X pivot bit");
+
+    const PrecomputedActivePauliMeasurementKernel diagonal_kernel(pauli_z(4, 0) * pauli_z(4, 3));
+    require(diagonal_kernel.is_diagonal && diagonal_kernel.pivot == 3, "diagonal active measurement uses highest Z pivot");
+
+    const PrecomputedActivePauliMeasurementKernel nondiagonal_kernel(pauli_x(4, 1) * pauli_z(4, 2) * pauli_x(4, 3));
+    require(!nondiagonal_kernel.is_diagonal && nondiagonal_kernel.pivot == 3, "nondiagonal active measurement uses highest X pivot");
+
+    PendingFactoredState pending(4, 0);
+    pending.pending_operations.push_back(PendingPauliRotation{0.25, SymbolicPauliString(pauli_x(4, 0) * pauli_x(4, 2))});
+    pending.pending_operations.push_back(PendingPauliMeasurement{SymbolicPauliString(pauli_z(4, 2)), std::nullopt, std::nullopt});
+    process_next_pending_operation(pending);
+    require(pending.k == 1, "dormant rotation promotion creates one active qubit");
+    const auto& transformed = std::get<PendingPauliMeasurement>(pending.pending_operations.front()).pauli.pauli;
+    require(transformed == pauli_z(4, 0), "dormant promotion uses highest dormant pivot");
+}
+
+void test_high_pivot_rotation_kernels() {
+    using namespace symft;
+    const int small_k = 6;
+    const int large_k = 16;
+    const double theta = 0.071;
+    const auto uniform_small = pauli_x(small_k, 1) * pauli_x(small_k, small_k - 1);
+    const auto real_small = pauli_x(small_k, 1) * pauli_y(small_k, small_k - 1);
+    const auto general_small = pauli_x(small_k, 1) * pauli_z(small_k, 3) * pauli_x(small_k, small_k - 1);
+    check_high_pivot_single_rotation_kernel(uniform_small, theta, small_k);
+    check_high_pivot_single_rotation_kernel(real_small, theta, small_k);
+    check_high_pivot_single_rotation_kernel(general_small, theta, small_k);
+
+    const auto uniform_large = pauli_x(large_k, 2) * pauli_x(large_k, large_k - 1);
+    const auto real_large = pauli_x(large_k, 2) * pauli_y(large_k, large_k - 1);
+    const auto general_large = pauli_x(large_k, 2) * pauli_z(large_k, 5) * pauli_x(large_k, large_k - 1);
+    check_high_pivot_single_rotation_kernel(uniform_large, theta, large_k);
+    check_high_pivot_single_rotation_kernel(real_large, theta, large_k);
+    check_high_pivot_single_rotation_kernel(general_large, theta, large_k);
+
+    check_high_pivot_batch_rotation_kernel(uniform_large, theta, large_k, false);
+    check_high_pivot_batch_rotation_kernel(uniform_large, theta, large_k, true);
+    check_high_pivot_batch_rotation_kernel(real_large, theta, large_k, false);
+    check_high_pivot_batch_rotation_kernel(real_large, theta, large_k, true);
+    check_high_pivot_batch_rotation_kernel(general_large, theta, large_k, false);
+    check_high_pivot_batch_rotation_kernel(general_large, theta, large_k, true);
 }
 
 void test_active_h_rewrite_stays_virtual() {
@@ -472,6 +636,8 @@ int main() {
     test_pauli_algebra();
     test_clifford_frame();
     test_active_rotation();
+    test_high_pivot_selection();
+    test_high_pivot_rotation_kernels();
     test_active_h_rewrite_stays_virtual();
     test_dormant_measurement_tableau_reuse();
     test_dormant_measurement_sign_feeds_promotion();

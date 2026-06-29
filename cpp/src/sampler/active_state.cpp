@@ -64,8 +64,8 @@ PrecomputedActivePauliRotationKernel::PrecomputedActivePauliRotationKernel(const
     }
     uniform_imag_pairs = action.zmask == 0;
     real_pair_flip = can_rotate_real_pair_flip(action);
-    pair_bit = static_cast<unsigned>(trailing_zeros64(action.xmask));
-    const std::size_t pair_selector = action.xmask & (~action.xmask + 1);
+    pair_bit = static_cast<unsigned>(highest_set_bit64(action.xmask));
+    const std::size_t pair_selector = std::size_t{1} << pair_bit;
     for (std::size_t left = 0; left < dim; ++left) {
         if ((left & pair_selector) != 0) {
             continue;
@@ -92,7 +92,7 @@ PrecomputedActivePauliMeasurementKernel precomputed_nondiagonal_measurement_kern
     PrecomputedActivePauliMeasurementKernel out;
     out.action = action;
     out.is_diagonal = false;
-    out.pivot = trailing_zeros64(action.xmask);
+    out.pivot = highest_set_bit64(action.xmask);
     const std::size_t dim = active_length(action.nqubits);
     const std::size_t out_dim = dim >> 1;
     const double inv_sqrt2 = 1.0 / std::sqrt(2.0);
@@ -129,7 +129,7 @@ PrecomputedActivePauliMeasurementKernel precomputed_diagonal_measurement_kernel(
     PrecomputedActivePauliMeasurementKernel out;
     out.action = action;
     out.is_diagonal = true;
-    out.pivot = trailing_zeros64(action.zmask);
+    out.pivot = highest_set_bit64(action.zmask);
     const std::size_t dim = active_length(action.nqubits);
     const std::size_t out_dim = dim >> 1;
     const bool negative_phase = std::abs(action.even_phase.real() + 1.0) < 1e-12 &&
