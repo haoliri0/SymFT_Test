@@ -55,14 +55,6 @@ struct RecordDetector {
     SymbolicBoolEvaluationPlan outcome_plan;
 };
 
-struct MeasureActiveLastZ {
-    int branch = 0;
-    SymbolicBool outcome;
-    std::optional<int> record;
-    std::optional<int> record_condition;
-    SymbolicBoolEvaluationPlan outcome_plan;
-};
-
 struct MeasurePrecomputedActivePauli {
     PauliString pauli;
     PrecomputedActivePauliMeasurementKernel kernel;
@@ -86,7 +78,6 @@ using FactoredInstruction = std::variant<
     PromoteDormantRotation,
     RecordMeasurement,
     RecordDetector,
-    MeasureActiveLastZ,
     MeasurePrecomputedActivePauli,
     IntroduceDormantMeasurementBranch>;
 
@@ -94,7 +85,6 @@ bool operator==(const ApplyPrecomputedActivePauliRotation& lhs, const ApplyPreco
 bool operator==(const PromoteDormantRotation& lhs, const PromoteDormantRotation& rhs);
 bool operator==(const RecordMeasurement& lhs, const RecordMeasurement& rhs);
 bool operator==(const RecordDetector& lhs, const RecordDetector& rhs);
-bool operator==(const MeasureActiveLastZ& lhs, const MeasureActiveLastZ& rhs);
 bool operator==(const MeasurePrecomputedActivePauli& lhs, const MeasurePrecomputedActivePauli& rhs);
 bool operator==(const IntroduceDormantMeasurementBranch& lhs, const IntroduceDormantMeasurementBranch& rhs);
 bool operator==(const FactoredInstruction& lhs, const FactoredInstruction& rhs);

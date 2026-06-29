@@ -521,74 +521,6 @@ void scalar_promote_first_dormant_rotation(
     }
 }
 
-void scalar_last_z_measure_true_prob(
-    const double* re,
-    const double* im,
-    std::size_t leading_shots,
-    int active_shots,
-    std::size_t dim,
-    double* prob_true) {
-    std::fill(prob_true, prob_true + active_shots, 0.0);
-    for (std::size_t basis = 0; basis < dim; ++basis) {
-        const double* rp = re + (dim + basis) * leading_shots;
-        const double* ip = im + (dim + basis) * leading_shots;
-        SYMFT_BATCH_SIMD_LOOP
-        for (int shot = 0; shot < active_shots; ++shot) {
-            const double r = rp[shot];
-            const double i = ip[shot];
-            prob_true[shot] += r * r + i * i;
-        }
-    }
-}
-
-void scalar_last_z_project(
-    double* re,
-    double* im,
-    std::size_t leading_shots,
-    int active_shots,
-    std::size_t dim,
-    const std::uint64_t* branch_bits,
-    const double* invnorms) {
-    const std::size_t nwords = static_cast<std::size_t>((active_shots + 63) >> 6);
-    for (std::size_t basis = 0; basis < dim; ++basis) {
-        double* dst_r = re + basis * leading_shots;
-        double* dst_i = im + basis * leading_shots;
-        const double* false_r = re + basis * leading_shots;
-        const double* false_i = im + basis * leading_shots;
-        const double* true_r = re + (dim + basis) * leading_shots;
-        const double* true_i = im + (dim + basis) * leading_shots;
-        for (std::size_t word = 0; word < nwords; ++word) {
-            const int first = static_cast<int>(word << 6);
-            const int last = std::min(active_shots, first + 64);
-            const std::uint64_t live = live_word_mask(active_shots, word);
-            const std::uint64_t bits = branch_bits[word] & live;
-            if (bits == 0) {
-                SYMFT_BATCH_SIMD_LOOP
-                for (int shot = first; shot < last; ++shot) {
-                    const double n = invnorms[shot];
-                    dst_r[shot] = false_r[shot] * n;
-                    dst_i[shot] = false_i[shot] * n;
-                }
-            } else if (bits == live) {
-                SYMFT_BATCH_SIMD_LOOP
-                for (int shot = first; shot < last; ++shot) {
-                    const double n = invnorms[shot];
-                    dst_r[shot] = true_r[shot] * n;
-                    dst_i[shot] = true_i[shot] * n;
-                }
-            } else {
-                SYMFT_BATCH_SIMD_LOOP
-                for (int shot = first; shot < last; ++shot) {
-                    const bool branch = ((bits >> (shot - first)) & 1ULL) != 0;
-                    const double n = invnorms[shot];
-                    dst_r[shot] = (branch ? true_r[shot] : false_r[shot]) * n;
-                    dst_i[shot] = (branch ? true_i[shot] : false_i[shot]) * n;
-                }
-            }
-        }
-    }
-}
-
 void scalar_diagonal_measure_true_prob(
     const double* re,
     const double* im,
@@ -865,8 +797,6 @@ const KernelTable table = {
     scalar_rotate_general_xmask_const,
     scalar_rotate_general_xmask_mixed,
     scalar_promote_first_dormant_rotation,
-    scalar_last_z_measure_true_prob,
-    scalar_last_z_project,
     scalar_diagonal_measure_true_prob,
     scalar_diagonal_project,
     scalar_nondiagonal_measure_true_prob,

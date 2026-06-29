@@ -199,15 +199,6 @@ void promote_first_dormant_rotation_batch(
     BatchFactoredExecutorState& runtime,
     double theta,
     const std::vector<std::uint64_t>& sign_bits);
-void measure_active_last_z_batch(
-    BatchFactoredExecutorState& runtime,
-    int branch_condition,
-    const SymbolicBoolEvaluationPlan& outcome_plan,
-    std::optional<int> record,
-    std::optional<int> record_condition);
-void measure_active_last_z_branch_batch(
-    BatchFactoredExecutorState& runtime,
-    int branch_condition);
 void measure_precomputed_active_pauli_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,

@@ -95,14 +95,6 @@ inline int max_condition(const RecordDetector& instruction) {
     return instruction.outcome.max_condition();
 }
 
-inline int max_condition(const MeasureActiveLastZ& instruction) {
-    int out = std::max(instruction.branch, instruction.outcome.max_condition());
-    if (instruction.record_condition) {
-        out = std::max(out, *instruction.record_condition);
-    }
-    return out;
-}
-
 inline int max_condition(const MeasurePrecomputedActivePauli& instruction) {
     int out = std::max(instruction.branch, instruction.outcome.max_condition());
     if (instruction.record_condition) {

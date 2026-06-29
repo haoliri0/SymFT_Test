@@ -400,57 +400,6 @@ void sample_batch_measurement_branches_from_true(
     }
 }
 
-void measure_active_last_z_branch_batch(
-    BatchFactoredExecutorState& runtime,
-    int branch_condition) {
-    if (runtime.k <= 0) {
-        fail("cannot measure the last active qubit when k == 0");
-    }
-    const int new_k = runtime.k - 1;
-    const std::size_t dim = active_length(new_k);
-    batch_simd::scalar_table().last_z_measure_true_prob(
-        runtime.active_re.data(),
-        runtime.active_im.data(),
-        static_cast<std::size_t>(runtime.active_pitch),
-        runtime.active_shots,
-        dim,
-        runtime.branch_prob_true.data());
-    sample_batch_measurement_branches_from_true(
-        runtime,
-        runtime.eval_scratch,
-        runtime.branch_prob_true,
-        runtime.branch_invnorms);
-    const auto& branch_bits = runtime.eval_scratch;
-    batch_simd::scalar_table().last_z_project(
-        runtime.active_re.data(),
-        runtime.active_im.data(),
-        static_cast<std::size_t>(runtime.active_pitch),
-        runtime.active_shots,
-        dim,
-        branch_bits.data(),
-        runtime.branch_invnorms.data());
-    finish_active_measurement_branch(runtime, branch_condition, branch_bits);
-}
-
-void measure_active_last_z_batch(
-    BatchFactoredExecutorState& runtime,
-    int branch_condition,
-    const SymbolicBoolEvaluationPlan& outcome_plan,
-    std::optional<int> record,
-    std::optional<int> record_condition) {
-    measure_active_last_z_branch_batch(runtime, branch_condition);
-    if (write_direct_branch_measurement_record(
-            runtime,
-            branch_condition,
-            outcome_plan,
-            record,
-            record_condition)) {
-        return;
-    }
-    eval_symbolic_bool_batch(runtime.eval_scratch, outcome_plan, runtime);
-    write_batch_measurement_record(runtime, record, runtime.eval_scratch, record_condition);
-}
-
 void measure_diagonal_active_pauli_branch_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,

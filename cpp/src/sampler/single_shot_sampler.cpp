@@ -533,40 +533,6 @@ void rotate_pauli(FactoredExecutorState& runtime, const PrecomputedActivePauliRo
     }
 }
 
-double active_last_z_probability_one(const FactoredExecutorState& runtime) {
-    if (runtime.k <= 0) {
-        fail("cannot measure last active qubit when k == 0");
-    }
-    const std::size_t mask = std::size_t{1} << (runtime.k - 1);
-    const std::size_t dim = runtime_active_dim(runtime);
-    double probability = 0.0;
-    SYMFT_SINGLE_SIMD_LOOP
-    for (std::size_t basis = mask; basis < dim; ++basis) {
-        const double r = runtime.active_re[basis];
-        const double i = runtime.active_im[basis];
-        probability += r * r + i * i;
-    }
-    return std::clamp(probability, 0.0, 1.0);
-}
-
-void project_active_last_z(FactoredExecutorState& runtime, bool branch, double prob1) {
-    const int new_k = runtime.k - 1;
-    const std::size_t dim = active_length(new_k);
-    const double probability = branch ? prob1 : 1.0 - prob1;
-    if (probability <= 0.0) {
-        fail("sampled an impossible active measurement branch");
-    }
-    const double invnorm = 1.0 / std::sqrt(probability);
-    const std::size_t branch_offset = branch ? dim : 0;
-    SYMFT_SINGLE_SIMD_LOOP
-    for (std::size_t basis = 0; basis < dim; ++basis) {
-        const std::size_t source = branch_offset + basis;
-        runtime.active_re[basis] = runtime.active_re[source] * invnorm;
-        runtime.active_im[basis] = runtime.active_im[source] * invnorm;
-    }
-    runtime.k = new_k;
-}
-
 double active_diagonal_measurement_branch_probability(
     const FactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
@@ -713,16 +679,6 @@ void execute_instruction(FactoredExecutorState& runtime, const RecordDetector& i
     write_detector_record(runtime, instruction.detector, outcome);
 }
 
-void execute_instruction(FactoredExecutorState& runtime, const MeasureActiveLastZ& instruction) {
-    const double prob1 = active_last_z_probability_one(runtime);
-    const bool branch = sample_bernoulli(runtime.rng_state, prob1);
-    assign_symbol(runtime, instruction.branch, branch);
-    project_active_last_z(runtime, branch, prob1);
-    ++runtime.ndormant;
-    const bool outcome = eval_symbolic_bool_unchecked(instruction.outcome_plan, runtime);
-    write_measurement_record(runtime, instruction.record, outcome, instruction.record_condition);
-}
-
 void execute_instruction(FactoredExecutorState& runtime, const MeasurePrecomputedActivePauli& instruction) {
     if (runtime.k <= 0) {
         fail("cannot measure an active Pauli when k == 0");
@@ -788,20 +744,6 @@ void execute_instruction_presampled(
                              ? detector_outcome_from_runtime(runtime, instruction)
                              : evaluator.eval(instruction_index, runtime);
     write_detector_record(runtime, instruction.detector, outcome);
-}
-
-void execute_instruction_presampled(
-    FactoredExecutorState& runtime,
-    const MeasureActiveLastZ& instruction,
-    const SingleShotExpressionEvaluator& evaluator,
-    std::size_t instruction_index) {
-    const double prob1 = active_last_z_probability_one(runtime);
-    const bool branch = sample_bernoulli(runtime.rng_state, prob1);
-    assign_symbol(runtime, instruction.branch, branch);
-    project_active_last_z(runtime, branch, prob1);
-    ++runtime.ndormant;
-    const bool outcome = evaluator.eval(instruction_index, runtime);
-    write_measurement_record(runtime, instruction.record, outcome, instruction.record_condition);
 }
 
 void execute_instruction_presampled(

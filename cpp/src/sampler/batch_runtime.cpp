@@ -29,15 +29,6 @@ void execute_batch_instruction(BatchFactoredExecutorState& runtime, const Record
     write_batch_detector_record(runtime, instruction.detector, runtime.eval_scratch);
 }
 
-void execute_batch_instruction(BatchFactoredExecutorState& runtime, const MeasureActiveLastZ& instruction) {
-    measure_active_last_z_batch(
-        runtime,
-        instruction.branch,
-        instruction.outcome_plan,
-        instruction.record,
-        instruction.record_condition);
-}
-
 void execute_batch_instruction(BatchFactoredExecutorState& runtime, const MeasurePrecomputedActivePauli& instruction) {
     measure_precomputed_active_pauli_batch(
         runtime,
@@ -111,7 +102,6 @@ std::vector<int> condition_last_uses(const FactoredInstructionProgram& program) 
                     }
                 } else if constexpr (
                     std::is_same_v<T, RecordMeasurement> ||
-                    std::is_same_v<T, MeasureActiveLastZ> ||
                     std::is_same_v<T, MeasurePrecomputedActivePauli> ||
                     std::is_same_v<T, IntroduceDormantMeasurementBranch>) {
                     mark_condition_uses(last_use, inst.outcome_plan, instruction_index);
@@ -223,10 +213,6 @@ bool instruction_is_pure_over_dead(const RecordDetector&) {
     return true;
 }
 
-bool instruction_is_pure_over_dead(const MeasureActiveLastZ&) {
-    return false;
-}
-
 bool instruction_is_pure_over_dead(const MeasurePrecomputedActivePauli&) {
     return false;
 }
@@ -253,10 +239,6 @@ bool instruction_is_expensive_over_dead(const RecordMeasurement&) {
 
 bool instruction_is_expensive_over_dead(const RecordDetector&) {
     return false;
-}
-
-bool instruction_is_expensive_over_dead(const MeasureActiveLastZ&) {
-    return true;
 }
 
 bool instruction_is_expensive_over_dead(const MeasurePrecomputedActivePauli&) {
@@ -894,24 +876,6 @@ int execute_batch_instruction_postselected(
                                    ? detector_record_outcome_bits(runtime, instruction, runtime.eval_scratch)
                                    : evaluator.eval(instruction_index, runtime);
     return mark_dead_from_detector_bits(runtime, outcome_bits, scratch);
-}
-
-void execute_batch_instruction_presampled(
-    BatchFactoredExecutorState& runtime,
-    const MeasureActiveLastZ& instruction,
-    const BatchExpressionEvaluator& evaluator,
-    std::size_t instruction_index) {
-    measure_active_last_z_branch_batch(runtime, instruction.branch);
-    if (write_direct_branch_measurement_record(
-            runtime,
-            instruction.branch,
-            instruction.outcome_plan,
-            instruction.record,
-            instruction.record_condition)) {
-        return;
-    }
-    const auto& outcome_bits = evaluator.eval(instruction_index, runtime);
-    write_batch_measurement_record(runtime, instruction.record, outcome_bits, instruction.record_condition);
 }
 
 void execute_batch_instruction_presampled(

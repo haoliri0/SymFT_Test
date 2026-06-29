@@ -599,10 +599,6 @@ void refresh_instruction_plans(RecordDetector& instruction) {
     instruction.outcome_plan = SymbolicBoolEvaluationPlan(instruction.outcome);
 }
 
-void refresh_instruction_plans(MeasureActiveLastZ& instruction) {
-    instruction.outcome_plan = SymbolicBoolEvaluationPlan(instruction.outcome);
-}
-
 void refresh_instruction_plans(MeasurePrecomputedActivePauli& instruction) {
     instruction.outcome_plan = SymbolicBoolEvaluationPlan(instruction.outcome);
 }

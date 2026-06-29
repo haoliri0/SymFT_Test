@@ -136,23 +136,6 @@ struct KernelTable {
         double c,
         const double* q_by_shot);
 
-    void (*last_z_measure_true_prob)(
-        const double* re,
-        const double* im,
-        std::size_t leading_shots,
-        int active_shots,
-        std::size_t dim,
-        double* prob_true);
-
-    void (*last_z_project)(
-        double* re,
-        double* im,
-        std::size_t leading_shots,
-        int active_shots,
-        std::size_t dim,
-        const std::uint64_t* branch_bits,
-        const double* invnorms);
-
     void (*diagonal_measure_true_prob)(
         const double* re,
         const double* im,

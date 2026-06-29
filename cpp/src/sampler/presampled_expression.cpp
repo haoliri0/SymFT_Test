@@ -72,10 +72,6 @@ const SymbolicBoolEvaluationPlan* instruction_expression_plan(const RecordDetect
     return &instruction.outcome_plan;
 }
 
-const SymbolicBoolEvaluationPlan* instruction_expression_plan(const MeasureActiveLastZ& instruction) {
-    return &instruction.outcome_plan;
-}
-
 const SymbolicBoolEvaluationPlan* instruction_expression_plan(const MeasurePrecomputedActivePauli& instruction) {
     return &instruction.outcome_plan;
 }

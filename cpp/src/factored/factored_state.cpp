@@ -47,11 +47,6 @@ bool operator==(const RecordDetector& lhs, const RecordDetector& rhs) {
     return lhs.outcome == rhs.outcome && lhs.records == rhs.records && lhs.detector == rhs.detector;
 }
 
-bool operator==(const MeasureActiveLastZ& lhs, const MeasureActiveLastZ& rhs) {
-    return lhs.branch == rhs.branch && lhs.outcome == rhs.outcome && optional_equal(lhs.record, rhs.record) &&
-           optional_equal(lhs.record_condition, rhs.record_condition);
-}
-
 bool operator==(const MeasurePrecomputedActivePauli& lhs, const MeasurePrecomputedActivePauli& rhs) {
     return lhs.pauli == rhs.pauli && lhs.branch == rhs.branch && lhs.outcome == rhs.outcome &&
            optional_equal(lhs.record, rhs.record) && optional_equal(lhs.record_condition, rhs.record_condition);
