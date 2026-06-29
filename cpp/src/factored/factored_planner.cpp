@@ -115,23 +115,15 @@ SymbolicBool reduce_by_relations(SymbolicBool expr, const std::vector<SymbolicBo
     return expr;
 }
 
-PendingPauliRotation reduce_operation_sign_by_relation(
-    const PendingPauliRotation& operation,
-    const SymbolicBool& relation) {
-    return PendingPauliRotation{
-        operation.theta,
-        SymbolicPauliString(operation.pauli.pauli, reduce_by_relation_once(operation.pauli.sign, relation)),
-    };
+SymbolicBool measurement_relation(int record_condition, const SymbolicBool& outcome) {
+    return xor_bool(symbolic_bool(record_condition), outcome);
 }
 
-PendingPauliMeasurement reduce_operation_sign_by_relation(
-    const PendingPauliMeasurement& operation,
-    const SymbolicBool& relation) {
-    return PendingPauliMeasurement{
-        SymbolicPauliString(operation.pauli.pauli, reduce_by_relation_once(operation.pauli.sign, relation)),
-        operation.record,
-        operation.record_condition,
-    };
+template <typename Operation>
+Operation reduce_pending_operation_sign(const Operation& operation, const SymbolicBool& relation) {
+    Operation out = operation;
+    out.pauli.sign = reduce_by_relation_once(out.pauli.sign, relation);
+    return out;
 }
 
 void push_symbolic_pauli_through_pending_from(
@@ -148,7 +140,7 @@ void push_symbolic_pauli_through_pending_from(
     }
 }
 
-void reduce_measurement_relation_through_pending_from(
+void reduce_pending_signs_by_measurement_relation(
     PendingFactoredState& state,
     int first_index_one_based,
     std::optional<int> record_condition,
@@ -156,13 +148,13 @@ void reduce_measurement_relation_through_pending_from(
     if (!record_condition) {
         return;
     }
-    const SymbolicBool relation = xor_bool(symbolic_bool(*record_condition), outcome);
+    const SymbolicBool relation = measurement_relation(*record_condition, outcome);
     state.context->bump_next_condition(relation);
     const std::size_t start = first_index_one_based <= 1 ? 0 : static_cast<std::size_t>(first_index_one_based - 1);
     for (std::size_t idx = start; idx < state.pending_operations.size(); ++idx) {
         state.pending_operations[idx] = std::visit(
             [&](const auto& op) -> PendingOperation {
-                return reduce_operation_sign_by_relation(op, relation);
+                return reduce_pending_operation_sign(op, relation);
             },
             state.pending_operations[idx]);
     }
@@ -310,7 +302,7 @@ std::optional<FactoredInstruction> record_deterministic_measurement(
             measurement.record_condition,
             SymbolicBoolEvaluationPlan(outcome),
         });
-    reduce_measurement_relation_through_pending_from(
+    reduce_pending_signs_by_measurement_relation(
         state,
         queued_first ? 2 : 1,
         measurement.record_condition,
@@ -376,7 +368,7 @@ std::optional<FactoredInstruction> measure_dormant_xy_pauli(
             current.record_condition,
             SymbolicBoolEvaluationPlan(outcome),
         });
-    reduce_measurement_relation_through_pending_from(
+    reduce_pending_signs_by_measurement_relation(
         state,
         queued_first ? 2 : 1,
         current.record_condition,
@@ -479,7 +471,7 @@ std::optional<FactoredInstruction> measure_active_pauli_branches(
         SymbolicBoolEvaluationPlan(outcome),
     };
     FactoredInstruction pushed = push_instruction(state, instruction);
-    reduce_measurement_relation_through_pending_from(
+    reduce_pending_signs_by_measurement_relation(
         state,
         queued_first ? 2 : 1,
         current.record_condition,
@@ -566,7 +558,7 @@ template <typename T>
 std::optional<SymbolicBool> measurement_relation_from_instruction(const T& instruction) {
     if constexpr (requires { instruction.record_condition; instruction.outcome; }) {
         if (instruction.record_condition) {
-            return xor_bool(symbolic_bool(*instruction.record_condition), instruction.outcome);
+            return measurement_relation(*instruction.record_condition, instruction.outcome);
         }
     }
     return std::nullopt;
