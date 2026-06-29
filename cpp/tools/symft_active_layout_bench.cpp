@@ -88,6 +88,34 @@ symft::PauliString general_pauli(int k, int pair_bit, bool noncontiguous) {
     return pauli;
 }
 
+symft::PauliString uniform_pauli_with_lower_mask(int k, int pair_bit, std::uint64_t lower_mask) {
+    symft::PauliString pauli(k);
+    pauli.set_xbit(pair_bit);
+    for (int bit = 0; bit < pair_bit; ++bit) {
+        if ((lower_mask & (std::uint64_t{1} << bit)) != 0) {
+            pauli.set_xbit(bit);
+        }
+    }
+    return pauli;
+}
+
+symft::PauliString real_pauli_with_lower_mask(int k, int pair_bit, std::uint64_t lower_mask) {
+    symft::PauliString pauli = uniform_pauli_with_lower_mask(k, pair_bit, lower_mask);
+    pauli.set_zbit(pair_bit);
+    pauli.set_phase(1);
+    return pauli;
+}
+
+symft::PauliString general_pauli_with_lower_mask(int k, int pair_bit, std::uint64_t lower_mask) {
+    symft::PauliString pauli = uniform_pauli_with_lower_mask(k, pair_bit, lower_mask);
+    int zbit = 0;
+    while (zbit == pair_bit || (lower_mask & (std::uint64_t{1} << zbit)) != 0) {
+        ++zbit;
+    }
+    pauli.set_zbit(zbit);
+    return pauli;
+}
+
 std::vector<Complex> initial_alpha(int k) {
     const std::size_t dim = active_dim(k);
     std::vector<Complex> alpha(dim);
@@ -429,6 +457,30 @@ std::vector<BenchCase> make_cases(int k) {
         cases.push_back(
             {"general_p" + std::to_string(pair_bit) + "_noncontig",
              symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(general_pauli(k, pair_bit, true)), kPi / 8.0)});
+    }
+    if (k >= 8) {
+        std::vector<int> stress_pair_bits = {std::min(5, k - 1), k - 1};
+        std::sort(stress_pair_bits.begin(), stress_pair_bits.end());
+        stress_pair_bits.erase(std::unique(stress_pair_bits.begin(), stress_pair_bits.end()), stress_pair_bits.end());
+        for (const int pair_bit : stress_pair_bits) {
+            for (std::uint64_t lower_mask = 1; lower_mask <= 3; ++lower_mask) {
+                cases.push_back(
+                    {"uniform_p" + std::to_string(pair_bit) + "_low" + std::to_string(lower_mask),
+                     symft::PrecomputedActivePauliRotationKernel(
+                         symft::ActivePauliAction(uniform_pauli_with_lower_mask(k, pair_bit, lower_mask)),
+                         kPi / 8.0)});
+                cases.push_back(
+                    {"real_p" + std::to_string(pair_bit) + "_low" + std::to_string(lower_mask),
+                     symft::PrecomputedActivePauliRotationKernel(
+                         symft::ActivePauliAction(real_pauli_with_lower_mask(k, pair_bit, lower_mask)),
+                         kPi / 8.0)});
+                cases.push_back(
+                    {"general_p" + std::to_string(pair_bit) + "_low" + std::to_string(lower_mask),
+                     symft::PrecomputedActivePauliRotationKernel(
+                         symft::ActivePauliAction(general_pauli_with_lower_mask(k, pair_bit, lower_mask)),
+                         kPi / 8.0)});
+            }
+        }
     }
     return cases;
 }

@@ -78,6 +78,49 @@ void scatter_pair8(double* values, std::size_t i0, std::uint64_t xmask, __m512d 
     _mm512_i64scatter_pd(values, pair_indices8(i0, xmask), lanes, 8);
 }
 
+__m512d permute_pair_bit0(__m512d lanes) {
+    const __m512i indices = _mm512_set_epi64(6, 7, 4, 5, 2, 3, 0, 1);
+    return _mm512_permutexvar_pd(indices, lanes);
+}
+
+__m512d permute_pair_bit1(__m512d lanes, std::uint64_t xmask) {
+    if (xmask == 2) {
+        const __m512i indices = _mm512_set_epi64(5, 4, 7, 6, 1, 0, 3, 2);
+        return _mm512_permutexvar_pd(indices, lanes);
+    }
+    const __m512i indices = _mm512_set_epi64(4, 5, 6, 7, 0, 1, 2, 3);
+    return _mm512_permutexvar_pd(indices, lanes);
+}
+
+__m512d permute_lanes_xor3(__m512d lanes, std::size_t mask) {
+    switch (mask & std::size_t{7}) {
+    case 0:
+        return lanes;
+    case 1:
+        return permute_pair_bit0(lanes);
+    case 2:
+        return permute_pair_bit1(lanes, 2);
+    case 3:
+        return permute_pair_bit1(lanes, 3);
+    case 4: {
+        const __m512i indices = _mm512_set_epi64(3, 2, 1, 0, 7, 6, 5, 4);
+        return _mm512_permutexvar_pd(indices, lanes);
+    }
+    case 5: {
+        const __m512i indices = _mm512_set_epi64(2, 3, 0, 1, 6, 7, 4, 5);
+        return _mm512_permutexvar_pd(indices, lanes);
+    }
+    case 6: {
+        const __m512i indices = _mm512_set_epi64(1, 0, 3, 2, 5, 4, 7, 6);
+        return _mm512_permutexvar_pd(indices, lanes);
+    }
+    default: {
+        const __m512i indices = _mm512_set_epi64(0, 1, 2, 3, 4, 5, 6, 7);
+        return _mm512_permutexvar_pd(indices, lanes);
+    }
+    }
+}
+
 __m512i complex_indices8(std::size_t pair_idx, int component) {
     const std::size_t base = pair_idx << 1;
     return _mm512_set_epi64(
@@ -118,6 +161,49 @@ void avx512_rotate_uniform_imag_pairs_soa(
     const std::size_t xor_run = xor_contiguous_run(lower_mask, selector);
     const __m512d vc = _mm512_set1_pd(c);
     const __m512d vq = _mm512_set1_pd(q);
+    if (selector == 1 && xmask == 1 && dim >= 8) {
+        for (std::size_t basis = 0; basis + 8 <= dim; basis += 8) {
+            const __m512d r = _mm512_loadu_pd(re + basis);
+            const __m512d v = _mm512_loadu_pd(im + basis);
+            const __m512d swapped_r = permute_pair_bit0(r);
+            const __m512d swapped_v = permute_pair_bit0(v);
+            _mm512_storeu_pd(re + basis, _mm512_fnmadd_pd(vq, swapped_v, _mm512_mul_pd(vc, r)));
+            _mm512_storeu_pd(im + basis, _mm512_fmadd_pd(vq, swapped_r, _mm512_mul_pd(vc, v)));
+        }
+        return;
+    }
+    if (pair_bit == 1 && (xmask == 2 || xmask == 3) && dim >= 8) {
+        for (std::size_t basis = 0; basis + 8 <= dim; basis += 8) {
+            const __m512d r = _mm512_loadu_pd(re + basis);
+            const __m512d v = _mm512_loadu_pd(im + basis);
+            const __m512d swapped_r = permute_pair_bit1(r, xmask);
+            const __m512d swapped_v = permute_pair_bit1(v, xmask);
+            _mm512_storeu_pd(re + basis, _mm512_fnmadd_pd(vq, swapped_v, _mm512_mul_pd(vc, r)));
+            _mm512_storeu_pd(im + basis, _mm512_fmadd_pd(vq, swapped_r, _mm512_mul_pd(vc, v)));
+        }
+        return;
+    }
+    if (pair_bit >= 3 && dim >= 8) {
+        const std::size_t lane_mask = lower_mask & std::size_t{7};
+        const std::size_t chunk_mask = lower_mask & ~std::size_t{7};
+        for (std::size_t block = 0; block < dim; block += step) {
+            for (std::size_t offset = 0; offset < selector; offset += 8) {
+                const std::size_t i0 = block + offset;
+                const std::size_t i1 = block + selector + (offset ^ chunk_mask);
+                const __m512d r0 = _mm512_loadu_pd(re + i0);
+                const __m512d im0 = _mm512_loadu_pd(im + i0);
+                const __m512d r1 = permute_lanes_xor3(_mm512_loadu_pd(re + i1), lane_mask);
+                const __m512d im1 = permute_lanes_xor3(_mm512_loadu_pd(im + i1), lane_mask);
+                _mm512_storeu_pd(re + i0, _mm512_fnmadd_pd(vq, im1, _mm512_mul_pd(vc, r0)));
+                _mm512_storeu_pd(im + i0, _mm512_fmadd_pd(vq, r1, _mm512_mul_pd(vc, im0)));
+                const __m512d out_r1 = _mm512_fnmadd_pd(vq, im0, _mm512_mul_pd(vc, r1));
+                const __m512d out_im1 = _mm512_fmadd_pd(vq, r0, _mm512_mul_pd(vc, im1));
+                _mm512_storeu_pd(re + i1, permute_lanes_xor3(out_r1, lane_mask));
+                _mm512_storeu_pd(im + i1, permute_lanes_xor3(out_im1, lane_mask));
+            }
+        }
+        return;
+    }
     for (std::size_t block = 0; block < dim; block += step) {
         std::size_t offset = 0;
         if (contiguous_partner) {
@@ -198,6 +284,67 @@ void avx512_rotate_real_pair_flip_soa(
     const std::size_t xor_run = xor_contiguous_run(lower_mask, selector);
     const __m512d vc = _mm512_set1_pd(c);
     const __m512d vbase = _mm512_set1_pd(base_coeff);
+    if (selector == 1 && xmask == 1 && dim >= 8) {
+        for (std::size_t basis = 0; basis + 8 <= dim; basis += 8) {
+            const std::size_t idx = basis >> 1;
+            const double q0 = phase_signs[idx] * base_coeff;
+            const double q1 = phase_signs[idx + 1] * base_coeff;
+            const double q2 = phase_signs[idx + 2] * base_coeff;
+            const double q3 = phase_signs[idx + 3] * base_coeff;
+            const __m512d signed_q = _mm512_set_pd(q3, -q3, q2, -q2, q1, -q1, q0, -q0);
+            const __m512d r = _mm512_loadu_pd(re + basis);
+            const __m512d v = _mm512_loadu_pd(im + basis);
+            const __m512d swapped_r = permute_pair_bit0(r);
+            const __m512d swapped_v = permute_pair_bit0(v);
+            _mm512_storeu_pd(re + basis, _mm512_fmadd_pd(signed_q, swapped_r, _mm512_mul_pd(vc, r)));
+            _mm512_storeu_pd(im + basis, _mm512_fmadd_pd(signed_q, swapped_v, _mm512_mul_pd(vc, v)));
+        }
+        return;
+    }
+    if (pair_bit == 1 && (xmask == 2 || xmask == 3) && dim >= 8) {
+        std::size_t pair_idx = 0;
+        for (std::size_t basis = 0; basis + 8 <= dim; basis += 8) {
+            const double q0 = phase_signs[pair_idx] * base_coeff;
+            const double q1 = phase_signs[pair_idx + 1] * base_coeff;
+            const double q2 = phase_signs[pair_idx + 2] * base_coeff;
+            const double q3 = phase_signs[pair_idx + 3] * base_coeff;
+            const __m512d signed_q = xmask == 2
+                                          ? _mm512_set_pd(q3, q2, -q3, -q2, q1, q0, -q1, -q0)
+                                          : _mm512_set_pd(q2, q3, -q3, -q2, q0, q1, -q1, -q0);
+            const __m512d r = _mm512_loadu_pd(re + basis);
+            const __m512d v = _mm512_loadu_pd(im + basis);
+            const __m512d swapped_r = permute_pair_bit1(r, xmask);
+            const __m512d swapped_v = permute_pair_bit1(v, xmask);
+            _mm512_storeu_pd(re + basis, _mm512_fmadd_pd(signed_q, swapped_r, _mm512_mul_pd(vc, r)));
+            _mm512_storeu_pd(im + basis, _mm512_fmadd_pd(signed_q, swapped_v, _mm512_mul_pd(vc, v)));
+            pair_idx += 4;
+        }
+        return;
+    }
+    if (pair_bit >= 3 && dim >= 8) {
+        const std::size_t lane_mask = lower_mask & std::size_t{7};
+        const std::size_t chunk_mask = lower_mask & ~std::size_t{7};
+        std::size_t pair_idx = 0;
+        for (std::size_t block = 0; block < dim; block += step) {
+            for (std::size_t offset = 0; offset < selector; offset += 8) {
+                const std::size_t i0 = block + offset;
+                const std::size_t i1 = block + selector + (offset ^ chunk_mask);
+                const __m512d q = _mm512_mul_pd(_mm512_loadu_pd(phase_signs + pair_idx), vbase);
+                const __m512d r0 = _mm512_loadu_pd(re + i0);
+                const __m512d im0 = _mm512_loadu_pd(im + i0);
+                const __m512d r1 = permute_lanes_xor3(_mm512_loadu_pd(re + i1), lane_mask);
+                const __m512d im1 = permute_lanes_xor3(_mm512_loadu_pd(im + i1), lane_mask);
+                _mm512_storeu_pd(re + i0, _mm512_fnmadd_pd(q, r1, _mm512_mul_pd(vc, r0)));
+                _mm512_storeu_pd(im + i0, _mm512_fnmadd_pd(q, im1, _mm512_mul_pd(vc, im0)));
+                const __m512d out_r1 = _mm512_fmadd_pd(q, r0, _mm512_mul_pd(vc, r1));
+                const __m512d out_im1 = _mm512_fmadd_pd(q, im0, _mm512_mul_pd(vc, im1));
+                _mm512_storeu_pd(re + i1, permute_lanes_xor3(out_r1, lane_mask));
+                _mm512_storeu_pd(im + i1, permute_lanes_xor3(out_im1, lane_mask));
+                pair_idx += 8;
+            }
+        }
+        return;
+    }
     std::size_t pair_idx = 0;
     for (std::size_t block = 0; block < dim; block += step) {
         std::size_t offset = 0;
@@ -287,6 +434,128 @@ void avx512_rotate_general_pairs_soa(
     const bool contiguous_partner = lower_mask == 0;
     const std::size_t xor_run = xor_contiguous_run(lower_mask, selector);
     const __m512d vc = _mm512_set1_pd(c);
+    if (selector == 1 && xmask == 1 && dim >= 8) {
+        for (std::size_t basis = 0; basis + 8 <= dim; basis += 8) {
+            const std::size_t pair_idx = basis >> 1;
+            const __m512d coeff_r = _mm512_set_pd(
+                left[2 * (pair_idx + 3)],
+                right[2 * (pair_idx + 3)],
+                left[2 * (pair_idx + 2)],
+                right[2 * (pair_idx + 2)],
+                left[2 * (pair_idx + 1)],
+                right[2 * (pair_idx + 1)],
+                left[2 * pair_idx],
+                right[2 * pair_idx]);
+            const __m512d coeff_i = _mm512_set_pd(
+                left[2 * (pair_idx + 3) + 1],
+                right[2 * (pair_idx + 3) + 1],
+                left[2 * (pair_idx + 2) + 1],
+                right[2 * (pair_idx + 2) + 1],
+                left[2 * (pair_idx + 1) + 1],
+                right[2 * (pair_idx + 1) + 1],
+                left[2 * pair_idx + 1],
+                right[2 * pair_idx + 1]);
+            const __m512d r = _mm512_loadu_pd(re + basis);
+            const __m512d v = _mm512_loadu_pd(im + basis);
+            const __m512d swapped_r = permute_pair_bit0(r);
+            const __m512d swapped_v = permute_pair_bit0(v);
+            __m512d out_r = _mm512_fmadd_pd(vc, r, _mm512_mul_pd(coeff_r, swapped_r));
+            out_r = _mm512_fnmadd_pd(coeff_i, swapped_v, out_r);
+            __m512d out_i = _mm512_fmadd_pd(vc, v, _mm512_mul_pd(coeff_r, swapped_v));
+            out_i = _mm512_fmadd_pd(coeff_i, swapped_r, out_i);
+            _mm512_storeu_pd(re + basis, out_r);
+            _mm512_storeu_pd(im + basis, out_i);
+        }
+        return;
+    }
+    if (pair_bit == 1 && (xmask == 2 || xmask == 3) && dim >= 8) {
+        std::size_t pair_idx = 0;
+        for (std::size_t basis = 0; basis + 8 <= dim; basis += 8) {
+            const __m512d coeff_r = xmask == 2
+                                        ? _mm512_set_pd(
+                                              left[2 * (pair_idx + 3)],
+                                              left[2 * (pair_idx + 2)],
+                                              right[2 * (pair_idx + 3)],
+                                              right[2 * (pair_idx + 2)],
+                                              left[2 * (pair_idx + 1)],
+                                              left[2 * pair_idx],
+                                              right[2 * (pair_idx + 1)],
+                                              right[2 * pair_idx])
+                                        : _mm512_set_pd(
+                                              left[2 * (pair_idx + 2)],
+                                              left[2 * (pair_idx + 3)],
+                                              right[2 * (pair_idx + 3)],
+                                              right[2 * (pair_idx + 2)],
+                                              left[2 * pair_idx],
+                                              left[2 * (pair_idx + 1)],
+                                              right[2 * (pair_idx + 1)],
+                                              right[2 * pair_idx]);
+            const __m512d coeff_i = xmask == 2
+                                        ? _mm512_set_pd(
+                                              left[2 * (pair_idx + 3) + 1],
+                                              left[2 * (pair_idx + 2) + 1],
+                                              right[2 * (pair_idx + 3) + 1],
+                                              right[2 * (pair_idx + 2) + 1],
+                                              left[2 * (pair_idx + 1) + 1],
+                                              left[2 * pair_idx + 1],
+                                              right[2 * (pair_idx + 1) + 1],
+                                              right[2 * pair_idx + 1])
+                                        : _mm512_set_pd(
+                                              left[2 * (pair_idx + 2) + 1],
+                                              left[2 * (pair_idx + 3) + 1],
+                                              right[2 * (pair_idx + 3) + 1],
+                                              right[2 * (pair_idx + 2) + 1],
+                                              left[2 * pair_idx + 1],
+                                              left[2 * (pair_idx + 1) + 1],
+                                              right[2 * (pair_idx + 1) + 1],
+                                              right[2 * pair_idx + 1]);
+            const __m512d r = _mm512_loadu_pd(re + basis);
+            const __m512d v = _mm512_loadu_pd(im + basis);
+            const __m512d swapped_r = permute_pair_bit1(r, xmask);
+            const __m512d swapped_v = permute_pair_bit1(v, xmask);
+            __m512d out_r = _mm512_fmadd_pd(vc, r, _mm512_mul_pd(coeff_r, swapped_r));
+            out_r = _mm512_fnmadd_pd(coeff_i, swapped_v, out_r);
+            __m512d out_i = _mm512_fmadd_pd(vc, v, _mm512_mul_pd(coeff_r, swapped_v));
+            out_i = _mm512_fmadd_pd(coeff_i, swapped_r, out_i);
+            _mm512_storeu_pd(re + basis, out_r);
+            _mm512_storeu_pd(im + basis, out_i);
+            pair_idx += 4;
+        }
+        return;
+    }
+    if (pair_bit >= 3 && dim >= 8) {
+        const std::size_t lane_mask = lower_mask & std::size_t{7};
+        const std::size_t chunk_mask = lower_mask & ~std::size_t{7};
+        std::size_t pair_idx = 0;
+        for (std::size_t block = 0; block < dim; block += step) {
+            for (std::size_t offset = 0; offset < selector; offset += 8) {
+                const std::size_t i0 = block + offset;
+                const std::size_t i1 = block + selector + (offset ^ chunk_mask);
+                const __m512d r0 = _mm512_loadu_pd(re + i0);
+                const __m512d im0 = _mm512_loadu_pd(im + i0);
+                const __m512d r1 = permute_lanes_xor3(_mm512_loadu_pd(re + i1), lane_mask);
+                const __m512d im1 = permute_lanes_xor3(_mm512_loadu_pd(im + i1), lane_mask);
+                const __m512d lr = load_complex_re8(left, pair_idx);
+                const __m512d li = load_complex_im8(left, pair_idx);
+                const __m512d rr = load_complex_re8(right, pair_idx);
+                const __m512d ri = load_complex_im8(right, pair_idx);
+                __m512d out_r0 = _mm512_fmadd_pd(vc, r0, _mm512_mul_pd(rr, r1));
+                out_r0 = _mm512_fnmadd_pd(ri, im1, out_r0);
+                __m512d out_i0 = _mm512_fmadd_pd(vc, im0, _mm512_mul_pd(rr, im1));
+                out_i0 = _mm512_fmadd_pd(ri, r1, out_i0);
+                __m512d out_r1 = _mm512_fmadd_pd(vc, r1, _mm512_mul_pd(lr, r0));
+                out_r1 = _mm512_fnmadd_pd(li, im0, out_r1);
+                __m512d out_i1 = _mm512_fmadd_pd(vc, im1, _mm512_mul_pd(lr, im0));
+                out_i1 = _mm512_fmadd_pd(li, r0, out_i1);
+                _mm512_storeu_pd(re + i0, out_r0);
+                _mm512_storeu_pd(im + i0, out_i0);
+                _mm512_storeu_pd(re + i1, permute_lanes_xor3(out_r1, lane_mask));
+                _mm512_storeu_pd(im + i1, permute_lanes_xor3(out_i1, lane_mask));
+                pair_idx += 8;
+            }
+        }
+        return;
+    }
     std::size_t pair_idx = 0;
     for (std::size_t block = 0; block < dim; block += step) {
         std::size_t offset = 0;

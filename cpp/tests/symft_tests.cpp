@@ -101,6 +101,30 @@ void check_high_pivot_single_rotation_kernel(const symft::PauliString& pauli, do
     }
 }
 
+symft::PauliString uniform_xmask_pauli(int k, int pivot, std::uint64_t lower_mask) {
+    symft::PauliString pauli(k);
+    pauli.set_xbit(pivot);
+    for (int bit = 0; bit < pivot; ++bit) {
+        if ((lower_mask & (std::uint64_t{1} << bit)) != 0) {
+            pauli.set_xbit(bit);
+        }
+    }
+    return pauli;
+}
+
+symft::PauliString real_xmask_pauli(int k, int pivot, std::uint64_t lower_mask) {
+    symft::PauliString pauli = uniform_xmask_pauli(k, pivot, lower_mask);
+    pauli.set_zbit(pivot);
+    pauli.set_phase(1);
+    return pauli;
+}
+
+symft::PauliString general_xmask_pauli(int k, int pivot, std::uint64_t lower_mask) {
+    symft::PauliString pauli = uniform_xmask_pauli(k, pivot, lower_mask);
+    pauli.set_zbit(pivot - 1);
+    return pauli;
+}
+
 void check_high_pivot_batch_rotation_kernel(const symft::PauliString& pauli, double theta, int k, bool mixed_signs) {
     using namespace symft;
     constexpr int shots = 5;
@@ -296,6 +320,15 @@ void test_high_pivot_rotation_kernels() {
     check_high_pivot_single_rotation_kernel(uniform_large, theta, large_k);
     check_high_pivot_single_rotation_kernel(real_large, theta, large_k);
     check_high_pivot_single_rotation_kernel(general_large, theta, large_k);
+
+    for (const std::uint64_t lower_mask : {std::uint64_t{1}, std::uint64_t{2}, std::uint64_t{3}}) {
+        check_high_pivot_single_rotation_kernel(uniform_xmask_pauli(8, 7, lower_mask), theta, 8);
+        check_high_pivot_single_rotation_kernel(real_xmask_pauli(8, 7, lower_mask), theta, 8);
+        check_high_pivot_single_rotation_kernel(general_xmask_pauli(8, 7, lower_mask), theta, 8);
+        check_high_pivot_single_rotation_kernel(uniform_xmask_pauli(large_k, large_k - 1, lower_mask), theta, large_k);
+        check_high_pivot_single_rotation_kernel(real_xmask_pauli(large_k, large_k - 1, lower_mask), theta, large_k);
+        check_high_pivot_single_rotation_kernel(general_xmask_pauli(large_k, large_k - 1, lower_mask), theta, large_k);
+    }
 
     check_high_pivot_batch_rotation_kernel(uniform_large, theta, large_k, false);
     check_high_pivot_batch_rotation_kernel(uniform_large, theta, large_k, true);

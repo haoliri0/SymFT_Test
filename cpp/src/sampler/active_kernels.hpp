@@ -102,6 +102,23 @@ inline void scatter_pair4_inline(double* values, std::size_t i0, std::uint64_t x
     values[(i0 + 2) ^ mask] = tmp[2];
     values[(i0 + 3) ^ mask] = tmp[3];
 }
+
+inline __m256d permute_pair_bit1_inline(__m256d lanes, std::uint64_t xmask) {
+    return xmask == 2 ? _mm256_permute4x64_pd(lanes, 0x4e) : _mm256_permute4x64_pd(lanes, 0x1b);
+}
+
+inline __m256d permute_lanes_xor2_inline(__m256d lanes, std::size_t mask) {
+    switch (mask & std::size_t{3}) {
+    case 0:
+        return lanes;
+    case 1:
+        return _mm256_permute_pd(lanes, 0b0101);
+    case 2:
+        return _mm256_permute4x64_pd(lanes, 0x4e);
+    default:
+        return _mm256_permute4x64_pd(lanes, 0x1b);
+    }
+}
 #endif
 
 inline std::size_t xor_contiguous_run(std::size_t lower_mask, std::size_t selector) {
@@ -180,6 +197,38 @@ inline void rotate_uniform_imag_pairs_soa_inline(
             im[basis] = c * im0 + q * r1;
             re[basis + 1] = c * r1 - q * im0;
             im[basis + 1] = c * im1 + q * r0;
+        }
+        return;
+    }
+    if (pair_bit == 1 && (xmask == 2 || xmask == 3) && dim >= 4) {
+        for (std::size_t basis = 0; basis + 4 <= dim; basis += 4) {
+            const __m256d r = _mm256_loadu_pd(re + basis);
+            const __m256d v = _mm256_loadu_pd(im + basis);
+            const __m256d swapped_r = permute_pair_bit1_inline(r, xmask);
+            const __m256d swapped_v = permute_pair_bit1_inline(v, xmask);
+            _mm256_storeu_pd(re + basis, _mm256_fnmadd_pd(vq, swapped_v, _mm256_mul_pd(vc, r)));
+            _mm256_storeu_pd(im + basis, _mm256_fmadd_pd(vq, swapped_r, _mm256_mul_pd(vc, v)));
+        }
+        return;
+    }
+    if (pair_bit >= 2 && dim >= 4) {
+        const std::size_t lane_mask = lower_mask & std::size_t{3};
+        const std::size_t chunk_mask = lower_mask & ~std::size_t{3};
+        for (std::size_t block = 0; block < dim; block += step) {
+            for (std::size_t offset = 0; offset < selector; offset += 4) {
+                const std::size_t i0 = block + offset;
+                const std::size_t i1 = block + selector + (offset ^ chunk_mask);
+                const __m256d r0 = _mm256_loadu_pd(re + i0);
+                const __m256d im0 = _mm256_loadu_pd(im + i0);
+                const __m256d r1 = permute_lanes_xor2_inline(_mm256_loadu_pd(re + i1), lane_mask);
+                const __m256d im1 = permute_lanes_xor2_inline(_mm256_loadu_pd(im + i1), lane_mask);
+                _mm256_storeu_pd(re + i0, _mm256_fnmadd_pd(vq, im1, _mm256_mul_pd(vc, r0)));
+                _mm256_storeu_pd(im + i0, _mm256_fmadd_pd(vq, r1, _mm256_mul_pd(vc, im0)));
+                const __m256d out_r1 = _mm256_fnmadd_pd(vq, im0, _mm256_mul_pd(vc, r1));
+                const __m256d out_im1 = _mm256_fmadd_pd(vq, r0, _mm256_mul_pd(vc, im1));
+                _mm256_storeu_pd(re + i1, permute_lanes_xor2_inline(out_r1, lane_mask));
+                _mm256_storeu_pd(im + i1, permute_lanes_xor2_inline(out_im1, lane_mask));
+            }
         }
         return;
     }
@@ -291,6 +340,47 @@ inline void rotate_real_pair_flip_soa_inline(
             im[basis] = c * im0 - q * im1;
             re[basis + 1] = c * r1 + q * r0;
             im[basis + 1] = c * im1 + q * im0;
+        }
+        return;
+    }
+    if (pair_bit == 1 && (xmask == 2 || xmask == 3) && dim >= 4) {
+        std::size_t pair_idx = 0;
+        for (std::size_t basis = 0; basis + 4 <= dim; basis += 4) {
+            const double q0 = phase_signs[pair_idx] * base_coeff;
+            const double q1 = phase_signs[pair_idx + 1] * base_coeff;
+            const __m256d signed_q =
+                xmask == 2 ? _mm256_set_pd(q1, q0, -q1, -q0) : _mm256_set_pd(q0, q1, -q1, -q0);
+            const __m256d r = _mm256_loadu_pd(re + basis);
+            const __m256d v = _mm256_loadu_pd(im + basis);
+            const __m256d swapped_r = permute_pair_bit1_inline(r, xmask);
+            const __m256d swapped_v = permute_pair_bit1_inline(v, xmask);
+            _mm256_storeu_pd(re + basis, _mm256_fmadd_pd(signed_q, swapped_r, _mm256_mul_pd(vc, r)));
+            _mm256_storeu_pd(im + basis, _mm256_fmadd_pd(signed_q, swapped_v, _mm256_mul_pd(vc, v)));
+            pair_idx += 2;
+        }
+        return;
+    }
+    if (pair_bit >= 2 && dim >= 4) {
+        const std::size_t lane_mask = lower_mask & std::size_t{3};
+        const std::size_t chunk_mask = lower_mask & ~std::size_t{3};
+        std::size_t pair_idx = 0;
+        for (std::size_t block = 0; block < dim; block += step) {
+            for (std::size_t offset = 0; offset < selector; offset += 4) {
+                const std::size_t i0 = block + offset;
+                const std::size_t i1 = block + selector + (offset ^ chunk_mask);
+                const __m256d q = _mm256_mul_pd(_mm256_loadu_pd(phase_signs + pair_idx), vbase);
+                const __m256d r0 = _mm256_loadu_pd(re + i0);
+                const __m256d im0 = _mm256_loadu_pd(im + i0);
+                const __m256d r1 = permute_lanes_xor2_inline(_mm256_loadu_pd(re + i1), lane_mask);
+                const __m256d im1 = permute_lanes_xor2_inline(_mm256_loadu_pd(im + i1), lane_mask);
+                _mm256_storeu_pd(re + i0, _mm256_fnmadd_pd(q, r1, _mm256_mul_pd(vc, r0)));
+                _mm256_storeu_pd(im + i0, _mm256_fnmadd_pd(q, im1, _mm256_mul_pd(vc, im0)));
+                const __m256d out_r1 = _mm256_fmadd_pd(q, r0, _mm256_mul_pd(vc, r1));
+                const __m256d out_im1 = _mm256_fmadd_pd(q, im0, _mm256_mul_pd(vc, im1));
+                _mm256_storeu_pd(re + i1, permute_lanes_xor2_inline(out_r1, lane_mask));
+                _mm256_storeu_pd(im + i1, permute_lanes_xor2_inline(out_im1, lane_mask));
+                pair_idx += 4;
+            }
         }
         return;
     }
@@ -424,6 +514,78 @@ inline void rotate_general_pairs_soa_inline(
             im[basis] = c * im0 + rr * im1 + ri * r1;
             re[basis + 1] = c * r1 + lr * r0 - li * im0;
             im[basis + 1] = c * im1 + lr * im0 + li * r0;
+        }
+        return;
+    }
+    if (pair_bit == 1 && (xmask == 2 || xmask == 3) && dim >= 4) {
+        std::size_t pair_idx = 0;
+        for (std::size_t basis = 0; basis + 4 <= dim; basis += 4) {
+            const __m256d coeff_r = xmask == 2
+                                        ? _mm256_set_pd(
+                                              left[2 * (pair_idx + 1)],
+                                              left[2 * pair_idx],
+                                              right[2 * (pair_idx + 1)],
+                                              right[2 * pair_idx])
+                                        : _mm256_set_pd(
+                                              left[2 * pair_idx],
+                                              left[2 * (pair_idx + 1)],
+                                              right[2 * (pair_idx + 1)],
+                                              right[2 * pair_idx]);
+            const __m256d coeff_i = xmask == 2
+                                        ? _mm256_set_pd(
+                                              left[2 * (pair_idx + 1) + 1],
+                                              left[2 * pair_idx + 1],
+                                              right[2 * (pair_idx + 1) + 1],
+                                              right[2 * pair_idx + 1])
+                                        : _mm256_set_pd(
+                                              left[2 * pair_idx + 1],
+                                              left[2 * (pair_idx + 1) + 1],
+                                              right[2 * (pair_idx + 1) + 1],
+                                              right[2 * pair_idx + 1]);
+            const __m256d r = _mm256_loadu_pd(re + basis);
+            const __m256d v = _mm256_loadu_pd(im + basis);
+            const __m256d swapped_r = permute_pair_bit1_inline(r, xmask);
+            const __m256d swapped_v = permute_pair_bit1_inline(v, xmask);
+            __m256d out_r = _mm256_fmadd_pd(vc, r, _mm256_mul_pd(coeff_r, swapped_r));
+            out_r = _mm256_fnmadd_pd(coeff_i, swapped_v, out_r);
+            __m256d out_i = _mm256_fmadd_pd(vc, v, _mm256_mul_pd(coeff_r, swapped_v));
+            out_i = _mm256_fmadd_pd(coeff_i, swapped_r, out_i);
+            _mm256_storeu_pd(re + basis, out_r);
+            _mm256_storeu_pd(im + basis, out_i);
+            pair_idx += 2;
+        }
+        return;
+    }
+    if (pair_bit >= 2 && dim >= 4) {
+        const std::size_t lane_mask = lower_mask & std::size_t{3};
+        const std::size_t chunk_mask = lower_mask & ~std::size_t{3};
+        std::size_t pair_idx = 0;
+        for (std::size_t block = 0; block < dim; block += step) {
+            for (std::size_t offset = 0; offset < selector; offset += 4) {
+                const std::size_t i0 = block + offset;
+                const std::size_t i1 = block + selector + (offset ^ chunk_mask);
+                const __m256d r0 = _mm256_loadu_pd(re + i0);
+                const __m256d im0 = _mm256_loadu_pd(im + i0);
+                const __m256d r1 = permute_lanes_xor2_inline(_mm256_loadu_pd(re + i1), lane_mask);
+                const __m256d im1 = permute_lanes_xor2_inline(_mm256_loadu_pd(im + i1), lane_mask);
+                const __m256d lr = load_complex_re4_inline(left + 2 * pair_idx);
+                const __m256d li = load_complex_im4_inline(left + 2 * pair_idx);
+                const __m256d rr = load_complex_re4_inline(right + 2 * pair_idx);
+                const __m256d ri = load_complex_im4_inline(right + 2 * pair_idx);
+                __m256d out_r0 = _mm256_fmadd_pd(vc, r0, _mm256_mul_pd(rr, r1));
+                out_r0 = _mm256_fnmadd_pd(ri, im1, out_r0);
+                __m256d out_i0 = _mm256_fmadd_pd(vc, im0, _mm256_mul_pd(rr, im1));
+                out_i0 = _mm256_fmadd_pd(ri, r1, out_i0);
+                __m256d out_r1 = _mm256_fmadd_pd(vc, r1, _mm256_mul_pd(lr, r0));
+                out_r1 = _mm256_fnmadd_pd(li, im0, out_r1);
+                __m256d out_i1 = _mm256_fmadd_pd(vc, im1, _mm256_mul_pd(lr, im0));
+                out_i1 = _mm256_fmadd_pd(li, r0, out_i1);
+                _mm256_storeu_pd(re + i0, out_r0);
+                _mm256_storeu_pd(im + i0, out_i0);
+                _mm256_storeu_pd(re + i1, permute_lanes_xor2_inline(out_r1, lane_mask));
+                _mm256_storeu_pd(im + i1, permute_lanes_xor2_inline(out_i1, lane_mask));
+                pair_idx += 4;
+            }
         }
         return;
     }
