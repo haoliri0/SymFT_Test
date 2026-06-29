@@ -101,38 +101,6 @@ void measure_nondiagonal_true_prob_batch(
         runtime.branch_prob_true.data());
 }
 
-bool can_project_diagonal_last_pivot_batch(
-    const BatchFactoredExecutorState& runtime,
-    const PrecomputedActivePauliMeasurementKernel& kernel) {
-    return kernel.pivot == runtime.k - 1;
-}
-
-void project_diagonal_last_pivot_batch(
-    BatchFactoredExecutorState& runtime,
-    const PrecomputedActivePauliMeasurementKernel& kernel,
-    const std::vector<std::uint64_t>& branch_bits) {
-    const std::size_t out_dim = kernel.source0_false.size();
-    const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
-    for (std::size_t basis = 0; basis < out_dim; ++basis) {
-        double* dst_r = runtime.active_re.data() + basis * pitch;
-        double* dst_i = runtime.active_im.data() + basis * pitch;
-        const double* lower_r = dst_r;
-        const double* lower_i = dst_i;
-        const double* upper_r = runtime.active_re.data() + (out_dim + basis) * pitch;
-        const double* upper_i = runtime.active_im.data() + (out_dim + basis) * pitch;
-        const bool false_upper = kernel.source0_false[basis] != basis;
-        SYMFT_BATCH_SIMD_LOOP
-        for (int shot = 0; shot < runtime.active_shots; ++shot) {
-            const auto shot_idx = static_cast<std::size_t>(shot);
-            const bool branch = (branch_bits[batch_shot_word(shot)] & batch_shot_mask(shot)) != 0;
-            const bool take_upper = branch != false_upper;
-            const double n = runtime.branch_invnorms[shot_idx];
-            dst_r[shot_idx] = (take_upper ? upper_r[shot_idx] : lower_r[shot_idx]) * n;
-            dst_i[shot_idx] = (take_upper ? upper_i[shot_idx] : lower_i[shot_idx]) * n;
-        }
-    }
-}
-
 void project_nondiagonal_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
@@ -465,13 +433,15 @@ void measure_diagonal_active_pauli_branch_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
     int branch_condition) {
-    const std::size_t out_dim = kernel.source0_false.size();
+    const auto& source_false = kernel.source0_false;
+    const auto& source_true = kernel.source0_true;
+    const std::size_t out_dim = source_false.size();
     batch_simd::scalar_table().diagonal_measure_true_prob(
         runtime.active_re.data(),
         runtime.active_im.data(),
         static_cast<std::size_t>(runtime.active_pitch),
         runtime.active_shots,
-        kernel.source0_true.data(),
+        source_true.data(),
         out_dim,
         runtime.branch_prob_true.data());
     sample_batch_measurement_branches_from_true(
@@ -480,20 +450,16 @@ void measure_diagonal_active_pauli_branch_batch(
         runtime.branch_prob_true,
         runtime.branch_invnorms);
     const auto& branch_bits = runtime.eval_scratch;
-    if (can_project_diagonal_last_pivot_batch(runtime, kernel)) {
-        project_diagonal_last_pivot_batch(runtime, kernel, branch_bits);
-    } else {
-        batch_simd::scalar_table().diagonal_project(
-            runtime.active_re.data(),
-            runtime.active_im.data(),
-            static_cast<std::size_t>(runtime.active_pitch),
-            runtime.active_shots,
-            kernel.source0_false.data(),
-            kernel.source0_true.data(),
-            out_dim,
-            branch_bits.data(),
-            runtime.branch_invnorms.data());
-    }
+    batch_simd::scalar_table().diagonal_project(
+        runtime.active_re.data(),
+        runtime.active_im.data(),
+        static_cast<std::size_t>(runtime.active_pitch),
+        runtime.active_shots,
+        source_false.data(),
+        source_true.data(),
+        out_dim,
+        branch_bits.data(),
+        runtime.branch_invnorms.data());
     finish_active_measurement_branch(runtime, branch_condition, branch_bits);
 }
 

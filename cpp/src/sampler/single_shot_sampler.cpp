@@ -580,12 +580,6 @@ double active_diagonal_measurement_branch_probability(
     return std::clamp(probability, 0.0, 1.0);
 }
 
-bool can_project_diagonal_last_pivot(
-    const FactoredExecutorState& runtime,
-    const PrecomputedActivePauliMeasurementKernel& kernel) {
-    return kernel.pivot == runtime.k - 1;
-}
-
 double active_measurement_branch_probability(
     const FactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
@@ -625,35 +619,11 @@ double active_measurement_branch_probability(
     return std::clamp(probability, 0.0, 1.0);
 }
 
-void project_diagonal_last_pivot_active_pauli_measurement(
-    FactoredExecutorState& runtime,
-    const PrecomputedActivePauliMeasurementKernel& kernel,
-    bool branch,
-    double probability) {
-    if (probability <= 0.0) {
-        fail("sampled an impossible active measurement branch");
-    }
-    const std::size_t out_dim = kernel.source0_false.size();
-    const double invnorm = 1.0 / std::sqrt(probability);
-    SYMFT_SINGLE_SIMD_LOOP
-    for (std::size_t idx = 0; idx < out_dim; ++idx) {
-        const bool false_upper = kernel.source0_false[idx] != idx;
-        const std::size_t source = (branch != false_upper) ? out_dim + idx : idx;
-        runtime.active_re[idx] = runtime.active_re[source] * invnorm;
-        runtime.active_im[idx] = runtime.active_im[source] * invnorm;
-    }
-    --runtime.k;
-}
-
 void project_diagonal_active_pauli_measurement(
     FactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
     bool branch,
     double probability) {
-    if (can_project_diagonal_last_pivot(runtime, kernel)) {
-        project_diagonal_last_pivot_active_pauli_measurement(runtime, kernel, branch, probability);
-        return;
-    }
     if (probability <= 0.0) {
         fail("sampled an impossible active measurement branch");
     }
@@ -759,12 +729,9 @@ void execute_instruction(FactoredExecutorState& runtime, const MeasurePrecompute
     if (runtime.k <= 0) {
         fail("cannot measure an active Pauli when k == 0");
     }
-    double prob_true = 0.0;
-    if (instruction.kernel.is_diagonal) {
-        prob_true = active_diagonal_measurement_branch_probability(runtime, instruction.kernel, true);
-    } else {
-        prob_true = active_measurement_branch_probability(runtime, instruction.kernel, true);
-    }
+    double prob_true = instruction.kernel.is_diagonal
+                           ? active_diagonal_measurement_branch_probability(runtime, instruction.kernel, true)
+                           : active_measurement_branch_probability(runtime, instruction.kernel, true);
     prob_true = std::clamp(prob_true, 0.0, 1.0);
     const double prob_false = 1.0 - prob_true;
     const bool branch = sample_bernoulli(runtime.rng_state, prob_true);
@@ -847,12 +814,9 @@ void execute_instruction_presampled(
     if (runtime.k <= 0) {
         fail("cannot measure an active Pauli when k == 0");
     }
-    double prob_true = 0.0;
-    if (instruction.kernel.is_diagonal) {
-        prob_true = active_diagonal_measurement_branch_probability(runtime, instruction.kernel, true);
-    } else {
-        prob_true = active_measurement_branch_probability(runtime, instruction.kernel, true);
-    }
+    double prob_true = instruction.kernel.is_diagonal
+                           ? active_diagonal_measurement_branch_probability(runtime, instruction.kernel, true)
+                           : active_measurement_branch_probability(runtime, instruction.kernel, true);
     prob_true = std::clamp(prob_true, 0.0, 1.0);
     const double prob_false = 1.0 - prob_true;
     const bool branch = sample_bernoulli(runtime.rng_state, prob_true);
