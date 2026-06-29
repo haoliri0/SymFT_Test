@@ -62,7 +62,6 @@ struct BatchFactoredExecutorState {
     std::vector<std::uint64_t> measurement_words;
     std::vector<std::uint64_t> detector_words;
     std::vector<std::uint64_t> eval_scratch;
-    std::vector<std::uint64_t> residual_scratch;
     std::vector<double> rotation_coefficients;
     std::vector<double> branch_prob_true;
     std::vector<double> branch_invnorms;

@@ -803,7 +803,6 @@ struct BatchExpressionEvaluator {
     std::size_t expression_stride_words = 0;
     int first_sample_shot = 0;
     std::vector<std::uint64_t>& out;
-    std::vector<std::uint64_t>& residual_scratch;
 
     const std::vector<std::uint64_t>& eval(
         std::size_t instruction_index,
@@ -841,10 +840,7 @@ struct BatchExpressionEvaluator {
         }
         std::fill(out.begin() + static_cast<std::ptrdiff_t>(nwords), out.end(), 0);
         if (!expression.residual_plan.conditions.empty()) {
-            eval_symbolic_bool_batch(residual_scratch, expression.residual_plan, runtime);
-            for (std::size_t word = 0; word < nwords; ++word) {
-                out[word] = (out[word] ^ residual_scratch[word]) & live_word_mask_for_shots(runtime.active_shots, word);
-            }
+            xor_symbolic_bool_batch_into(out, expression.residual_plan, runtime);
         }
         return out;
     }
@@ -906,6 +902,14 @@ void execute_batch_instruction_presampled(
     const BatchExpressionEvaluator& evaluator,
     std::size_t instruction_index) {
     measure_active_last_z_branch_batch(runtime, instruction.branch);
+    if (write_direct_branch_measurement_record(
+            runtime,
+            instruction.branch,
+            instruction.outcome_plan,
+            instruction.record,
+            instruction.record_condition)) {
+        return;
+    }
     const auto& outcome_bits = evaluator.eval(instruction_index, runtime);
     write_batch_measurement_record(runtime, instruction.record, outcome_bits, instruction.record_condition);
 }
@@ -916,6 +920,14 @@ void execute_batch_instruction_presampled(
     const BatchExpressionEvaluator& evaluator,
     std::size_t instruction_index) {
     measure_precomputed_active_pauli_branch_batch(runtime, instruction.kernel, instruction.branch);
+    if (write_direct_branch_measurement_record(
+            runtime,
+            instruction.branch,
+            instruction.outcome_plan,
+            instruction.record,
+            instruction.record_condition)) {
+        return;
+    }
     const auto& outcome_bits = evaluator.eval(instruction_index, runtime);
     write_batch_measurement_record(runtime, instruction.record, outcome_bits, instruction.record_condition);
 }
@@ -928,12 +940,12 @@ void execute_batch_instruction_presampled(
     fill_batch_random_half_bits(runtime.eval_scratch, runtime);
     const auto& branch_bits = runtime.eval_scratch;
     assign_batch_symbol(runtime, instruction.branch, branch_bits);
-    if (instruction.outcome_plan.conditions.size() == 1 &&
-        instruction.outcome_plan.conditions.front() == instruction.branch) {
-        if (instruction.outcome_plan.constant) {
-            invert_batch_bits(runtime.eval_scratch, runtime);
-        }
-        write_batch_measurement_record(runtime, instruction.record, runtime.eval_scratch, instruction.record_condition);
+    if (write_direct_branch_measurement_record(
+            runtime,
+            instruction.branch,
+            instruction.outcome_plan,
+            instruction.record,
+            instruction.record_condition)) {
         return;
     }
     const auto& outcome_bits = evaluator.eval(instruction_index, runtime);
@@ -1019,8 +1031,7 @@ BatchDetectorPostselectionResult execute_batch_postselected_with_expressions(
         nullptr,
         runtime.batch_words,
         0,
-        runtime.eval_scratch,
-        scratch.scratch};
+        runtime.eval_scratch};
 
     for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
         if (runtime.active_shots == 0) {
@@ -1274,8 +1285,7 @@ void execute_batch_in_place(
         &expression_block,
         0,
         first_sample_shot,
-        runtime.eval_scratch,
-        runtime.residual_scratch};
+        runtime.eval_scratch};
     for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
         const auto& instruction = program.instructions[idx];
         std::visit(

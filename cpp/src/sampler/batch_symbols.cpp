@@ -232,6 +232,105 @@ void eval_symbolic_bool_batch(
     mask_batch_bits(out, runtime);
 }
 
+void check_batch_symbolic_plan_assigned(
+    const SymbolicBoolEvaluationPlan& plan,
+    const BatchFactoredExecutorState& runtime) {
+    if (plan.word_indices.empty()) {
+        for (int condition : plan.conditions) {
+            if (!batch_symbol_assigned(runtime, condition)) {
+                fail("symbolic condition expression has no concrete batch value");
+            }
+        }
+        return;
+    }
+    const std::size_t max_word = static_cast<std::size_t>(plan.word_indices.back());
+    if (max_word >= runtime.assigned_words.size()) {
+        fail("symbolic condition expression has no concrete batch value");
+    }
+    std::uint64_t missing = 0;
+    for (std::size_t i = 0; i < plan.word_indices.size(); ++i) {
+        const std::size_t word = static_cast<std::size_t>(plan.word_indices[i]);
+        missing |= plan.word_masks[i] & ~runtime.assigned_words[word];
+    }
+    if (missing != 0) {
+        fail("symbolic condition expression has no concrete batch value");
+    }
+}
+
+void xor_symbolic_bool_batch_into(
+    std::vector<std::uint64_t>& out,
+    const SymbolicBoolEvaluationPlan& plan,
+    const BatchFactoredExecutorState& runtime) {
+    const std::size_t nwords = runtime_batch_word_count(runtime);
+    if (out.size() < runtime.batch_words) {
+        out.resize(runtime.batch_words, 0);
+    }
+    if (plan.conditions.empty()) {
+        if (plan.constant) {
+            invert_batch_bits(out, runtime);
+        }
+        return;
+    }
+    const bool checked_per_condition =
+        plan.word_indices.empty() || plan.conditions.size() <= kBatchScalarSymbolicEvalThreshold;
+    if (!checked_per_condition) {
+        check_batch_symbolic_plan_assigned(plan, runtime);
+    }
+    if (nwords == 1) {
+        std::uint64_t out0 = out[0] ^ (plan.constant ? batch_live_word_mask(runtime, 0) : 0);
+        if (runtime.batch_words == 1) {
+            for (int condition : plan.conditions) {
+                if (checked_per_condition && !batch_symbol_assigned(runtime, condition)) {
+                    fail("symbolic condition expression has no concrete batch value");
+                }
+                out0 ^= runtime.value_words[static_cast<std::size_t>(condition - 1)];
+            }
+        } else {
+            for (int condition : plan.conditions) {
+                if (checked_per_condition && !batch_symbol_assigned(runtime, condition)) {
+                    fail("symbolic condition expression has no concrete batch value");
+                }
+                out0 ^= runtime.value_words[batch_condition_offset(runtime, condition, 0)];
+            }
+        }
+        out[0] = out0 & batch_live_word_mask(runtime, 0);
+        std::fill(out.begin() + 1, out.end(), 0);
+        return;
+    }
+    if (nwords == 2) {
+        std::uint64_t out0 = out[0] ^ (plan.constant ? batch_live_word_mask(runtime, 0) : 0);
+        std::uint64_t out1 = out[1] ^ (plan.constant ? batch_live_word_mask(runtime, 1) : 0);
+        for (int condition : plan.conditions) {
+            if (checked_per_condition && !batch_symbol_assigned(runtime, condition)) {
+                fail("symbolic condition expression has no concrete batch value");
+            }
+            const std::size_t base = batch_condition_offset(runtime, condition, 0);
+            out0 ^= runtime.value_words[base];
+            out1 ^= runtime.value_words[base + 1];
+        }
+        out[0] = out0 & batch_live_word_mask(runtime, 0);
+        out[1] = out1 & batch_live_word_mask(runtime, 1);
+        std::fill(out.begin() + 2, out.end(), 0);
+        return;
+    }
+    if (plan.constant) {
+        for (std::size_t word = 0; word < nwords; ++word) {
+            out[word] ^= batch_live_word_mask(runtime, word);
+        }
+    }
+    for (int condition : plan.conditions) {
+        if (checked_per_condition && !batch_symbol_assigned(runtime, condition)) {
+            fail("symbolic condition expression has no concrete batch value");
+        }
+        const std::size_t base = batch_condition_offset(runtime, condition, 0);
+        for (std::size_t word = 0; word < nwords; ++word) {
+            out[word] ^= runtime.value_words[base + word];
+        }
+    }
+    mask_batch_bits(out, runtime);
+    std::fill(out.begin() + static_cast<std::ptrdiff_t>(nwords), out.end(), 0);
+}
+
 void ensure_batch_measurement_storage(BatchFactoredExecutorState& runtime, int record) {
     if (record <= runtime.nrecords) {
         return;

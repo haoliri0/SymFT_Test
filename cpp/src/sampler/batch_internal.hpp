@@ -155,6 +155,10 @@ void eval_symbolic_bool_batch(
     std::vector<std::uint64_t>& out,
     const SymbolicBoolEvaluationPlan& plan,
     const BatchFactoredExecutorState& runtime);
+void xor_symbolic_bool_batch_into(
+    std::vector<std::uint64_t>& out,
+    const SymbolicBoolEvaluationPlan& plan,
+    const BatchFactoredExecutorState& runtime);
 void write_batch_measurement_record(
     BatchFactoredExecutorState& runtime,
     std::optional<int> record,

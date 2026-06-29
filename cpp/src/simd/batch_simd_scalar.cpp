@@ -16,10 +16,6 @@ constexpr double kInvSqrt2 = 0.70710678118654752440;
 #define SYMFT_BATCH_SIMD_LOOP
 #endif
 
-bool batch_bit(const std::uint64_t* bits, int shot) {
-    return (bits[static_cast<std::size_t>(shot >> 6)] & (std::uint64_t{1} << (shot & 63))) != 0;
-}
-
 std::uint64_t low_bits_mask(int nbits) {
     if (nbits <= 0) {
         return 0;
@@ -553,6 +549,7 @@ void scalar_last_z_project(
     std::size_t dim,
     const std::uint64_t* branch_bits,
     const double* invnorms) {
+    const std::size_t nwords = static_cast<std::size_t>((active_shots + 63) >> 6);
     for (std::size_t basis = 0; basis < dim; ++basis) {
         double* dst_r = re + basis * leading_shots;
         double* dst_i = im + basis * leading_shots;
@@ -560,12 +557,34 @@ void scalar_last_z_project(
         const double* false_i = im + basis * leading_shots;
         const double* true_r = re + (dim + basis) * leading_shots;
         const double* true_i = im + (dim + basis) * leading_shots;
-        SYMFT_BATCH_SIMD_LOOP
-        for (int shot = 0; shot < active_shots; ++shot) {
-            const bool branch = batch_bit(branch_bits, shot);
-            const double n = invnorms[shot];
-            dst_r[shot] = (branch ? true_r[shot] : false_r[shot]) * n;
-            dst_i[shot] = (branch ? true_i[shot] : false_i[shot]) * n;
+        for (std::size_t word = 0; word < nwords; ++word) {
+            const int first = static_cast<int>(word << 6);
+            const int last = std::min(active_shots, first + 64);
+            const std::uint64_t live = live_word_mask(active_shots, word);
+            const std::uint64_t bits = branch_bits[word] & live;
+            if (bits == 0) {
+                SYMFT_BATCH_SIMD_LOOP
+                for (int shot = first; shot < last; ++shot) {
+                    const double n = invnorms[shot];
+                    dst_r[shot] = false_r[shot] * n;
+                    dst_i[shot] = false_i[shot] * n;
+                }
+            } else if (bits == live) {
+                SYMFT_BATCH_SIMD_LOOP
+                for (int shot = first; shot < last; ++shot) {
+                    const double n = invnorms[shot];
+                    dst_r[shot] = true_r[shot] * n;
+                    dst_i[shot] = true_i[shot] * n;
+                }
+            } else {
+                SYMFT_BATCH_SIMD_LOOP
+                for (int shot = first; shot < last; ++shot) {
+                    const bool branch = ((bits >> (shot - first)) & 1ULL) != 0;
+                    const double n = invnorms[shot];
+                    dst_r[shot] = (branch ? true_r[shot] : false_r[shot]) * n;
+                    dst_i[shot] = (branch ? true_i[shot] : false_i[shot]) * n;
+                }
+            }
         }
     }
 }
@@ -601,6 +620,7 @@ void scalar_diagonal_project(
     std::size_t out_dim,
     const std::uint64_t* branch_bits,
     const double* invnorms) {
+    const std::size_t nwords = static_cast<std::size_t>((active_shots + 63) >> 6);
     for (std::size_t idx = 0; idx < out_dim; ++idx) {
         double* dst_r = re + idx * leading_shots;
         double* dst_i = im + idx * leading_shots;
@@ -608,12 +628,34 @@ void scalar_diagonal_project(
         const double* false_i = im + source_false[idx] * leading_shots;
         const double* true_r = re + source_true[idx] * leading_shots;
         const double* true_i = im + source_true[idx] * leading_shots;
-        SYMFT_BATCH_SIMD_LOOP
-        for (int shot = 0; shot < active_shots; ++shot) {
-            const bool branch = batch_bit(branch_bits, shot);
-            const double n = invnorms[shot];
-            dst_r[shot] = (branch ? true_r[shot] : false_r[shot]) * n;
-            dst_i[shot] = (branch ? true_i[shot] : false_i[shot]) * n;
+        for (std::size_t word = 0; word < nwords; ++word) {
+            const int first = static_cast<int>(word << 6);
+            const int last = std::min(active_shots, first + 64);
+            const std::uint64_t live = live_word_mask(active_shots, word);
+            const std::uint64_t bits = branch_bits[word] & live;
+            if (bits == 0) {
+                SYMFT_BATCH_SIMD_LOOP
+                for (int shot = first; shot < last; ++shot) {
+                    const double n = invnorms[shot];
+                    dst_r[shot] = false_r[shot] * n;
+                    dst_i[shot] = false_i[shot] * n;
+                }
+            } else if (bits == live) {
+                SYMFT_BATCH_SIMD_LOOP
+                for (int shot = first; shot < last; ++shot) {
+                    const double n = invnorms[shot];
+                    dst_r[shot] = true_r[shot] * n;
+                    dst_i[shot] = true_i[shot] * n;
+                }
+            } else {
+                SYMFT_BATCH_SIMD_LOOP
+                for (int shot = first; shot < last; ++shot) {
+                    const bool branch = ((bits >> (shot - first)) & 1ULL) != 0;
+                    const double n = invnorms[shot];
+                    dst_r[shot] = (branch ? true_r[shot] : false_r[shot]) * n;
+                    dst_i[shot] = (branch ? true_i[shot] : false_i[shot]) * n;
+                }
+            }
         }
     }
 }
@@ -702,6 +744,7 @@ void scalar_nondiagonal_project(
     std::size_t out_dim,
     const std::uint64_t* branch_bits,
     const double* invnorms) {
+    const std::size_t nwords = static_cast<std::size_t>((active_shots + 63) >> 6);
     for (std::size_t idx = 0; idx < out_dim; ++idx) {
         const double* r0p = re + source0_false[idx] * leading_shots;
         const double* i0p = im + source0_false[idx] * leading_shots;
@@ -711,14 +754,32 @@ void scalar_nondiagonal_project(
         double* dst_i = scratch_im + idx * leading_shots;
         const double c1r = coeff1_false_real[idx];
         const double c1i = coeff1_false_imag[idx];
-        SYMFT_BATCH_SIMD_LOOP
-        for (int shot = 0; shot < active_shots; ++shot) {
-            const double branch_sign = batch_bit(branch_bits, shot) ? -1.0 : 1.0;
-            const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
-            const double prod_i = c1r * i1p[shot] + c1i * r1p[shot];
-            const double n = invnorms[shot];
-            dst_r[shot] = (kInvSqrt2 * r0p[shot] + branch_sign * prod_r) * n;
-            dst_i[shot] = (kInvSqrt2 * i0p[shot] + branch_sign * prod_i) * n;
+        for (std::size_t word = 0; word < nwords; ++word) {
+            const int first = static_cast<int>(word << 6);
+            const int last = std::min(active_shots, first + 64);
+            const std::uint64_t live = live_word_mask(active_shots, word);
+            const std::uint64_t bits = branch_bits[word] & live;
+            if (bits == 0 || bits == live) {
+                const double branch_sign = bits == 0 ? 1.0 : -1.0;
+                SYMFT_BATCH_SIMD_LOOP
+                for (int shot = first; shot < last; ++shot) {
+                    const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
+                    const double prod_i = c1r * i1p[shot] + c1i * r1p[shot];
+                    const double n = invnorms[shot];
+                    dst_r[shot] = (kInvSqrt2 * r0p[shot] + branch_sign * prod_r) * n;
+                    dst_i[shot] = (kInvSqrt2 * i0p[shot] + branch_sign * prod_i) * n;
+                }
+            } else {
+                SYMFT_BATCH_SIMD_LOOP
+                for (int shot = first; shot < last; ++shot) {
+                    const double branch_sign = ((bits >> (shot - first)) & 1ULL) != 0 ? -1.0 : 1.0;
+                    const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
+                    const double prod_i = c1r * i1p[shot] + c1i * r1p[shot];
+                    const double n = invnorms[shot];
+                    dst_r[shot] = (kInvSqrt2 * r0p[shot] + branch_sign * prod_r) * n;
+                    dst_i[shot] = (kInvSqrt2 * i0p[shot] + branch_sign * prod_i) * n;
+                }
+            }
         }
     }
 }
@@ -737,6 +798,7 @@ void scalar_nondiagonal_xmask_project(
     const double* coeff1_false_imag,
     const std::uint64_t* branch_bits,
     const double* invnorms) {
+    const std::size_t nwords = static_cast<std::size_t>((active_shots + 63) >> 6);
     const std::size_t selector = std::size_t{1} << pair_bit;
     const std::size_t lower_mask = static_cast<std::size_t>(xmask) & (selector - 1);
     const std::size_t dim = npairs << 1;
@@ -754,14 +816,32 @@ void scalar_nondiagonal_xmask_project(
             double* dst_i = scratch_im + pair_idx * leading_shots;
             const double c1r = coeff1_false_real[pair_idx];
             const double c1i = coeff1_false_imag[pair_idx];
-            SYMFT_BATCH_SIMD_LOOP
-            for (int shot = 0; shot < active_shots; ++shot) {
-                const double branch_sign = batch_bit(branch_bits, shot) ? -1.0 : 1.0;
-                const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
-                const double prod_i = c1r * i1p[shot] + c1i * r1p[shot];
-                const double n = invnorms[shot];
-                dst_r[shot] = (kInvSqrt2 * r0p[shot] + branch_sign * prod_r) * n;
-                dst_i[shot] = (kInvSqrt2 * i0p[shot] + branch_sign * prod_i) * n;
+            for (std::size_t word = 0; word < nwords; ++word) {
+                const int first = static_cast<int>(word << 6);
+                const int last = std::min(active_shots, first + 64);
+                const std::uint64_t live = live_word_mask(active_shots, word);
+                const std::uint64_t bits = branch_bits[word] & live;
+                if (bits == 0 || bits == live) {
+                    const double branch_sign = bits == 0 ? 1.0 : -1.0;
+                    SYMFT_BATCH_SIMD_LOOP
+                    for (int shot = first; shot < last; ++shot) {
+                        const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
+                        const double prod_i = c1r * i1p[shot] + c1i * r1p[shot];
+                        const double n = invnorms[shot];
+                        dst_r[shot] = (kInvSqrt2 * r0p[shot] + branch_sign * prod_r) * n;
+                        dst_i[shot] = (kInvSqrt2 * i0p[shot] + branch_sign * prod_i) * n;
+                    }
+                } else {
+                    SYMFT_BATCH_SIMD_LOOP
+                    for (int shot = first; shot < last; ++shot) {
+                        const double branch_sign = ((bits >> (shot - first)) & 1ULL) != 0 ? -1.0 : 1.0;
+                        const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
+                        const double prod_i = c1r * i1p[shot] + c1i * r1p[shot];
+                        const double n = invnorms[shot];
+                        dst_r[shot] = (kInvSqrt2 * r0p[shot] + branch_sign * prod_r) * n;
+                        dst_i[shot] = (kInvSqrt2 * i0p[shot] + branch_sign * prod_i) * n;
+                    }
+                }
             }
             ++pair_idx;
         }

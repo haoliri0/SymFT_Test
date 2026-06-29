@@ -372,18 +372,31 @@ void sample_batch_measurement_branches_from_true(
     std::vector<std::uint64_t>& branch_bits,
     std::vector<double>& prob_true,
     std::vector<double>& invnorms) {
-    fill_batch_bits(branch_bits, runtime, false);
-    for (int shot = 0; shot < runtime.active_shots; ++shot) {
-        const double pt = std::clamp(prob_true[static_cast<std::size_t>(shot)], 0.0, 1.0);
-        const bool branch = sample_bernoulli(runtime.rng_state, pt);
-        if (branch) {
-            set_batch_bit(branch_bits, shot);
+    if (branch_bits.size() < runtime.batch_words) {
+        branch_bits.resize(runtime.batch_words, 0);
+    }
+    const std::size_t nwords = runtime_batch_word_count(runtime);
+    for (std::size_t word = 0; word < nwords; ++word) {
+        const int base_shot = static_cast<int>(word << 6);
+        const int live = std::min(64, runtime.active_shots - base_shot);
+        std::uint64_t packed = 0;
+        for (int bit = 0; bit < live; ++bit) {
+            const int shot = base_shot + bit;
+            const double pt = std::clamp(prob_true[static_cast<std::size_t>(shot)], 0.0, 1.0);
+            const bool branch = sample_bernoulli(runtime.rng_state, pt);
+            if (branch) {
+                packed |= std::uint64_t{1} << bit;
+            }
+            const double probability = branch ? pt : 1.0 - pt;
+            if (probability <= 0.0) {
+                fail("sampled an impossible active measurement branch");
+            }
+            invnorms[static_cast<std::size_t>(shot)] = 1.0 / std::sqrt(probability);
         }
-        const double probability = branch ? pt : 1.0 - pt;
-        if (probability <= 0.0) {
-            fail("sampled an impossible active measurement branch");
-        }
-        invnorms[static_cast<std::size_t>(shot)] = 1.0 / std::sqrt(probability);
+        branch_bits[word] = packed;
+    }
+    for (std::size_t word = nwords; word < runtime.batch_words; ++word) {
+        branch_bits[word] = 0;
     }
 }
 
