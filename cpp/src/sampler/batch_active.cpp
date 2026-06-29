@@ -40,6 +40,106 @@ BatchSignMode batch_sign_mode(const BatchFactoredExecutorState& runtime, const s
     return saw_one ? BatchSignMode::AllPlus : BatchSignMode::AllMinus;
 }
 
+bool can_use_nondiagonal_xmask_measurement(const PrecomputedActivePauliMeasurementKernel& kernel) {
+    return detail::highest_set_bit64(kernel.action.xmask) == kernel.pivot;
+}
+
+void finish_active_measurement_branch(
+    BatchFactoredExecutorState& runtime,
+    int branch_condition,
+    const std::vector<std::uint64_t>& branch_bits) {
+    --runtime.k;
+    ++runtime.ndormant;
+    assign_batch_symbol(runtime, branch_condition, branch_bits);
+}
+
+void copy_projected_active_prefix_from_scratch(BatchFactoredExecutorState& runtime, std::size_t out_dim) {
+    if (runtime.active_shots == runtime.active_pitch) {
+        const std::size_t active_prefix_size = out_dim * static_cast<std::size_t>(runtime.active_pitch);
+        std::copy_n(runtime.scratch_re.data(), active_prefix_size, runtime.active_re.data());
+        std::copy_n(runtime.scratch_im.data(), active_prefix_size, runtime.active_im.data());
+        return;
+    }
+    const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
+    const auto live = static_cast<std::size_t>(runtime.active_shots);
+    for (std::size_t basis = 0; basis < out_dim; ++basis) {
+        const std::size_t base = basis * pitch;
+        std::copy_n(runtime.scratch_re.data() + base, live, runtime.active_re.data() + base);
+        std::copy_n(runtime.scratch_im.data() + base, live, runtime.active_im.data() + base);
+    }
+}
+
+void measure_nondiagonal_true_prob_batch(
+    BatchFactoredExecutorState& runtime,
+    const PrecomputedActivePauliMeasurementKernel& kernel,
+    std::size_t out_dim,
+    bool use_xmask_kernel) {
+    if (use_xmask_kernel) {
+        batch_simd::scalar_table().nondiagonal_xmask_measure_true_prob(
+            runtime.active_re.data(),
+            runtime.active_im.data(),
+            static_cast<std::size_t>(runtime.active_pitch),
+            runtime.active_shots,
+            kernel.action.xmask,
+            static_cast<unsigned>(kernel.pivot),
+            out_dim,
+            kernel.coeff1_false_real.data(),
+            kernel.coeff1_false_imag.data(),
+            runtime.branch_prob_true.data());
+        return;
+    }
+    batch_simd::scalar_table().nondiagonal_measure_true_prob(
+        runtime.active_re.data(),
+        runtime.active_im.data(),
+        static_cast<std::size_t>(runtime.active_pitch),
+        runtime.active_shots,
+        kernel.source0_false.data(),
+        kernel.source1_false.data(),
+        kernel.coeff1_false_real.data(),
+        kernel.coeff1_false_imag.data(),
+        out_dim,
+        runtime.branch_prob_true.data());
+}
+
+void project_nondiagonal_batch(
+    BatchFactoredExecutorState& runtime,
+    const PrecomputedActivePauliMeasurementKernel& kernel,
+    std::size_t out_dim,
+    bool use_xmask_kernel,
+    const std::vector<std::uint64_t>& branch_bits) {
+    if (use_xmask_kernel) {
+        batch_simd::scalar_table().nondiagonal_xmask_project(
+            runtime.active_re.data(),
+            runtime.active_im.data(),
+            runtime.scratch_re.data(),
+            runtime.scratch_im.data(),
+            static_cast<std::size_t>(runtime.active_pitch),
+            runtime.active_shots,
+            kernel.action.xmask,
+            static_cast<unsigned>(kernel.pivot),
+            out_dim,
+            kernel.coeff1_false_real.data(),
+            kernel.coeff1_false_imag.data(),
+            branch_bits.data(),
+            runtime.branch_invnorms.data());
+        return;
+    }
+    batch_simd::scalar_table().nondiagonal_project(
+        runtime.active_re.data(),
+        runtime.active_im.data(),
+        runtime.scratch_re.data(),
+        runtime.scratch_im.data(),
+        static_cast<std::size_t>(runtime.active_pitch),
+        runtime.active_shots,
+        kernel.source0_false.data(),
+        kernel.source1_false.data(),
+        kernel.coeff1_false_real.data(),
+        kernel.coeff1_false_imag.data(),
+        out_dim,
+        branch_bits.data(),
+        runtime.branch_invnorms.data());
+}
+
 void rotate_uniform_imag_pairs_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliRotationKernel& kernel,
@@ -315,9 +415,7 @@ void measure_active_last_z_branch_batch(
         dim,
         branch_bits.data(),
         runtime.branch_invnorms.data());
-    runtime.k = new_k;
-    ++runtime.ndormant;
-    assign_batch_symbol(runtime, branch_condition, branch_bits);
+    finish_active_measurement_branch(runtime, branch_condition, branch_bits);
 }
 
 void measure_active_last_z_batch(
@@ -362,9 +460,7 @@ void measure_diagonal_active_pauli_branch_batch(
         out_dim,
         branch_bits.data(),
         runtime.branch_invnorms.data());
-    --runtime.k;
-    ++runtime.ndormant;
-    assign_batch_symbol(runtime, branch_condition, branch_bits);
+    finish_active_measurement_branch(runtime, branch_condition, branch_bits);
 }
 
 void measure_nondiagonal_active_pauli_branch_batch(
@@ -372,85 +468,17 @@ void measure_nondiagonal_active_pauli_branch_batch(
     const PrecomputedActivePauliMeasurementKernel& kernel,
     int branch_condition) {
     const std::size_t out_dim = kernel.source0_false.size();
-    const bool use_xmask_kernel = detail::highest_set_bit64(kernel.action.xmask) == kernel.pivot;
-    if (use_xmask_kernel) {
-        batch_simd::scalar_table().nondiagonal_xmask_measure_true_prob(
-            runtime.active_re.data(),
-            runtime.active_im.data(),
-            static_cast<std::size_t>(runtime.active_pitch),
-            runtime.active_shots,
-            kernel.action.xmask,
-            static_cast<unsigned>(kernel.pivot),
-            out_dim,
-            kernel.coeff1_false_real.data(),
-            kernel.coeff1_false_imag.data(),
-            runtime.branch_prob_true.data());
-    } else {
-        batch_simd::scalar_table().nondiagonal_measure_true_prob(
-            runtime.active_re.data(),
-            runtime.active_im.data(),
-            static_cast<std::size_t>(runtime.active_pitch),
-            runtime.active_shots,
-            kernel.source0_false.data(),
-            kernel.source1_false.data(),
-            kernel.coeff1_false_real.data(),
-            kernel.coeff1_false_imag.data(),
-            out_dim,
-            runtime.branch_prob_true.data());
-    }
+    const bool use_xmask_kernel = can_use_nondiagonal_xmask_measurement(kernel);
+    measure_nondiagonal_true_prob_batch(runtime, kernel, out_dim, use_xmask_kernel);
     sample_batch_measurement_branches_from_true(
         runtime,
         runtime.eval_scratch,
         runtime.branch_prob_true,
         runtime.branch_invnorms);
     const auto& branch_bits = runtime.eval_scratch;
-    if (use_xmask_kernel) {
-        batch_simd::scalar_table().nondiagonal_xmask_project(
-            runtime.active_re.data(),
-            runtime.active_im.data(),
-            runtime.scratch_re.data(),
-            runtime.scratch_im.data(),
-            static_cast<std::size_t>(runtime.active_pitch),
-            runtime.active_shots,
-            kernel.action.xmask,
-            static_cast<unsigned>(kernel.pivot),
-            out_dim,
-            kernel.coeff1_false_real.data(),
-            kernel.coeff1_false_imag.data(),
-            branch_bits.data(),
-            runtime.branch_invnorms.data());
-    } else {
-        batch_simd::scalar_table().nondiagonal_project(
-            runtime.active_re.data(),
-            runtime.active_im.data(),
-            runtime.scratch_re.data(),
-            runtime.scratch_im.data(),
-            static_cast<std::size_t>(runtime.active_pitch),
-            runtime.active_shots,
-            kernel.source0_false.data(),
-            kernel.source1_false.data(),
-            kernel.coeff1_false_real.data(),
-            kernel.coeff1_false_imag.data(),
-            out_dim,
-            branch_bits.data(),
-            runtime.branch_invnorms.data());
-    }
-    if (runtime.active_shots == runtime.active_pitch) {
-        const std::size_t active_prefix_size = out_dim * static_cast<std::size_t>(runtime.active_pitch);
-        std::copy_n(runtime.scratch_re.data(), active_prefix_size, runtime.active_re.data());
-        std::copy_n(runtime.scratch_im.data(), active_prefix_size, runtime.active_im.data());
-    } else {
-        const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
-        const auto live = static_cast<std::size_t>(runtime.active_shots);
-        for (std::size_t basis = 0; basis < out_dim; ++basis) {
-            const std::size_t base = basis * pitch;
-            std::copy_n(runtime.scratch_re.data() + base, live, runtime.active_re.data() + base);
-            std::copy_n(runtime.scratch_im.data() + base, live, runtime.active_im.data() + base);
-        }
-    }
-    --runtime.k;
-    ++runtime.ndormant;
-    assign_batch_symbol(runtime, branch_condition, branch_bits);
+    project_nondiagonal_batch(runtime, kernel, out_dim, use_xmask_kernel, branch_bits);
+    copy_projected_active_prefix_from_scratch(runtime, out_dim);
+    finish_active_measurement_branch(runtime, branch_condition, branch_bits);
 }
 
 void measure_precomputed_active_pauli_branch_batch(
