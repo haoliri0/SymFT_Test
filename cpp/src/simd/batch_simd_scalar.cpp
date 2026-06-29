@@ -701,7 +701,11 @@ void scalar_nondiagonal_project(
     const double* coeff1_false_imag,
     std::size_t out_dim,
     const std::uint64_t* branch_bits,
-    const double* invnorms) {
+    const double* invnorms,
+    const double* base_invnorms,
+    const double* signed_invnorms) {
+    (void)branch_bits;
+    (void)invnorms;
     for (std::size_t idx = 0; idx < out_dim; ++idx) {
         const double* r0p = re + source0_false[idx] * leading_shots;
         const double* i0p = im + source0_false[idx] * leading_shots;
@@ -713,12 +717,12 @@ void scalar_nondiagonal_project(
         const double c1i = coeff1_false_imag[idx];
         SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < active_shots; ++shot) {
-            const double branch_sign = batch_bit(branch_bits, shot) ? -1.0 : 1.0;
             const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
             const double prod_i = c1r * i1p[shot] + c1i * r1p[shot];
-            const double n = invnorms[shot];
-            dst_r[shot] = (kInvSqrt2 * r0p[shot] + branch_sign * prod_r) * n;
-            dst_i[shot] = (kInvSqrt2 * i0p[shot] + branch_sign * prod_i) * n;
+            const double bn = base_invnorms[shot];
+            const double sn = signed_invnorms[shot];
+            dst_r[shot] = r0p[shot] * bn + prod_r * sn;
+            dst_i[shot] = i0p[shot] * bn + prod_i * sn;
         }
     }
 }
@@ -736,7 +740,11 @@ void scalar_nondiagonal_xmask_project(
     const double* coeff1_false_real,
     const double* coeff1_false_imag,
     const std::uint64_t* branch_bits,
-    const double* invnorms) {
+    const double* invnorms,
+    const double* base_invnorms,
+    const double* signed_invnorms) {
+    (void)branch_bits;
+    (void)invnorms;
     const std::size_t selector = std::size_t{1} << pair_bit;
     const std::size_t lower_mask = static_cast<std::size_t>(xmask) & (selector - 1);
     const std::size_t dim = npairs << 1;
@@ -756,12 +764,12 @@ void scalar_nondiagonal_xmask_project(
             const double c1i = coeff1_false_imag[pair_idx];
             SYMFT_BATCH_SIMD_LOOP
             for (int shot = 0; shot < active_shots; ++shot) {
-                const double branch_sign = batch_bit(branch_bits, shot) ? -1.0 : 1.0;
                 const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
                 const double prod_i = c1r * i1p[shot] + c1i * r1p[shot];
-                const double n = invnorms[shot];
-                dst_r[shot] = (kInvSqrt2 * r0p[shot] + branch_sign * prod_r) * n;
-                dst_i[shot] = (kInvSqrt2 * i0p[shot] + branch_sign * prod_i) * n;
+                const double bn = base_invnorms[shot];
+                const double sn = signed_invnorms[shot];
+                dst_r[shot] = r0p[shot] * bn + prod_r * sn;
+                dst_i[shot] = i0p[shot] * bn + prod_i * sn;
             }
             ++pair_idx;
         }

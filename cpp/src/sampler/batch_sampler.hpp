@@ -66,6 +66,8 @@ struct BatchFactoredExecutorState {
     std::vector<double> rotation_coefficients;
     std::vector<double> branch_prob_true;
     std::vector<double> branch_invnorms;
+    std::vector<double> branch_base_invnorms;
+    std::vector<double> branch_signed_invnorms;
     std::uint64_t rng_state = 1;
 
     explicit BatchFactoredExecutorState(

@@ -1195,6 +1195,12 @@ void reset_batch_executor(
     if (runtime.branch_invnorms.size() < static_cast<std::size_t>(runtime.batches)) {
         runtime.branch_invnorms.resize(static_cast<std::size_t>(runtime.batches), 0.0);
     }
+    if (runtime.branch_base_invnorms.size() < static_cast<std::size_t>(runtime.batches)) {
+        runtime.branch_base_invnorms.resize(static_cast<std::size_t>(runtime.batches), 0.0);
+    }
+    if (runtime.branch_signed_invnorms.size() < static_cast<std::size_t>(runtime.batches)) {
+        runtime.branch_signed_invnorms.resize(static_cast<std::size_t>(runtime.batches), 0.0);
+    }
 
     const std::size_t dim = active_length(program.initial_k);
     for (std::size_t basis = 0; basis < dim; ++basis) {

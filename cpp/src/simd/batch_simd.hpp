@@ -210,7 +210,9 @@ struct KernelTable {
         const double* coeff1_false_imag,
         std::size_t out_dim,
         const std::uint64_t* branch_bits,
-        const double* invnorms);
+        const double* invnorms,
+        const double* base_invnorms,
+        const double* signed_invnorms);
 
     void (*nondiagonal_xmask_project)(
         const double* re,
@@ -225,7 +227,9 @@ struct KernelTable {
         const double* coeff1_false_real,
         const double* coeff1_false_imag,
         const std::uint64_t* branch_bits,
-        const double* invnorms);
+        const double* invnorms,
+        const double* base_invnorms,
+        const double* signed_invnorms);
 };
 
 const KernelTable& scalar_table();

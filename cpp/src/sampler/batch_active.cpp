@@ -2,6 +2,8 @@
 
 namespace symft {
 
+constexpr double kMeasurementInvSqrt2 = 0.70710678118654752440;
+
 const std::vector<double>& fill_rotation_coefficients(
     BatchFactoredExecutorState& runtime,
     const std::vector<std::uint64_t>& sign_bits,
@@ -121,7 +123,9 @@ bool project_nondiagonal_batch(
             kernel.coeff1_false_real.data(),
             kernel.coeff1_false_imag.data(),
             branch_bits.data(),
-            runtime.branch_invnorms.data());
+            runtime.branch_invnorms.data(),
+            runtime.branch_base_invnorms.data(),
+            runtime.branch_signed_invnorms.data());
         return true;
     }
     batch_simd::scalar_table().nondiagonal_project(
@@ -137,7 +141,9 @@ bool project_nondiagonal_batch(
         kernel.coeff1_false_imag.data(),
         out_dim,
         branch_bits.data(),
-        runtime.branch_invnorms.data());
+        runtime.branch_invnorms.data(),
+        runtime.branch_base_invnorms.data(),
+        runtime.branch_signed_invnorms.data());
     return false;
 }
 
@@ -383,7 +389,11 @@ void sample_batch_measurement_branches_from_true(
         if (probability <= 0.0) {
             fail("sampled an impossible active measurement branch");
         }
-        invnorms[static_cast<std::size_t>(shot)] = 1.0 / std::sqrt(probability);
+        const double invnorm = 1.0 / std::sqrt(probability);
+        const auto shot_idx = static_cast<std::size_t>(shot);
+        invnorms[shot_idx] = invnorm;
+        runtime.branch_base_invnorms[shot_idx] = kMeasurementInvSqrt2 * invnorm;
+        runtime.branch_signed_invnorms[shot_idx] = branch ? -invnorm : invnorm;
     }
 }
 
