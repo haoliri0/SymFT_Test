@@ -69,25 +69,44 @@ void copy_projected_active_prefix_from_scratch(BatchFactoredExecutorState& runti
     }
 }
 
-void permute_diagonal_measurement_eigenspaces_to_scratch(
-    BatchFactoredExecutorState& runtime,
-    const PrecomputedActivePauliMeasurementKernel& kernel) {
-    const std::size_t out_dim = kernel.source0_false.size();
+void swap_active_rows(BatchFactoredExecutorState& runtime, std::size_t row0, std::size_t row1) {
     const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
-    const auto live = static_cast<std::size_t>(runtime.active_shots);
-    for (std::size_t idx = 0; idx < out_dim; ++idx) {
-        const std::size_t false_src = kernel.source0_false[idx] * pitch;
-        const std::size_t true_src = kernel.source0_true[idx] * pitch;
-        const std::size_t false_dst = idx * pitch;
-        const std::size_t true_dst = (out_dim + idx) * pitch;
-        std::copy_n(runtime.active_re.data() + false_src, live, runtime.scratch_re.data() + false_dst);
-        std::copy_n(runtime.active_im.data() + false_src, live, runtime.scratch_im.data() + false_dst);
-        std::copy_n(runtime.active_re.data() + true_src, live, runtime.scratch_re.data() + true_dst);
-        std::copy_n(runtime.active_im.data() + true_src, live, runtime.scratch_im.data() + true_dst);
+    double* r0 = runtime.active_re.data() + row0 * pitch;
+    double* i0 = runtime.active_im.data() + row0 * pitch;
+    double* r1 = runtime.active_re.data() + row1 * pitch;
+    double* i1 = runtime.active_im.data() + row1 * pitch;
+    SYMFT_BATCH_SIMD_LOOP
+    for (int shot = 0; shot < runtime.active_shots; ++shot) {
+        const auto idx = static_cast<std::size_t>(shot);
+        const double tr = r0[idx];
+        const double ti = i0[idx];
+        r0[idx] = r1[idx];
+        i0[idx] = i1[idx];
+        r1[idx] = tr;
+        i1[idx] = ti;
     }
 }
 
-void measure_permuted_diagonal_true_prob_from_false_half(
+bool can_permute_diagonal_measurement_in_place(
+    const BatchFactoredExecutorState& runtime,
+    const PrecomputedActivePauliMeasurementKernel& kernel) {
+    return kernel.pivot == runtime.k - 1;
+}
+
+void permute_diagonal_measurement_eigenspaces_in_place(
+    BatchFactoredExecutorState& runtime,
+    const PrecomputedActivePauliMeasurementKernel& kernel) {
+    const std::size_t out_dim = kernel.source0_false.size();
+    for (std::size_t idx = 0; idx < out_dim; ++idx) {
+        const std::size_t false_src = kernel.source0_false[idx];
+        if (false_src != idx) {
+            const std::size_t true_src = kernel.source0_true[idx];
+            swap_active_rows(runtime, false_src, true_src);
+        }
+    }
+}
+
+void measure_diagonal_true_prob_from_false_prefix(
     BatchFactoredExecutorState& runtime,
     std::size_t out_dim) {
     std::fill(
@@ -97,8 +116,8 @@ void measure_permuted_diagonal_true_prob_from_false_half(
     const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
     for (std::size_t basis = 0; basis < out_dim; ++basis) {
         const std::size_t base = basis * pitch;
-        const double* rp = runtime.scratch_re.data() + base;
-        const double* ip = runtime.scratch_im.data() + base;
+        const double* rp = runtime.active_re.data() + base;
+        const double* ip = runtime.active_im.data() + base;
         SYMFT_BATCH_SIMD_LOOP
         for (int shot = 0; shot < runtime.active_shots; ++shot) {
             const double r = rp[shot];
@@ -110,6 +129,30 @@ void measure_permuted_diagonal_true_prob_from_false_half(
     for (int shot = 0; shot < runtime.active_shots; ++shot) {
         const auto idx = static_cast<std::size_t>(shot);
         runtime.branch_prob_true[idx] = 1.0 - std::clamp(runtime.branch_prob_true[idx], 0.0, 1.0);
+    }
+}
+
+void project_diagonal_measurement_to_scratch(
+    BatchFactoredExecutorState& runtime,
+    const PrecomputedActivePauliMeasurementKernel& kernel,
+    const std::vector<std::uint64_t>& branch_bits) {
+    const std::size_t out_dim = kernel.source0_false.size();
+    const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
+    for (std::size_t basis = 0; basis < out_dim; ++basis) {
+        double* dst_r = runtime.scratch_re.data() + basis * pitch;
+        double* dst_i = runtime.scratch_im.data() + basis * pitch;
+        const double* false_r = runtime.active_re.data() + kernel.source0_false[basis] * pitch;
+        const double* false_i = runtime.active_im.data() + kernel.source0_false[basis] * pitch;
+        const double* true_r = runtime.active_re.data() + kernel.source0_true[basis] * pitch;
+        const double* true_i = runtime.active_im.data() + kernel.source0_true[basis] * pitch;
+        SYMFT_BATCH_SIMD_LOOP
+        for (int shot = 0; shot < runtime.active_shots; ++shot) {
+            const auto shot_idx = static_cast<std::size_t>(shot);
+            const bool branch = (branch_bits[batch_shot_word(shot)] & batch_shot_mask(shot)) != 0;
+            const double n = runtime.branch_invnorms[shot_idx];
+            dst_r[shot_idx] = (branch ? true_r[shot_idx] : false_r[shot_idx]) * n;
+            dst_i[shot_idx] = (branch ? true_i[shot_idx] : false_i[shot_idx]) * n;
+        }
     }
 }
 
@@ -478,23 +521,39 @@ void measure_diagonal_active_pauli_branch_batch(
     const PrecomputedActivePauliMeasurementKernel& kernel,
     int branch_condition) {
     const std::size_t out_dim = kernel.source0_false.size();
-    permute_diagonal_measurement_eigenspaces_to_scratch(runtime, kernel);
-    measure_permuted_diagonal_true_prob_from_false_half(runtime, out_dim);
+    const bool in_place_permuted = can_permute_diagonal_measurement_in_place(runtime, kernel);
+    if (in_place_permuted) {
+        permute_diagonal_measurement_eigenspaces_in_place(runtime, kernel);
+        measure_diagonal_true_prob_from_false_prefix(runtime, out_dim);
+    } else {
+        batch_simd::scalar_table().diagonal_measure_true_prob(
+            runtime.active_re.data(),
+            runtime.active_im.data(),
+            static_cast<std::size_t>(runtime.active_pitch),
+            runtime.active_shots,
+            kernel.source0_true.data(),
+            out_dim,
+            runtime.branch_prob_true.data());
+    }
     sample_batch_measurement_branches_from_true(
         runtime,
         runtime.eval_scratch,
         runtime.branch_prob_true,
         runtime.branch_invnorms);
     const auto& branch_bits = runtime.eval_scratch;
-    batch_simd::scalar_table().last_z_project(
-        runtime.scratch_re.data(),
-        runtime.scratch_im.data(),
-        static_cast<std::size_t>(runtime.active_pitch),
-        runtime.active_shots,
-        out_dim,
-        branch_bits.data(),
-        runtime.branch_invnorms.data());
-    copy_projected_active_prefix_from_scratch(runtime, out_dim);
+    if (in_place_permuted) {
+        batch_simd::scalar_table().last_z_project(
+            runtime.active_re.data(),
+            runtime.active_im.data(),
+            static_cast<std::size_t>(runtime.active_pitch),
+            runtime.active_shots,
+            out_dim,
+            branch_bits.data(),
+            runtime.branch_invnorms.data());
+    } else {
+        project_diagonal_measurement_to_scratch(runtime, kernel, branch_bits);
+        copy_projected_active_prefix_from_scratch(runtime, out_dim);
+    }
     finish_active_measurement_branch(runtime, branch_condition, branch_bits);
 }
 
