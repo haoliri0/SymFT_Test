@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -355,6 +356,43 @@ void test_dormant_measurement_sign_feeds_promotion() {
     }
 }
 
+void test_measurement_record_substitution_cancels_reset() {
+    using namespace symft;
+    FrameFactoredState state(1, 0);
+    const SymbolicBool dense_sign(false, {1, 2, 3, 4, 5, 6, 7, 8});
+    state.context->bump_next_condition(dense_sign);
+    const int record_condition = state.context->fresh_condition();
+    apply_pauli_measurement(state, pauli_x(1, 0), dense_sign, 1, record_condition);
+    apply_pauli(state, pauli_z(1, 0), xor_bool(symbolic_bool(record_condition), dense_sign));
+    apply_pauli_measurement(state, pauli_x(1, 0), SymbolicBool(false), 2, state.context->fresh_condition());
+
+    PendingFactoredState pending(state);
+    const auto program = plan_factored_updates(pending);
+    require(program.instructions.size() >= 2, "reset cancellation test emits two measurements");
+
+    const auto* measurement = std::get_if<IntroduceDormantMeasurementBranch>(&program.instructions[0]);
+    require(measurement != nullptr, "reset cancellation test starts with dormant branch measurement");
+    require(
+        measurement->outcome.conditions.size() == dense_sign.conditions.size() + 1,
+        "recorded measurement outcome still carries the original symbolic sign");
+
+    bool checked_second_measurement = false;
+    for (std::size_t i = 1; i < program.instructions.size(); ++i) {
+        std::visit(
+            [&](const auto& instruction) {
+                using T = std::decay_t<decltype(instruction)>;
+                if constexpr (std::is_same_v<T, RecordMeasurement>) {
+                    require(
+                        !instruction.outcome.constant && instruction.outcome.conditions.empty(),
+                        "reset substitution cancels the expanded effective branch expression");
+                    checked_second_measurement = true;
+                }
+            },
+            program.instructions[i]);
+    }
+    require(checked_second_measurement, "reset cancellation test checks the second measurement");
+}
+
 void test_parser_feedback() {
     using namespace symft;
     const auto parsed = parse_stim_text("M !0\nCX rec[-1] 1\nM 1\n");
@@ -641,6 +679,7 @@ int main() {
     test_active_h_rewrite_stays_virtual();
     test_dormant_measurement_tableau_reuse();
     test_dormant_measurement_sign_feeds_promotion();
+    test_measurement_record_substitution_cancels_reset();
     test_parser_feedback();
     test_stim_frontend_circuit_lowering();
     test_t_gate_exact_rotation();

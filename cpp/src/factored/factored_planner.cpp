@@ -70,6 +70,36 @@ PendingPauliMeasurement xor_operation_sign_if_anticommutes(
     };
 }
 
+SymbolicBool substitute_condition(const SymbolicBool& expr, int condition, const SymbolicBool& replacement) {
+    if (!std::binary_search(expr.conditions.begin(), expr.conditions.end(), condition)) {
+        return expr;
+    }
+    SymbolicBool out = expr;
+    toggle_condition(out.conditions, condition);
+    return xor_bool(out, replacement);
+}
+
+PendingPauliRotation substitute_operation_sign_condition(
+    const PendingPauliRotation& operation,
+    int condition,
+    const SymbolicBool& replacement) {
+    return PendingPauliRotation{
+        operation.theta,
+        SymbolicPauliString(operation.pauli.pauli, substitute_condition(operation.pauli.sign, condition, replacement)),
+    };
+}
+
+PendingPauliMeasurement substitute_operation_sign_condition(
+    const PendingPauliMeasurement& operation,
+    int condition,
+    const SymbolicBool& replacement) {
+    return PendingPauliMeasurement{
+        SymbolicPauliString(operation.pauli.pauli, substitute_condition(operation.pauli.sign, condition, replacement)),
+        operation.record,
+        operation.record_condition,
+    };
+}
+
 void push_symbolic_pauli_through_pending_from(
     PendingFactoredState& state,
     int first_index_one_based,
@@ -80,6 +110,25 @@ void push_symbolic_pauli_through_pending_from(
     for (std::size_t idx = start; idx < state.pending_operations.size(); ++idx) {
         state.pending_operations[idx] = std::visit(
             [&](const auto& op) -> PendingOperation { return xor_operation_sign_if_anticommutes(op, pauli, sign); },
+            state.pending_operations[idx]);
+    }
+}
+
+void substitute_record_condition_through_pending_from(
+    PendingFactoredState& state,
+    int first_index_one_based,
+    std::optional<int> record_condition,
+    const SymbolicBool& outcome) {
+    if (!record_condition) {
+        return;
+    }
+    state.context->bump_next_condition(outcome);
+    const std::size_t start = first_index_one_based <= 1 ? 0 : static_cast<std::size_t>(first_index_one_based - 1);
+    for (std::size_t idx = start; idx < state.pending_operations.size(); ++idx) {
+        state.pending_operations[idx] = std::visit(
+            [&](const auto& op) -> PendingOperation {
+                return substitute_operation_sign_condition(op, *record_condition, outcome);
+            },
             state.pending_operations[idx]);
     }
 }
@@ -216,8 +265,9 @@ SymbolicBool measurement_base_outcome(const SymbolicPauliString& pauli) {
 std::optional<FactoredInstruction> record_deterministic_measurement(
     PendingFactoredState& state,
     const PendingPauliMeasurement& measurement,
-    const SymbolicBool& outcome) {
-    return push_instruction(
+    const SymbolicBool& outcome,
+    bool queued_first) {
+    const auto instruction = push_instruction(
         state,
         RecordMeasurement{
             outcome,
@@ -225,6 +275,12 @@ std::optional<FactoredInstruction> record_deterministic_measurement(
             measurement.record_condition,
             SymbolicBoolEvaluationPlan(outcome),
         });
+    substitute_record_condition_through_pending_from(
+        state,
+        queued_first ? 2 : 1,
+        measurement.record_condition,
+        outcome);
+    return instruction;
 }
 
 CliffordFrame dormant_measurement_replacement_tableau_frame(
@@ -275,15 +331,22 @@ std::optional<FactoredInstruction> measure_dormant_xy_pauli(
         queued_first ? 2 : 1,
         pauli_x(state.n, state.k + picked_dormant),
         branch_bit);
-    return push_instruction(
+    const SymbolicBool outcome = xor_bool(base_outcome, branch_bit);
+    const auto instruction = push_instruction(
         state,
         IntroduceDormantMeasurementBranch{
             branch,
-            xor_bool(base_outcome, branch_bit),
+            outcome,
             measurement_record(state, current),
             current.record_condition,
-            SymbolicBoolEvaluationPlan(xor_bool(base_outcome, branch_bit)),
+            SymbolicBoolEvaluationPlan(outcome),
         });
+    substitute_record_condition_through_pending_from(
+        state,
+        queued_first ? 2 : 1,
+        current.record_condition,
+        outcome);
+    return instruction;
 }
 
 PauliString transform_by_frame(const CliffordFrame& frame, const PauliString& pauli) {
@@ -381,6 +444,11 @@ std::optional<FactoredInstruction> measure_active_pauli_branches(
         SymbolicBoolEvaluationPlan(outcome),
     };
     FactoredInstruction pushed = push_instruction(state, instruction);
+    substitute_record_condition_through_pending_from(
+        state,
+        queued_first ? 2 : 1,
+        current.record_condition,
+        outcome);
     set_planning_active_count(state, state.k - 1);
     return pushed;
 }
@@ -408,7 +476,7 @@ std::optional<FactoredInstruction> process_pending_measurement(PendingFactoredSt
     }
     const SymbolicBool base_outcome = measurement_base_outcome(current.pauli);
     if (!active_body.has_nonidentity_body()) {
-        return record_deterministic_measurement(state, current, base_outcome);
+        return record_deterministic_measurement(state, current, base_outcome, queued_first);
     }
     return measure_active_pauli_branches(state, current, active_body, base_outcome, queued_first);
 }
