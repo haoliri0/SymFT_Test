@@ -70,31 +70,65 @@ PendingPauliMeasurement xor_operation_sign_if_anticommutes(
     };
 }
 
-SymbolicBool substitute_condition(const SymbolicBool& expr, int condition, const SymbolicBool& replacement) {
-    if (!std::binary_search(expr.conditions.begin(), expr.conditions.end(), condition)) {
-        return expr;
+std::size_t symbolic_word_cost(const SymbolicBool& expr) {
+    std::size_t count = 0;
+    std::size_t previous = 0;
+    for (int condition : expr.conditions) {
+        const std::size_t word = symbol_word_index(condition);
+        if (count == 0 || word != previous) {
+            ++count;
+            previous = word;
+        }
     }
-    SymbolicBool out = expr;
-    toggle_condition(out.conditions, condition);
-    return xor_bool(out, replacement);
+    return count;
 }
 
-PendingPauliRotation substitute_operation_sign_condition(
+bool has_lower_sampling_cost(const SymbolicBool& candidate, const SymbolicBool& current) {
+    const std::size_t candidate_words = symbolic_word_cost(candidate);
+    const std::size_t current_words = symbolic_word_cost(current);
+    if (candidate_words != current_words) {
+        return candidate_words < current_words;
+    }
+    return candidate.conditions.size() < current.conditions.size();
+}
+
+SymbolicBool reduce_by_relation_once(const SymbolicBool& expr, const SymbolicBool& relation) {
+    if (relation.conditions.empty() && !relation.constant) {
+        return expr;
+    }
+    const SymbolicBool candidate = xor_bool(expr, relation);
+    return has_lower_sampling_cost(candidate, expr) ? candidate : expr;
+}
+
+SymbolicBool reduce_by_relations(SymbolicBool expr, const std::vector<SymbolicBool>& relations) {
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto& relation : relations) {
+            const SymbolicBool reduced = reduce_by_relation_once(expr, relation);
+            if (reduced != expr) {
+                expr = reduced;
+                changed = true;
+            }
+        }
+    }
+    return expr;
+}
+
+PendingPauliRotation reduce_operation_sign_by_relation(
     const PendingPauliRotation& operation,
-    int condition,
-    const SymbolicBool& replacement) {
+    const SymbolicBool& relation) {
     return PendingPauliRotation{
         operation.theta,
-        SymbolicPauliString(operation.pauli.pauli, substitute_condition(operation.pauli.sign, condition, replacement)),
+        SymbolicPauliString(operation.pauli.pauli, reduce_by_relation_once(operation.pauli.sign, relation)),
     };
 }
 
-PendingPauliMeasurement substitute_operation_sign_condition(
+PendingPauliMeasurement reduce_operation_sign_by_relation(
     const PendingPauliMeasurement& operation,
-    int condition,
-    const SymbolicBool& replacement) {
+    const SymbolicBool& relation) {
     return PendingPauliMeasurement{
-        SymbolicPauliString(operation.pauli.pauli, substitute_condition(operation.pauli.sign, condition, replacement)),
+        SymbolicPauliString(operation.pauli.pauli, reduce_by_relation_once(operation.pauli.sign, relation)),
         operation.record,
         operation.record_condition,
     };
@@ -114,7 +148,7 @@ void push_symbolic_pauli_through_pending_from(
     }
 }
 
-void substitute_record_condition_through_pending_from(
+void reduce_measurement_relation_through_pending_from(
     PendingFactoredState& state,
     int first_index_one_based,
     std::optional<int> record_condition,
@@ -122,12 +156,13 @@ void substitute_record_condition_through_pending_from(
     if (!record_condition) {
         return;
     }
-    state.context->bump_next_condition(outcome);
+    const SymbolicBool relation = xor_bool(symbolic_bool(*record_condition), outcome);
+    state.context->bump_next_condition(relation);
     const std::size_t start = first_index_one_based <= 1 ? 0 : static_cast<std::size_t>(first_index_one_based - 1);
     for (std::size_t idx = start; idx < state.pending_operations.size(); ++idx) {
         state.pending_operations[idx] = std::visit(
             [&](const auto& op) -> PendingOperation {
-                return substitute_operation_sign_condition(op, *record_condition, outcome);
+                return reduce_operation_sign_by_relation(op, relation);
             },
             state.pending_operations[idx]);
     }
@@ -275,7 +310,7 @@ std::optional<FactoredInstruction> record_deterministic_measurement(
             measurement.record_condition,
             SymbolicBoolEvaluationPlan(outcome),
         });
-    substitute_record_condition_through_pending_from(
+    reduce_measurement_relation_through_pending_from(
         state,
         queued_first ? 2 : 1,
         measurement.record_condition,
@@ -341,7 +376,7 @@ std::optional<FactoredInstruction> measure_dormant_xy_pauli(
             current.record_condition,
             SymbolicBoolEvaluationPlan(outcome),
         });
-    substitute_record_condition_through_pending_from(
+    reduce_measurement_relation_through_pending_from(
         state,
         queued_first ? 2 : 1,
         current.record_condition,
@@ -444,7 +479,7 @@ std::optional<FactoredInstruction> measure_active_pauli_branches(
         SymbolicBoolEvaluationPlan(outcome),
     };
     FactoredInstruction pushed = push_instruction(state, instruction);
-    substitute_record_condition_through_pending_from(
+    reduce_measurement_relation_through_pending_from(
         state,
         queued_first ? 2 : 1,
         current.record_condition,
@@ -516,6 +551,45 @@ std::vector<FactoredInstruction> process_pending_operations(PendingFactoredState
 }
 
 namespace {
+
+template <typename T>
+void reduce_instruction_symbolic_expressions(T& instruction, const std::vector<SymbolicBool>& relations) {
+    if constexpr (requires { instruction.sign; }) {
+        instruction.sign = reduce_by_relations(std::move(instruction.sign), relations);
+    }
+    if constexpr (requires { instruction.outcome; }) {
+        instruction.outcome = reduce_by_relations(std::move(instruction.outcome), relations);
+    }
+}
+
+template <typename T>
+std::optional<SymbolicBool> measurement_relation_from_instruction(const T& instruction) {
+    if constexpr (requires { instruction.record_condition; instruction.outcome; }) {
+        if (instruction.record_condition) {
+            return xor_bool(symbolic_bool(*instruction.record_condition), instruction.outcome);
+        }
+    }
+    return std::nullopt;
+}
+
+void reduce_program_symbolic_expressions(std::vector<FactoredInstruction>& instructions) {
+    std::vector<SymbolicBool> relations;
+    for (auto& instruction : instructions) {
+        std::visit(
+            [&](auto& inst) {
+                reduce_instruction_symbolic_expressions(inst, relations);
+            },
+            instruction);
+        const auto relation = std::visit(
+            [](const auto& inst) -> std::optional<SymbolicBool> {
+                return measurement_relation_from_instruction(inst);
+            },
+            instruction);
+        if (relation && (!relation->conditions.empty() || relation->constant)) {
+            relations.push_back(*relation);
+        }
+    }
+}
 
 void refresh_instruction_plans(ApplyPrecomputedActivePauliRotation& instruction) {
     instruction.sign_plan = SymbolicBoolEvaluationPlan(instruction.sign);
@@ -657,6 +731,7 @@ FactoredInstructionProgram::FactoredInstructionProgram(
     if (initial_k > n || max_k > n || initial_k > max_k) {
         fail("invalid factored instruction program dimensions");
     }
+    reduce_program_symbolic_expressions(instructions);
     int record_count = 0;
     int detector_count = 0;
     for (auto& instruction : instructions) {

@@ -393,6 +393,73 @@ void test_measurement_record_substitution_cancels_reset() {
     require(checked_second_measurement, "reset cancellation test checks the second measurement");
 }
 
+void test_measurement_relation_reduces_dense_suffix_sign() {
+    using namespace symft;
+    const SymbolicBool dense_sign(false, {1, 2, 3, 4, 5, 6, 7, 8});
+    const int record_condition = 9;
+    const int branch = 10;
+    const int later_record_condition = 11;
+    const SymbolicBool outcome = xor_bool(dense_sign, symbolic_bool(branch));
+    FactoredInstructionProgram program(
+        1,
+        0,
+        std::vector<FactoredInstruction>{
+            IntroduceDormantMeasurementBranch{
+                branch,
+                outcome,
+                1,
+                record_condition,
+                SymbolicBoolEvaluationPlan(outcome),
+            },
+            RecordMeasurement{
+                dense_sign,
+                2,
+                later_record_condition,
+                SymbolicBoolEvaluationPlan(dense_sign),
+            },
+        },
+        0,
+        SymbolicContext(12));
+
+    const auto& reduced = std::get<RecordMeasurement>(program.instructions[1]).outcome;
+    require(
+        reduced == xor_bool(symbolic_bool(record_condition), symbolic_bool(branch)),
+        "measurement relation reduces dense lambda to m_t xor y_t");
+}
+
+void test_measurement_relation_keeps_sparse_record_sign() {
+    using namespace symft;
+    const SymbolicBool dense_sign(false, {1, 2, 3, 4, 5, 6, 7, 8});
+    const int record_condition = 9;
+    const int branch = 10;
+    const int later_record_condition = 11;
+    const SymbolicBool outcome = xor_bool(dense_sign, symbolic_bool(branch));
+    const SymbolicBool sparse_record = symbolic_bool(record_condition);
+    FactoredInstructionProgram program(
+        1,
+        0,
+        std::vector<FactoredInstruction>{
+            IntroduceDormantMeasurementBranch{
+                branch,
+                outcome,
+                1,
+                record_condition,
+                SymbolicBoolEvaluationPlan(outcome),
+            },
+            RecordMeasurement{
+                sparse_record,
+                2,
+                later_record_condition,
+                SymbolicBoolEvaluationPlan(sparse_record),
+            },
+        },
+        0,
+        SymbolicContext(12));
+
+    const auto& reduced = std::get<RecordMeasurement>(program.instructions[1]).outcome;
+    require(reduced == sparse_record, "measurement relation keeps already sparse record sign");
+}
+
 void test_parser_feedback() {
     using namespace symft;
     const auto parsed = parse_stim_text("M !0\nCX rec[-1] 1\nM 1\n");
@@ -680,6 +747,8 @@ int main() {
     test_dormant_measurement_tableau_reuse();
     test_dormant_measurement_sign_feeds_promotion();
     test_measurement_record_substitution_cancels_reset();
+    test_measurement_relation_reduces_dense_suffix_sign();
+    test_measurement_relation_keeps_sparse_record_sign();
     test_parser_feedback();
     test_stim_frontend_circuit_lowering();
     test_t_gate_exact_rotation();
