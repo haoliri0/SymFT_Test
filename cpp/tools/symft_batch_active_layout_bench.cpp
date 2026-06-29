@@ -77,31 +77,31 @@ std::string sign_pattern_name(SignPattern pattern) {
     return "unknown";
 }
 
-symft::PauliString uniform_pauli(int k, unsigned pair_bit, bool compound) {
+symft::PauliString uniform_pauli(int k, unsigned pair_bit, bool noncontiguous) {
     symft::PauliString pauli(k);
     pauli.set_xbit(static_cast<int>(pair_bit));
-    if (compound && static_cast<int>(pair_bit) + 1 < k) {
-        pauli.set_xbit(static_cast<int>(pair_bit) + 1);
+    if (noncontiguous) {
+        pauli.set_xbit(static_cast<int>(pair_bit) - 1);
     }
     return pauli;
 }
 
-symft::PauliString real_pauli(int k, unsigned pair_bit, bool compound) {
+symft::PauliString real_pauli(int k, unsigned pair_bit, bool noncontiguous) {
     symft::PauliString pauli(k);
     pauli.set_xbit(static_cast<int>(pair_bit));
     pauli.set_zbit(static_cast<int>(pair_bit));
     pauli.set_phase(1);
-    if (compound && static_cast<int>(pair_bit) + 1 < k) {
-        pauli.set_xbit(static_cast<int>(pair_bit) + 1);
+    if (noncontiguous) {
+        pauli.set_xbit(static_cast<int>(pair_bit) - 1);
     }
     return pauli;
 }
 
-symft::PauliString general_pauli(int k, unsigned pair_bit, bool compound) {
+symft::PauliString general_pauli(int k, unsigned pair_bit, bool noncontiguous) {
     symft::PauliString pauli(k);
     pauli.set_xbit(static_cast<int>(pair_bit));
-    if (compound && static_cast<int>(pair_bit) + 1 < k) {
-        pauli.set_xbit(static_cast<int>(pair_bit) + 1);
+    if (noncontiguous) {
+        pauli.set_xbit(static_cast<int>(pair_bit) - 1);
     }
     pauli.set_zbit((static_cast<int>(pair_bit) + 2) % k);
     return pauli;
@@ -308,16 +308,24 @@ BenchResult run_bench(const BatchState& initial, const BenchCase& bench_case, in
     };
 }
 
-std::vector<BenchCase> make_cases(int k, unsigned pair_bit, bool compound) {
-    const std::string xmask_name = compound ? "compound" : "single_bit";
+std::vector<BenchCase> make_cases(int k, unsigned pair_bit, bool noncontiguous) {
+    const std::string xmask_name = noncontiguous ? "noncontiguous" : "contiguous";
     std::vector<BenchCase> cases;
-    if (pair_bit == 0 && !compound) {
+    if (pair_bit == 1 && !noncontiguous) {
         cases.push_back({"diagonal", "z0", symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(symft::pauli_z(k, 0)), kPi / 8.0)});
     }
-    cases.push_back({"uniform", xmask_name, symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(uniform_pauli(k, pair_bit, compound)), kPi / 8.0)});
-    cases.push_back({"real", xmask_name, symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(real_pauli(k, pair_bit, compound)), kPi / 8.0)});
-    cases.push_back({"general", xmask_name, symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(general_pauli(k, pair_bit, compound)), kPi / 8.0)});
+    cases.push_back({"uniform", xmask_name, symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(uniform_pauli(k, pair_bit, noncontiguous)), kPi / 8.0)});
+    cases.push_back({"real", xmask_name, symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(real_pauli(k, pair_bit, noncontiguous)), kPi / 8.0)});
+    cases.push_back({"general", xmask_name, symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(general_pauli(k, pair_bit, noncontiguous)), kPi / 8.0)});
     return cases;
+}
+
+const char* pairing_name(const symft::PrecomputedActivePauliRotationKernel& kernel) {
+    if (kernel.is_diagonal) {
+        return "diagonal";
+    }
+    const std::size_t selector = std::size_t{1} << kernel.pair_bit;
+    return (static_cast<std::size_t>(kernel.action.xmask) & (selector - 1)) == 0 ? "contiguous" : "noncontiguous";
 }
 
 void print_result(
@@ -330,6 +338,8 @@ void print_result(
     std::cout << "k " << k << " dim " << active_dim(k) << " active_shots " << shots
               << " kernel " << bench_case.kernel_name << " xmask " << bench_case.xmask_name
               << " pair_bit " << bench_case.kernel.pair_bit
+              << " raw_xmask 0x" << std::hex << bench_case.kernel.action.xmask << std::dec
+              << " pairing " << pairing_name(bench_case.kernel)
               << " sign_pattern " << sign_pattern_name(pattern)
               << " iterations " << iterations
               << " seconds " << result.seconds
@@ -374,16 +384,15 @@ int main(int argc, char** argv) {
         const std::vector<int> shot_counts = {64, 256, 1024};
         const std::vector<SignPattern> patterns = {SignPattern::AllMinus, SignPattern::AllPlus, SignPattern::Mixed};
         for (int k = 4; k <= max_k; k += 2) {
-            const std::vector<unsigned> pair_bits = {0, static_cast<unsigned>(std::min(3, k - 1))};
+            std::vector<unsigned> pair_bits = {1, static_cast<unsigned>(std::min(3, k - 1)), static_cast<unsigned>(k - 1)};
+            std::sort(pair_bits.begin(), pair_bits.end());
+            pair_bits.erase(std::unique(pair_bits.begin(), pair_bits.end()), pair_bits.end());
             for (int shots : shot_counts) {
                 const BatchState initial = initial_state(k, shots);
                 const int iterations = std::max(2, target_updates / static_cast<int>(active_dim(k) * static_cast<std::size_t>(shots)));
                 for (unsigned pair_bit : pair_bits) {
-                    for (bool compound : {false, true}) {
-                        if (compound && static_cast<int>(pair_bit) + 1 >= k) {
-                            continue;
-                        }
-                        for (const auto& bench_case : make_cases(k, pair_bit, compound)) {
+                    for (bool noncontiguous : {false, true}) {
+                        for (const auto& bench_case : make_cases(k, pair_bit, noncontiguous)) {
                             for (SignPattern pattern : patterns) {
                                 for (int repeat = 0; repeat < repeats; ++repeat) {
                                     (void)repeat;

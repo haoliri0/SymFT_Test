@@ -58,9 +58,32 @@ std::size_t active_dim(int k) {
     return std::size_t{1} << k;
 }
 
-symft::PauliString general_pauli(int k, int pair_bit) {
+symft::PauliString uniform_pauli(int k, int pair_bit, bool noncontiguous) {
     symft::PauliString pauli(k);
     pauli.set_xbit(pair_bit);
+    if (noncontiguous) {
+        pauli.set_xbit(pair_bit - 1);
+    }
+    return pauli;
+}
+
+symft::PauliString real_pauli(int k, int pair_bit, bool noncontiguous) {
+    symft::PauliString pauli(k);
+    pauli.set_xbit(pair_bit);
+    pauli.set_zbit(pair_bit);
+    pauli.set_phase(1);
+    if (noncontiguous) {
+        pauli.set_xbit(pair_bit - 1);
+    }
+    return pauli;
+}
+
+symft::PauliString general_pauli(int k, int pair_bit, bool noncontiguous) {
+    symft::PauliString pauli(k);
+    pauli.set_xbit(pair_bit);
+    if (noncontiguous) {
+        pauli.set_xbit(pair_bit - 1);
+    }
     pauli.set_zbit((pair_bit + 1) % k);
     return pauli;
 }
@@ -238,11 +261,10 @@ void apply_soa_block(SoAState& state, const symft::PrecomputedActivePauliRotatio
         }
 #endif
         for (std::size_t block = 0; block < dim; block += step) {
-            const std::size_t right_base = block ^ static_cast<std::size_t>(kernel.action.xmask);
             SYMFT_BENCH_SIMD_LOOP
             for (std::size_t offset = 0; offset < selector; ++offset) {
                 const std::size_t i0 = block + offset;
-                const std::size_t i1 = right_base + offset;
+                const std::size_t i1 = i0 ^ static_cast<std::size_t>(kernel.action.xmask);
                 const double r0 = re[i0];
                 const double im0 = im[i0];
                 const double r1 = re[i1];
@@ -289,11 +311,10 @@ void apply_soa_block(SoAState& state, const symft::PrecomputedActivePauliRotatio
 #endif
         std::size_t pair_idx = 0;
         for (std::size_t block = 0; block < dim; block += step) {
-            const std::size_t right_base = block ^ static_cast<std::size_t>(kernel.action.xmask);
             SYMFT_BENCH_SIMD_LOOP
             for (std::size_t offset = 0; offset < selector; ++offset) {
                 const std::size_t i0 = block + offset;
-                const std::size_t i1 = right_base + offset;
+                const std::size_t i1 = i0 ^ static_cast<std::size_t>(kernel.action.xmask);
                 const double q = kernel.real_pair_flip_basis_phase_signs[pair_idx++] * base_coeff;
                 const double r0 = re[i0];
                 const double im0 = im[i0];
@@ -355,11 +376,10 @@ void apply_soa_block(SoAState& state, const symft::PrecomputedActivePauliRotatio
 #endif
     std::size_t pair_idx = 0;
     for (std::size_t block = 0; block < dim; block += step) {
-        const std::size_t right_base = block ^ static_cast<std::size_t>(kernel.action.xmask);
         SYMFT_BENCH_SIMD_LOOP
         for (std::size_t offset = 0; offset < selector; ++offset) {
             const std::size_t i0 = block + offset;
-            const std::size_t i1 = right_base + offset;
+            const std::size_t i1 = i0 ^ static_cast<std::size_t>(kernel.action.xmask);
             const double r0 = re[i0];
             const double im0 = im[i0];
             const double r1 = re[i1];
@@ -461,14 +481,42 @@ BenchResult bench_soa(const std::vector<Complex>& initial, const symft::Precompu
 }
 
 std::vector<BenchCase> make_cases(int k) {
-    const int wide_pair_bit = std::min(3, k - 1);
-    return {
-        {"diag_z0", symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(symft::pauli_z(k, 0)), kPi / 8.0)},
-        {"uniform_x0", symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(symft::pauli_x(k, 0)), kPi / 8.0)},
-        {"uniform_xw", symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(symft::pauli_x(k, wide_pair_bit)), kPi / 8.0)},
-        {"real_yw", symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(symft::pauli_y(k, wide_pair_bit)), kPi / 8.0)},
-        {"general_xw_znext", symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(general_pauli(k, wide_pair_bit)), kPi / 8.0)},
-    };
+    std::vector<BenchCase> cases;
+    cases.push_back({"diag_z0", symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(symft::pauli_z(k, 0)), kPi / 8.0)});
+    cases.push_back({"uniform_x0", symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(symft::pauli_x(k, 0)), kPi / 8.0)});
+
+    std::vector<int> pair_bits = {1, std::min(3, k - 1), k - 1};
+    std::sort(pair_bits.begin(), pair_bits.end());
+    pair_bits.erase(std::unique(pair_bits.begin(), pair_bits.end()), pair_bits.end());
+    for (const int pair_bit : pair_bits) {
+        cases.push_back(
+            {"uniform_p" + std::to_string(pair_bit) + "_contig",
+             symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(uniform_pauli(k, pair_bit, false)), kPi / 8.0)});
+        cases.push_back(
+            {"uniform_p" + std::to_string(pair_bit) + "_noncontig",
+             symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(uniform_pauli(k, pair_bit, true)), kPi / 8.0)});
+        cases.push_back(
+            {"real_p" + std::to_string(pair_bit) + "_contig",
+             symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(real_pauli(k, pair_bit, false)), kPi / 8.0)});
+        cases.push_back(
+            {"real_p" + std::to_string(pair_bit) + "_noncontig",
+             symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(real_pauli(k, pair_bit, true)), kPi / 8.0)});
+        cases.push_back(
+            {"general_p" + std::to_string(pair_bit) + "_contig",
+             symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(general_pauli(k, pair_bit, false)), kPi / 8.0)});
+        cases.push_back(
+            {"general_p" + std::to_string(pair_bit) + "_noncontig",
+             symft::PrecomputedActivePauliRotationKernel(symft::ActivePauliAction(general_pauli(k, pair_bit, true)), kPi / 8.0)});
+    }
+    return cases;
+}
+
+const char* pairing_name(const symft::PrecomputedActivePauliRotationKernel& kernel) {
+    if (kernel.is_diagonal) {
+        return "diagonal";
+    }
+    const std::size_t selector = std::size_t{1} << kernel.pair_bit;
+    return (static_cast<std::size_t>(kernel.action.xmask) & (selector - 1)) == 0 ? "contiguous" : "noncontiguous";
 }
 
 void print_result(
@@ -478,6 +526,9 @@ void print_result(
     int iterations,
     const BenchResult& result) {
     std::cout << "k " << k << " dim " << active_dim(k) << " kernel " << bench_case.name << " layout " << layout
+              << " pair_bit " << bench_case.kernel.pair_bit
+              << " xmask 0x" << std::hex << bench_case.kernel.action.xmask << std::dec
+              << " pairing " << pairing_name(bench_case.kernel)
               << " iterations " << iterations << " seconds " << result.seconds << " ns_per_apply " << result.ns_per_apply
               << " ns_per_amplitude " << result.ns_per_amplitude << " checksum " << std::setprecision(17) << result.checksum
               << std::setprecision(6) << "\n";
