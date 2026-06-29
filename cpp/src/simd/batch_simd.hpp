@@ -185,6 +185,18 @@ struct KernelTable {
         std::size_t out_dim,
         double* prob_true);
 
+    void (*nondiagonal_xmask_measure_true_prob)(
+        const double* re,
+        const double* im,
+        std::size_t leading_shots,
+        int active_shots,
+        std::uint64_t xmask,
+        unsigned pair_bit,
+        std::size_t npairs,
+        const double* coeff1_false_real,
+        const double* coeff1_false_imag,
+        double* prob_true);
+
     void (*nondiagonal_project)(
         const double* re,
         const double* im,
@@ -197,6 +209,21 @@ struct KernelTable {
         const double* coeff1_false_real,
         const double* coeff1_false_imag,
         std::size_t out_dim,
+        const std::uint64_t* branch_bits,
+        const double* invnorms);
+
+    void (*nondiagonal_xmask_project)(
+        const double* re,
+        const double* im,
+        double* scratch_re,
+        double* scratch_im,
+        std::size_t leading_shots,
+        int active_shots,
+        std::uint64_t xmask,
+        unsigned pair_bit,
+        std::size_t npairs,
+        const double* coeff1_false_real,
+        const double* coeff1_false_imag,
         const std::uint64_t* branch_bits,
         const double* invnorms);
 };

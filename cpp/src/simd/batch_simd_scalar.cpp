@@ -648,6 +648,46 @@ void scalar_nondiagonal_measure_true_prob(
     }
 }
 
+void scalar_nondiagonal_xmask_measure_true_prob(
+    const double* re,
+    const double* im,
+    std::size_t leading_shots,
+    int active_shots,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    std::size_t npairs,
+    const double* coeff1_false_real,
+    const double* coeff1_false_imag,
+    double* prob_true) {
+    std::fill(prob_true, prob_true + active_shots, 0.0);
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t lower_mask = static_cast<std::size_t>(xmask) & (selector - 1);
+    const std::size_t dim = npairs << 1;
+    const std::size_t step = selector << 1;
+    std::size_t pair_idx = 0;
+    for (std::size_t block = 0; block < dim; block += step) {
+        for (std::size_t offset = 0; offset < selector; ++offset) {
+            const std::size_t source0 = block + offset;
+            const std::size_t source1 = block + selector + (offset ^ lower_mask);
+            const double* r0p = re + source0 * leading_shots;
+            const double* i0p = im + source0 * leading_shots;
+            const double* r1p = re + source1 * leading_shots;
+            const double* i1p = im + source1 * leading_shots;
+            const double c1r = coeff1_false_real[pair_idx];
+            const double c1i = coeff1_false_imag[pair_idx];
+            SYMFT_BATCH_SIMD_LOOP
+            for (int shot = 0; shot < active_shots; ++shot) {
+                const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
+                const double prod_i = c1r * i1p[shot] + c1i * r1p[shot];
+                const double amp_r = kInvSqrt2 * r0p[shot] - prod_r;
+                const double amp_i = kInvSqrt2 * i0p[shot] - prod_i;
+                prob_true[shot] += amp_r * amp_r + amp_i * amp_i;
+            }
+            ++pair_idx;
+        }
+    }
+}
+
 void scalar_nondiagonal_project(
     const double* re,
     const double* im,
@@ -683,6 +723,51 @@ void scalar_nondiagonal_project(
     }
 }
 
+void scalar_nondiagonal_xmask_project(
+    const double* re,
+    const double* im,
+    double* scratch_re,
+    double* scratch_im,
+    std::size_t leading_shots,
+    int active_shots,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    std::size_t npairs,
+    const double* coeff1_false_real,
+    const double* coeff1_false_imag,
+    const std::uint64_t* branch_bits,
+    const double* invnorms) {
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t lower_mask = static_cast<std::size_t>(xmask) & (selector - 1);
+    const std::size_t dim = npairs << 1;
+    const std::size_t step = selector << 1;
+    std::size_t pair_idx = 0;
+    for (std::size_t block = 0; block < dim; block += step) {
+        for (std::size_t offset = 0; offset < selector; ++offset) {
+            const std::size_t source0 = block + offset;
+            const std::size_t source1 = block + selector + (offset ^ lower_mask);
+            const double* r0p = re + source0 * leading_shots;
+            const double* i0p = im + source0 * leading_shots;
+            const double* r1p = re + source1 * leading_shots;
+            const double* i1p = im + source1 * leading_shots;
+            double* dst_r = scratch_re + pair_idx * leading_shots;
+            double* dst_i = scratch_im + pair_idx * leading_shots;
+            const double c1r = coeff1_false_real[pair_idx];
+            const double c1i = coeff1_false_imag[pair_idx];
+            SYMFT_BATCH_SIMD_LOOP
+            for (int shot = 0; shot < active_shots; ++shot) {
+                const double branch_sign = batch_bit(branch_bits, shot) ? -1.0 : 1.0;
+                const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
+                const double prod_i = c1r * i1p[shot] + c1i * r1p[shot];
+                const double n = invnorms[shot];
+                dst_r[shot] = (kInvSqrt2 * r0p[shot] + branch_sign * prod_r) * n;
+                dst_i[shot] = (kInvSqrt2 * i0p[shot] + branch_sign * prod_i) * n;
+            }
+            ++pair_idx;
+        }
+    }
+}
+
 const KernelTable table = {
 #if defined(SYMFT_CPP_NATIVE_BUILD)
     "autovec-native",
@@ -705,7 +790,9 @@ const KernelTable table = {
     scalar_diagonal_measure_true_prob,
     scalar_diagonal_project,
     scalar_nondiagonal_measure_true_prob,
+    scalar_nondiagonal_xmask_measure_true_prob,
     scalar_nondiagonal_project,
+    scalar_nondiagonal_xmask_project,
 };
 
 } // namespace
