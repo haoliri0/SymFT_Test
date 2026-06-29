@@ -125,6 +125,90 @@ symft::PauliString general_xmask_pauli(int k, int pivot, std::uint64_t lower_mas
     return pauli;
 }
 
+double reference_active_measurement_probability(
+    const std::vector<symft::Complex>& alpha,
+    const symft::PrecomputedActivePauliMeasurementKernel& kernel,
+    bool branch) {
+    const auto& sources0 = branch ? kernel.source0_true : kernel.source0_false;
+    const auto& sources1 = branch ? kernel.source1_true : kernel.source1_false;
+    const auto& coeffs0 = branch ? kernel.coeff0_true : kernel.coeff0_false;
+    const auto& coeffs1 = branch ? kernel.coeff1_true : kernel.coeff1_false;
+    double probability = 0.0;
+    for (std::size_t idx = 0; idx < sources0.size(); ++idx) {
+        symft::Complex value = coeffs0[idx] * alpha[sources0[idx]];
+        if (sources1[idx] < alpha.size()) {
+            value += coeffs1[idx] * alpha[sources1[idx]];
+        }
+        probability += std::norm(value);
+    }
+    return probability;
+}
+
+std::vector<symft::Complex> reference_active_measurement_projection(
+    const std::vector<symft::Complex>& alpha,
+    const symft::PrecomputedActivePauliMeasurementKernel& kernel,
+    bool branch,
+    double probability) {
+    const auto& sources0 = branch ? kernel.source0_true : kernel.source0_false;
+    const auto& sources1 = branch ? kernel.source1_true : kernel.source1_false;
+    const auto& coeffs0 = branch ? kernel.coeff0_true : kernel.coeff0_false;
+    const auto& coeffs1 = branch ? kernel.coeff1_true : kernel.coeff1_false;
+    const double invnorm = 1.0 / std::sqrt(probability);
+    std::vector<symft::Complex> out(sources0.size());
+    for (std::size_t idx = 0; idx < sources0.size(); ++idx) {
+        symft::Complex value = coeffs0[idx] * alpha[sources0[idx]];
+        if (sources1[idx] < alpha.size()) {
+            value += coeffs1[idx] * alpha[sources1[idx]];
+        }
+        out[idx] = value * invnorm;
+    }
+    return out;
+}
+
+void check_active_measurement_projection_kernel(const symft::PauliString& pauli, int k, std::uint64_t seed) {
+    using namespace symft;
+    auto alpha = deterministic_alpha(k);
+    double norm2 = 0.0;
+    for (const auto& value : alpha) {
+        norm2 += std::norm(value);
+    }
+    const double invnorm = 1.0 / std::sqrt(norm2);
+    for (auto& value : alpha) {
+        value *= invnorm;
+    }
+    ActivePauliAction action(pauli);
+    PrecomputedActivePauliMeasurementKernel kernel(action);
+    require(!kernel.is_diagonal && kernel.pivot == k - 1, "active measurement test uses highest non-diagonal pivot");
+    const double prob_true = reference_active_measurement_probability(alpha, kernel, true);
+
+    MeasurePrecomputedActivePauli instruction{
+        pauli,
+        kernel,
+        1,
+        symbolic_bool(1),
+        std::nullopt,
+        std::nullopt,
+        SymbolicBoolEvaluationPlan(symbolic_bool(1)),
+    };
+    FactoredInstructionProgram program(k, k, {FactoredInstruction(instruction)}, k);
+    FactoredExecutorState runtime(program, seed);
+    for (std::size_t basis = 0; basis < alpha.size(); ++basis) {
+        runtime.active_re[basis] = alpha[basis].real();
+        runtime.active_im[basis] = alpha[basis].imag();
+    }
+
+    execute_instruction_in_place(runtime, FactoredInstruction(instruction));
+    const bool branch = (runtime.value_words[0] & std::uint64_t{1}) != 0;
+    const double probability = branch ? prob_true : 1.0 - prob_true;
+    const auto expected = reference_active_measurement_projection(alpha, kernel, branch, probability);
+    require(runtime.k == k - 1, "active measurement projection removes one active qubit");
+    for (std::size_t basis = 0; basis < expected.size(); ++basis) {
+        require(
+            approx({runtime.active_re[basis], runtime.active_im[basis]}, expected[basis], 1e-9),
+            "partner-permuted active measurement projection matches reference");
+    }
+}
+
 void check_high_pivot_batch_rotation_kernel(const symft::PauliString& pauli, double theta, int k, bool mixed_signs) {
     using namespace symft;
     constexpr int shots = 5;
@@ -336,6 +420,15 @@ void test_high_pivot_rotation_kernels() {
     check_high_pivot_batch_rotation_kernel(real_large, theta, large_k, true);
     check_high_pivot_batch_rotation_kernel(general_large, theta, large_k, false);
     check_high_pivot_batch_rotation_kernel(general_large, theta, large_k, true);
+}
+
+void test_high_pivot_measurement_kernels() {
+    const int k = 8;
+    for (const std::uint64_t lower_mask : {std::uint64_t{1}, std::uint64_t{2}, std::uint64_t{3}}) {
+        check_active_measurement_projection_kernel(uniform_xmask_pauli(k, k - 1, lower_mask), k, 701 + lower_mask);
+        check_active_measurement_projection_kernel(real_xmask_pauli(k, k - 1, lower_mask), k, 801 + lower_mask);
+        check_active_measurement_projection_kernel(general_xmask_pauli(k, k - 1, lower_mask), k, 901 + lower_mask);
+    }
 }
 
 void test_active_h_rewrite_stays_virtual() {
@@ -793,6 +886,7 @@ int main() {
     test_active_rotation();
     test_high_pivot_selection();
     test_high_pivot_rotation_kernels();
+    test_high_pivot_measurement_kernels();
     test_active_h_rewrite_stays_virtual();
     test_dormant_measurement_tableau_reuse();
     test_dormant_measurement_sign_feeds_promotion();

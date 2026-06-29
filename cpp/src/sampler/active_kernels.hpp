@@ -702,6 +702,193 @@ inline void rotate_general_pairs_soa_inline(
     }
 }
 
+#if SYMFT_INLINE_AVX2
+inline double horizontal_sum4_inline(__m256d value) {
+    const __m128d lo = _mm256_castpd256_pd128(value);
+    const __m128d hi = _mm256_extractf128_pd(value, 1);
+    const __m128d pair = _mm_add_pd(lo, hi);
+    const __m128d sum = _mm_add_sd(pair, _mm_unpackhi_pd(pair, pair));
+    return _mm_cvtsd_f64(sum);
+}
+
+template <std::size_t LaneMask>
+inline double measure_probability_partner_permute_soa_inline(
+    const double* re,
+    const double* im,
+    const Complex* coeff0_values,
+    const Complex* coeff1_values,
+    std::size_t dim,
+    std::uint64_t lower_mask,
+    unsigned pivot) {
+    const auto* coeff0 = reinterpret_cast<const double*>(coeff0_values);
+    const auto* coeff1 = reinterpret_cast<const double*>(coeff1_values);
+    const std::size_t selector = std::size_t{1} << pivot;
+    const std::size_t step = selector << 1;
+    const std::size_t chunk_mask = static_cast<std::size_t>(lower_mask) & ~std::size_t{3};
+    __m256d probability = _mm256_setzero_pd();
+    for (std::size_t block = 0; block < dim; block += step) {
+        const std::size_t pair_base = block >> 1;
+        for (std::size_t offset = 0; offset < selector; offset += 4) {
+            const std::size_t idx = pair_base + offset;
+            const std::size_t source0 = block + offset;
+            const std::size_t source1 = block + selector + (offset ^ chunk_mask);
+            const __m256d r0 = _mm256_loadu_pd(re + source0);
+            const __m256d im0 = _mm256_loadu_pd(im + source0);
+            const __m256d r1 = permute_lanes_xor2_inline(_mm256_loadu_pd(re + source1), LaneMask);
+            const __m256d im1 = permute_lanes_xor2_inline(_mm256_loadu_pd(im + source1), LaneMask);
+            const __m256d c0r = load_complex_re4_inline(coeff0 + 2 * idx);
+            const __m256d c0i = load_complex_im4_inline(coeff0 + 2 * idx);
+            const __m256d c1r = load_complex_re4_inline(coeff1 + 2 * idx);
+            const __m256d c1i = load_complex_im4_inline(coeff1 + 2 * idx);
+            __m256d ar = _mm256_fnmadd_pd(c0i, im0, _mm256_mul_pd(c0r, r0));
+            ar = _mm256_fmadd_pd(c1r, r1, ar);
+            ar = _mm256_fnmadd_pd(c1i, im1, ar);
+            __m256d ai = _mm256_fmadd_pd(c0i, r0, _mm256_mul_pd(c0r, im0));
+            ai = _mm256_fmadd_pd(c1r, im1, ai);
+            ai = _mm256_fmadd_pd(c1i, r1, ai);
+            probability = _mm256_fmadd_pd(ar, ar, probability);
+            probability = _mm256_fmadd_pd(ai, ai, probability);
+        }
+    }
+    return horizontal_sum4_inline(probability);
+}
+
+template <std::size_t LaneMask>
+inline void project_measurement_partner_permute_soa_inline(
+    const double* re,
+    const double* im,
+    double* out_re,
+    double* out_im,
+    const Complex* coeff0_values,
+    const Complex* coeff1_values,
+    std::size_t dim,
+    std::uint64_t lower_mask,
+    unsigned pivot,
+    double invnorm) {
+    const auto* coeff0 = reinterpret_cast<const double*>(coeff0_values);
+    const auto* coeff1 = reinterpret_cast<const double*>(coeff1_values);
+    const std::size_t selector = std::size_t{1} << pivot;
+    const std::size_t step = selector << 1;
+    const std::size_t chunk_mask = static_cast<std::size_t>(lower_mask) & ~std::size_t{3};
+    const __m256d vinvnorm = _mm256_set1_pd(invnorm);
+    for (std::size_t block = 0; block < dim; block += step) {
+        const std::size_t pair_base = block >> 1;
+        for (std::size_t offset = 0; offset < selector; offset += 4) {
+            const std::size_t idx = pair_base + offset;
+            const std::size_t source0 = block + offset;
+            const std::size_t source1 = block + selector + (offset ^ chunk_mask);
+            const __m256d r0 = _mm256_loadu_pd(re + source0);
+            const __m256d im0 = _mm256_loadu_pd(im + source0);
+            const __m256d r1 = permute_lanes_xor2_inline(_mm256_loadu_pd(re + source1), LaneMask);
+            const __m256d im1 = permute_lanes_xor2_inline(_mm256_loadu_pd(im + source1), LaneMask);
+            const __m256d c0r = load_complex_re4_inline(coeff0 + 2 * idx);
+            const __m256d c0i = load_complex_im4_inline(coeff0 + 2 * idx);
+            const __m256d c1r = load_complex_re4_inline(coeff1 + 2 * idx);
+            const __m256d c1i = load_complex_im4_inline(coeff1 + 2 * idx);
+            __m256d ar = _mm256_fnmadd_pd(c0i, im0, _mm256_mul_pd(c0r, r0));
+            ar = _mm256_fmadd_pd(c1r, r1, ar);
+            ar = _mm256_fnmadd_pd(c1i, im1, ar);
+            __m256d ai = _mm256_fmadd_pd(c0i, r0, _mm256_mul_pd(c0r, im0));
+            ai = _mm256_fmadd_pd(c1r, im1, ai);
+            ai = _mm256_fmadd_pd(c1i, r1, ai);
+            _mm256_storeu_pd(out_re + idx, _mm256_mul_pd(ar, vinvnorm));
+            _mm256_storeu_pd(out_im + idx, _mm256_mul_pd(ai, vinvnorm));
+        }
+    }
+}
+#endif
+
+inline bool active_measurement_branch_probability_partner_permute_soa_inline(
+    double& probability,
+    const double* re,
+    const double* im,
+    const PrecomputedActivePauliMeasurementKernel& kernel,
+    bool branch) {
+#if SYMFT_INLINE_AVX2
+    if (kernel.is_diagonal || kernel.pivot < 2 || highest_set_bit64(kernel.action.xmask) != kernel.pivot) {
+        return false;
+    }
+    const std::size_t dim = active_length(kernel.action.nqubits);
+    const std::size_t selector = std::size_t{1} << kernel.pivot;
+    const auto lower_mask = static_cast<std::size_t>(kernel.action.xmask) & (selector - 1);
+    const auto& coeffs0 = branch ? kernel.coeff0_true : kernel.coeff0_false;
+    const auto& coeffs1 = branch ? kernel.coeff1_true : kernel.coeff1_false;
+    switch (lower_mask & std::size_t{3}) {
+    case 0:
+        probability = measure_probability_partner_permute_soa_inline<0>(
+            re, im, coeffs0.data(), coeffs1.data(), dim, lower_mask, static_cast<unsigned>(kernel.pivot));
+        break;
+    case 1:
+        probability = measure_probability_partner_permute_soa_inline<1>(
+            re, im, coeffs0.data(), coeffs1.data(), dim, lower_mask, static_cast<unsigned>(kernel.pivot));
+        break;
+    case 2:
+        probability = measure_probability_partner_permute_soa_inline<2>(
+            re, im, coeffs0.data(), coeffs1.data(), dim, lower_mask, static_cast<unsigned>(kernel.pivot));
+        break;
+    default:
+        probability = measure_probability_partner_permute_soa_inline<3>(
+            re, im, coeffs0.data(), coeffs1.data(), dim, lower_mask, static_cast<unsigned>(kernel.pivot));
+        break;
+    }
+    return true;
+#else
+    (void)probability;
+    (void)re;
+    (void)im;
+    (void)kernel;
+    (void)branch;
+    return false;
+#endif
+}
+
+inline bool project_active_measurement_partner_permute_soa_inline(
+    const double* re,
+    const double* im,
+    double* out_re,
+    double* out_im,
+    const PrecomputedActivePauliMeasurementKernel& kernel,
+    bool branch,
+    double invnorm) {
+#if SYMFT_INLINE_AVX2
+    if (kernel.is_diagonal || kernel.pivot < 2 || highest_set_bit64(kernel.action.xmask) != kernel.pivot) {
+        return false;
+    }
+    const std::size_t dim = active_length(kernel.action.nqubits);
+    const std::size_t selector = std::size_t{1} << kernel.pivot;
+    const auto lower_mask = static_cast<std::size_t>(kernel.action.xmask) & (selector - 1);
+    const auto& coeffs0 = branch ? kernel.coeff0_true : kernel.coeff0_false;
+    const auto& coeffs1 = branch ? kernel.coeff1_true : kernel.coeff1_false;
+    switch (lower_mask & std::size_t{3}) {
+    case 0:
+        project_measurement_partner_permute_soa_inline<0>(
+            re, im, out_re, out_im, coeffs0.data(), coeffs1.data(), dim, lower_mask, static_cast<unsigned>(kernel.pivot), invnorm);
+        break;
+    case 1:
+        project_measurement_partner_permute_soa_inline<1>(
+            re, im, out_re, out_im, coeffs0.data(), coeffs1.data(), dim, lower_mask, static_cast<unsigned>(kernel.pivot), invnorm);
+        break;
+    case 2:
+        project_measurement_partner_permute_soa_inline<2>(
+            re, im, out_re, out_im, coeffs0.data(), coeffs1.data(), dim, lower_mask, static_cast<unsigned>(kernel.pivot), invnorm);
+        break;
+    default:
+        project_measurement_partner_permute_soa_inline<3>(
+            re, im, out_re, out_im, coeffs0.data(), coeffs1.data(), dim, lower_mask, static_cast<unsigned>(kernel.pivot), invnorm);
+        break;
+    }
+    return true;
+#else
+    (void)re;
+    (void)im;
+    (void)out_re;
+    (void)out_im;
+    (void)kernel;
+    (void)branch;
+    (void)invnorm;
+    return false;
+#endif
+}
 
 } // namespace symft::detail
 
