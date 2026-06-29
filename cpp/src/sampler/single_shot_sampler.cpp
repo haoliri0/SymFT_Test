@@ -648,25 +648,23 @@ void project_active_pauli_measurement(
     }
     const auto& sources0 = branch ? kernel.source0_true : kernel.source0_false;
     const std::size_t out_dim = sources0.size();
+    const double invnorm = 1.0 / std::sqrt(probability);
+    if (project_active_measurement_partner_permute_soa_inline(
+            runtime.active_re.data(),
+            runtime.active_im.data(),
+            runtime.active_re.data(),
+            runtime.active_im.data(),
+            kernel,
+            branch,
+            invnorm)) {
+        --runtime.k;
+        return;
+    }
     if (runtime.active_scratch_re.size() < out_dim) {
         runtime.active_scratch_re.resize(out_dim, 0.0);
     }
     if (runtime.active_scratch_im.size() < out_dim) {
         runtime.active_scratch_im.resize(out_dim, 0.0);
-    }
-    const double invnorm = 1.0 / std::sqrt(probability);
-    if (project_active_measurement_partner_permute_soa_inline(
-            runtime.active_re.data(),
-            runtime.active_im.data(),
-            runtime.active_scratch_re.data(),
-            runtime.active_scratch_im.data(),
-            kernel,
-            branch,
-            invnorm)) {
-        std::copy_n(runtime.active_scratch_re.data(), out_dim, runtime.active_re.data());
-        std::copy_n(runtime.active_scratch_im.data(), out_dim, runtime.active_im.data());
-        --runtime.k;
-        return;
     }
     const auto& sources1 = branch ? kernel.source1_true : kernel.source1_false;
     const auto& coeffs0 = branch ? kernel.coeff0_true : kernel.coeff0_false;

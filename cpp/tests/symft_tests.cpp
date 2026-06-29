@@ -253,6 +253,62 @@ void check_diagonal_active_measurement_projection_kernel(const symft::PauliStrin
     }
 }
 
+void check_batch_active_measurement_projection_kernel(const symft::PauliString& pauli, int k, std::uint64_t seed) {
+    using namespace symft;
+    constexpr int shots = 7;
+    ActivePauliAction action(pauli);
+    PrecomputedActivePauliMeasurementKernel kernel(action);
+    require(!kernel.is_diagonal && kernel.pivot == k - 1, "batch active measurement test uses highest non-diagonal pivot");
+    MeasurePrecomputedActivePauli instruction{
+        pauli,
+        kernel,
+        1,
+        symbolic_bool(1),
+        std::nullopt,
+        std::nullopt,
+        SymbolicBoolEvaluationPlan(symbolic_bool(1)),
+    };
+    const FactoredInstructionProgram program(k, k, {FactoredInstruction(instruction)}, k);
+    BatchFactoredExecutorState runtime(program, shots, seed);
+    const std::size_t dim = std::size_t{1} << k;
+    std::vector<std::vector<Complex>> alpha_by_shot;
+    alpha_by_shot.reserve(shots);
+    for (int shot = 0; shot < shots; ++shot) {
+        auto alpha = deterministic_alpha(k, shot);
+        double norm2 = 0.0;
+        for (const auto& value : alpha) {
+            norm2 += std::norm(value);
+        }
+        const double invnorm = 1.0 / std::sqrt(norm2);
+        for (auto& value : alpha) {
+            value *= invnorm;
+        }
+        for (std::size_t basis = 0; basis < dim; ++basis) {
+            const std::size_t offset = batch_active_offset(runtime, basis, shot);
+            runtime.active_re[offset] = alpha[basis].real();
+            runtime.active_im[offset] = alpha[basis].imag();
+        }
+        alpha_by_shot.push_back(std::move(alpha));
+    }
+    measure_precomputed_active_pauli_branch_batch(runtime, kernel, 1);
+    require(runtime.k == k - 1, "batch active measurement projection removes one active qubit");
+    const std::size_t out_dim = dim >> 1;
+    for (int shot = 0; shot < shots; ++shot) {
+        const bool branch =
+            (runtime.value_words[batch_condition_offset(runtime, 1, batch_shot_word(shot))] & batch_shot_mask(shot)) != 0;
+        const double prob_true = reference_active_measurement_probability(alpha_by_shot[static_cast<std::size_t>(shot)], kernel, true);
+        const double probability = branch ? prob_true : 1.0 - prob_true;
+        const auto expected =
+            reference_active_measurement_projection(alpha_by_shot[static_cast<std::size_t>(shot)], kernel, branch, probability);
+        for (std::size_t basis = 0; basis < out_dim; ++basis) {
+            const std::size_t offset = batch_active_offset(runtime, basis, shot);
+            require(
+                approx({runtime.active_re[offset], runtime.active_im[offset]}, expected[basis], 1e-9),
+                "batch active measurement projection matches reference");
+        }
+    }
+}
+
 void check_high_pivot_batch_rotation_kernel(const symft::PauliString& pauli, double theta, int k, bool mixed_signs) {
     using namespace symft;
     constexpr int shots = 5;
@@ -474,6 +530,9 @@ void test_high_pivot_measurement_kernels() {
         check_active_measurement_projection_kernel(uniform_xmask_pauli(k, k - 1, lower_mask), k, 701 + lower_mask);
         check_active_measurement_projection_kernel(real_xmask_pauli(k, k - 1, lower_mask), k, 801 + lower_mask);
         check_active_measurement_projection_kernel(general_xmask_pauli(k, k - 1, lower_mask), k, 901 + lower_mask);
+        check_batch_active_measurement_projection_kernel(uniform_xmask_pauli(k, k - 1, lower_mask), k, 1001 + lower_mask);
+        check_batch_active_measurement_projection_kernel(real_xmask_pauli(k, k - 1, lower_mask), k, 1101 + lower_mask);
+        check_batch_active_measurement_projection_kernel(general_xmask_pauli(k, k - 1, lower_mask), k, 1201 + lower_mask);
     }
 }
 

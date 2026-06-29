@@ -101,7 +101,7 @@ void measure_nondiagonal_true_prob_batch(
         runtime.branch_prob_true.data());
 }
 
-void project_nondiagonal_batch(
+bool project_nondiagonal_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
     std::size_t out_dim,
@@ -111,8 +111,8 @@ void project_nondiagonal_batch(
         batch_simd::scalar_table().nondiagonal_xmask_project(
             runtime.active_re.data(),
             runtime.active_im.data(),
-            runtime.scratch_re.data(),
-            runtime.scratch_im.data(),
+            runtime.active_re.data(),
+            runtime.active_im.data(),
             static_cast<std::size_t>(runtime.active_pitch),
             runtime.active_shots,
             kernel.action.xmask,
@@ -122,7 +122,7 @@ void project_nondiagonal_batch(
             kernel.coeff1_false_imag.data(),
             branch_bits.data(),
             runtime.branch_invnorms.data());
-        return;
+        return true;
     }
     batch_simd::scalar_table().nondiagonal_project(
         runtime.active_re.data(),
@@ -138,6 +138,7 @@ void project_nondiagonal_batch(
         out_dim,
         branch_bits.data(),
         runtime.branch_invnorms.data());
+    return false;
 }
 
 void rotate_uniform_imag_pairs_batch(
@@ -476,8 +477,10 @@ void measure_nondiagonal_active_pauli_branch_batch(
         runtime.branch_prob_true,
         runtime.branch_invnorms);
     const auto& branch_bits = runtime.eval_scratch;
-    project_nondiagonal_batch(runtime, kernel, out_dim, use_xmask_kernel, branch_bits);
-    copy_projected_active_prefix_from_scratch(runtime, out_dim);
+    const bool projected_in_place = project_nondiagonal_batch(runtime, kernel, out_dim, use_xmask_kernel, branch_bits);
+    if (!projected_in_place) {
+        copy_projected_active_prefix_from_scratch(runtime, out_dim);
+    }
     finish_active_measurement_branch(runtime, branch_condition, branch_bits);
 }
 
