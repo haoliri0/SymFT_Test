@@ -69,6 +69,50 @@ void copy_projected_active_prefix_from_scratch(BatchFactoredExecutorState& runti
     }
 }
 
+void permute_diagonal_measurement_eigenspaces_to_scratch(
+    BatchFactoredExecutorState& runtime,
+    const PrecomputedActivePauliMeasurementKernel& kernel) {
+    const std::size_t out_dim = kernel.source0_false.size();
+    const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
+    const auto live = static_cast<std::size_t>(runtime.active_shots);
+    for (std::size_t idx = 0; idx < out_dim; ++idx) {
+        const std::size_t false_src = kernel.source0_false[idx] * pitch;
+        const std::size_t true_src = kernel.source0_true[idx] * pitch;
+        const std::size_t false_dst = idx * pitch;
+        const std::size_t true_dst = (out_dim + idx) * pitch;
+        std::copy_n(runtime.active_re.data() + false_src, live, runtime.scratch_re.data() + false_dst);
+        std::copy_n(runtime.active_im.data() + false_src, live, runtime.scratch_im.data() + false_dst);
+        std::copy_n(runtime.active_re.data() + true_src, live, runtime.scratch_re.data() + true_dst);
+        std::copy_n(runtime.active_im.data() + true_src, live, runtime.scratch_im.data() + true_dst);
+    }
+}
+
+void measure_permuted_diagonal_true_prob_from_false_half(
+    BatchFactoredExecutorState& runtime,
+    std::size_t out_dim) {
+    std::fill(
+        runtime.branch_prob_true.begin(),
+        runtime.branch_prob_true.begin() + static_cast<std::ptrdiff_t>(runtime.active_shots),
+        0.0);
+    const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
+    for (std::size_t basis = 0; basis < out_dim; ++basis) {
+        const std::size_t base = basis * pitch;
+        const double* rp = runtime.scratch_re.data() + base;
+        const double* ip = runtime.scratch_im.data() + base;
+        SYMFT_BATCH_SIMD_LOOP
+        for (int shot = 0; shot < runtime.active_shots; ++shot) {
+            const double r = rp[shot];
+            const double i = ip[shot];
+            runtime.branch_prob_true[static_cast<std::size_t>(shot)] += r * r + i * i;
+        }
+    }
+    SYMFT_BATCH_SIMD_LOOP
+    for (int shot = 0; shot < runtime.active_shots; ++shot) {
+        const auto idx = static_cast<std::size_t>(shot);
+        runtime.branch_prob_true[idx] = 1.0 - std::clamp(runtime.branch_prob_true[idx], 0.0, 1.0);
+    }
+}
+
 void measure_nondiagonal_true_prob_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
@@ -433,33 +477,24 @@ void measure_diagonal_active_pauli_branch_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
     int branch_condition) {
-    const auto& source_false = kernel.source0_false;
-    const auto& source_true = kernel.source0_true;
-    const std::size_t out_dim = source_false.size();
-    batch_simd::scalar_table().diagonal_measure_true_prob(
-        runtime.active_re.data(),
-        runtime.active_im.data(),
-        static_cast<std::size_t>(runtime.active_pitch),
-        runtime.active_shots,
-        source_true.data(),
-        out_dim,
-        runtime.branch_prob_true.data());
+    const std::size_t out_dim = kernel.source0_false.size();
+    permute_diagonal_measurement_eigenspaces_to_scratch(runtime, kernel);
+    measure_permuted_diagonal_true_prob_from_false_half(runtime, out_dim);
     sample_batch_measurement_branches_from_true(
         runtime,
         runtime.eval_scratch,
         runtime.branch_prob_true,
         runtime.branch_invnorms);
     const auto& branch_bits = runtime.eval_scratch;
-    batch_simd::scalar_table().diagonal_project(
-        runtime.active_re.data(),
-        runtime.active_im.data(),
+    batch_simd::scalar_table().last_z_project(
+        runtime.scratch_re.data(),
+        runtime.scratch_im.data(),
         static_cast<std::size_t>(runtime.active_pitch),
         runtime.active_shots,
-        source_false.data(),
-        source_true.data(),
         out_dim,
         branch_bits.data(),
         runtime.branch_invnorms.data());
+    copy_projected_active_prefix_from_scratch(runtime, out_dim);
     finish_active_measurement_branch(runtime, branch_condition, branch_bits);
 }
 

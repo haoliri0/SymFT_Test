@@ -567,16 +567,39 @@ void project_active_last_z(FactoredExecutorState& runtime, bool branch, double p
     runtime.k = new_k;
 }
 
-double active_diagonal_measurement_branch_probability(
+void permute_diagonal_active_measurement_eigenspaces_to_scratch(
+    FactoredExecutorState& runtime,
+    const PrecomputedActivePauliMeasurementKernel& kernel) {
+    const std::size_t out_dim = kernel.source0_false.size();
+    const std::size_t dim = out_dim << 1;
+    if (runtime.active_scratch_re.size() < dim) {
+        runtime.active_scratch_re.resize(dim, 0.0);
+    }
+    if (runtime.active_scratch_im.size() < dim) {
+        runtime.active_scratch_im.resize(dim, 0.0);
+    }
+    SYMFT_SINGLE_SIMD_LOOP
+    for (std::size_t idx = 0; idx < out_dim; ++idx) {
+        const std::size_t false_src = kernel.source0_false[idx];
+        const std::size_t true_src = kernel.source0_true[idx];
+        runtime.active_scratch_re[idx] = runtime.active_re[false_src];
+        runtime.active_scratch_im[idx] = runtime.active_im[false_src];
+        runtime.active_scratch_re[out_dim + idx] = runtime.active_re[true_src];
+        runtime.active_scratch_im[out_dim + idx] = runtime.active_im[true_src];
+    }
+}
+
+double permuted_diagonal_measurement_probability_false(
     const FactoredExecutorState& runtime,
-    const PrecomputedActivePauliMeasurementKernel& kernel,
-    bool branch) {
-    const auto& sources = branch ? kernel.source0_true : kernel.source0_false;
-    const double probability = sources.size() < kSimdPairRotationThreshold
-                                   ? norm_sum_soa_inline(
-                                         runtime.active_re.data(), runtime.active_im.data(), sources.data(), sources.size())
-                                   : simd::dispatch_table().norm_sum_soa(
-                                         runtime.active_re.data(), runtime.active_im.data(), sources.data(), sources.size());
+    const PrecomputedActivePauliMeasurementKernel& kernel) {
+    const std::size_t out_dim = kernel.source0_false.size();
+    double probability = 0.0;
+    SYMFT_SINGLE_SIMD_LOOP
+    for (std::size_t idx = 0; idx < out_dim; ++idx) {
+        const double r = runtime.active_scratch_re[idx];
+        const double i = runtime.active_scratch_im[idx];
+        probability += r * r + i * i;
+    }
     return std::clamp(probability, 0.0, 1.0);
 }
 
@@ -619,7 +642,7 @@ double active_measurement_branch_probability(
     return std::clamp(probability, 0.0, 1.0);
 }
 
-void project_diagonal_active_pauli_measurement(
+void project_permuted_diagonal_active_pauli_measurement(
     FactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
     bool branch,
@@ -627,13 +650,14 @@ void project_diagonal_active_pauli_measurement(
     if (probability <= 0.0) {
         fail("sampled an impossible active measurement branch");
     }
-    const auto& sources = branch ? kernel.source0_true : kernel.source0_false;
+    const std::size_t out_dim = kernel.source0_false.size();
+    const std::size_t branch_offset = branch ? out_dim : 0;
     const double invnorm = 1.0 / std::sqrt(probability);
     SYMFT_SINGLE_SIMD_LOOP
-    for (std::size_t idx = 0; idx < sources.size(); ++idx) {
-        const std::size_t source = sources[idx];
-        runtime.active_re[idx] = runtime.active_re[source] * invnorm;
-        runtime.active_im[idx] = runtime.active_im[source] * invnorm;
+    for (std::size_t idx = 0; idx < out_dim; ++idx) {
+        const std::size_t source = branch_offset + idx;
+        runtime.active_re[idx] = runtime.active_scratch_re[source] * invnorm;
+        runtime.active_im[idx] = runtime.active_scratch_im[source] * invnorm;
     }
     --runtime.k;
 }
@@ -729,16 +753,21 @@ void execute_instruction(FactoredExecutorState& runtime, const MeasurePrecompute
     if (runtime.k <= 0) {
         fail("cannot measure an active Pauli when k == 0");
     }
-    double prob_true = instruction.kernel.is_diagonal
-                           ? active_diagonal_measurement_branch_probability(runtime, instruction.kernel, true)
-                           : active_measurement_branch_probability(runtime, instruction.kernel, true);
+    double prob_true = 0.0;
+    if (instruction.kernel.is_diagonal) {
+        permute_diagonal_active_measurement_eigenspaces_to_scratch(runtime, instruction.kernel);
+        const double prob_false = permuted_diagonal_measurement_probability_false(runtime, instruction.kernel);
+        prob_true = 1.0 - prob_false;
+    } else {
+        prob_true = active_measurement_branch_probability(runtime, instruction.kernel, true);
+    }
     prob_true = std::clamp(prob_true, 0.0, 1.0);
     const double prob_false = 1.0 - prob_true;
     const bool branch = sample_bernoulli(runtime.rng_state, prob_true);
     const double probability = branch ? prob_true : prob_false;
     assign_symbol(runtime, instruction.branch, branch);
     if (instruction.kernel.is_diagonal) {
-        project_diagonal_active_pauli_measurement(runtime, instruction.kernel, branch, probability);
+        project_permuted_diagonal_active_pauli_measurement(runtime, instruction.kernel, branch, probability);
     } else {
         project_active_pauli_measurement(runtime, instruction.kernel, branch, probability);
     }
@@ -814,16 +843,21 @@ void execute_instruction_presampled(
     if (runtime.k <= 0) {
         fail("cannot measure an active Pauli when k == 0");
     }
-    double prob_true = instruction.kernel.is_diagonal
-                           ? active_diagonal_measurement_branch_probability(runtime, instruction.kernel, true)
-                           : active_measurement_branch_probability(runtime, instruction.kernel, true);
+    double prob_true = 0.0;
+    if (instruction.kernel.is_diagonal) {
+        permute_diagonal_active_measurement_eigenspaces_to_scratch(runtime, instruction.kernel);
+        const double prob_false = permuted_diagonal_measurement_probability_false(runtime, instruction.kernel);
+        prob_true = 1.0 - prob_false;
+    } else {
+        prob_true = active_measurement_branch_probability(runtime, instruction.kernel, true);
+    }
     prob_true = std::clamp(prob_true, 0.0, 1.0);
     const double prob_false = 1.0 - prob_true;
     const bool branch = sample_bernoulli(runtime.rng_state, prob_true);
     const double probability = branch ? prob_true : prob_false;
     assign_symbol(runtime, instruction.branch, branch);
     if (instruction.kernel.is_diagonal) {
-        project_diagonal_active_pauli_measurement(runtime, instruction.kernel, branch, probability);
+        project_permuted_diagonal_active_pauli_measurement(runtime, instruction.kernel, branch, probability);
     } else {
         project_active_pauli_measurement(runtime, instruction.kernel, branch, probability);
     }

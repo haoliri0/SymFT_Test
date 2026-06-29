@@ -209,6 +209,50 @@ void check_active_measurement_projection_kernel(const symft::PauliString& pauli,
     }
 }
 
+void check_diagonal_active_measurement_projection_kernel(const symft::PauliString& pauli, int k, std::uint64_t seed) {
+    using namespace symft;
+    auto alpha = deterministic_alpha(k);
+    double norm2 = 0.0;
+    for (const auto& value : alpha) {
+        norm2 += std::norm(value);
+    }
+    const double invnorm = 1.0 / std::sqrt(norm2);
+    for (auto& value : alpha) {
+        value *= invnorm;
+    }
+    ActivePauliAction action(pauli);
+    PrecomputedActivePauliMeasurementKernel kernel(action);
+    require(kernel.is_diagonal && kernel.pivot == k - 1, "active diagonal measurement test uses highest Z pivot");
+    const double prob_true = reference_active_measurement_probability(alpha, kernel, true);
+
+    MeasurePrecomputedActivePauli instruction{
+        pauli,
+        kernel,
+        1,
+        symbolic_bool(1),
+        std::nullopt,
+        std::nullopt,
+        SymbolicBoolEvaluationPlan(symbolic_bool(1)),
+    };
+    FactoredInstructionProgram program(k, k, {FactoredInstruction(instruction)}, k);
+    FactoredExecutorState runtime(program, seed);
+    for (std::size_t basis = 0; basis < alpha.size(); ++basis) {
+        runtime.active_re[basis] = alpha[basis].real();
+        runtime.active_im[basis] = alpha[basis].imag();
+    }
+
+    execute_instruction_in_place(runtime, FactoredInstruction(instruction));
+    const bool branch = (runtime.value_words[0] & std::uint64_t{1}) != 0;
+    const double probability = branch ? prob_true : 1.0 - prob_true;
+    const auto expected = reference_active_measurement_projection(alpha, kernel, branch, probability);
+    require(runtime.k == k - 1, "active diagonal measurement projection removes one active qubit");
+    for (std::size_t basis = 0; basis < expected.size(); ++basis) {
+        require(
+            approx({runtime.active_re[basis], runtime.active_im[basis]}, expected[basis], 1e-9),
+            "permuted active diagonal measurement projection matches reference");
+    }
+}
+
 void check_high_pivot_batch_rotation_kernel(const symft::PauliString& pauli, double theta, int k, bool mixed_signs) {
     using namespace symft;
     constexpr int shots = 5;
@@ -424,6 +468,7 @@ void test_high_pivot_rotation_kernels() {
 
 void test_high_pivot_measurement_kernels() {
     const int k = 8;
+    check_diagonal_active_measurement_projection_kernel(symft::pauli_z(k, 2) * symft::pauli_z(k, k - 1), k, 601);
     for (const std::uint64_t lower_mask : {std::uint64_t{1}, std::uint64_t{2}, std::uint64_t{3}}) {
         check_active_measurement_projection_kernel(uniform_xmask_pauli(k, k - 1, lower_mask), k, 701 + lower_mask);
         check_active_measurement_projection_kernel(real_xmask_pauli(k, k - 1, lower_mask), k, 801 + lower_mask);
