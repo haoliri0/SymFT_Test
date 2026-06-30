@@ -803,24 +803,42 @@ struct BatchExpressionEvaluator {
             out.resize(runtime.batch_words, 0);
         }
         if (expression_block != nullptr) {
-            for (std::size_t word = 0; word < nwords; ++word) {
-                out[word] = expression_slice_word(
-                    *expression_block,
-                    block_expression_index,
-                    first_sample_shot,
-                    runtime.active_shots,
-                    word);
+            if (nwords == 1 && (first_sample_shot & 63) == 0) {
+                const std::size_t src_word = static_cast<std::size_t>(first_sample_shot >> 6);
+                const std::size_t expression_index = static_cast<std::size_t>(block_expression_index);
+                out[0] = src_word < expression_block->shot_words
+                             ? expression_block->expression_words[presampled_expression_block_offset(
+                                   *expression_block,
+                                   expression_index,
+                                   src_word)] &
+                                   live_word_mask_for_shots(runtime.active_shots, 0)
+                             : 0;
+            } else {
+                for (std::size_t word = 0; word < nwords; ++word) {
+                    out[word] = expression_slice_word(
+                        *expression_block,
+                        block_expression_index,
+                        first_sample_shot,
+                        runtime.active_shots,
+                        word);
+                }
             }
         } else {
             const std::size_t base = static_cast<std::size_t>(block_expression_index) * expression_stride_words;
             if (expression_words == nullptr || expression_words->size() < base + expression_stride_words) {
                 fail("batch presampled expression workspace is too short");
             }
-            for (std::size_t word = 0; word < nwords; ++word) {
-                out[word] = (*expression_words)[base + word] & live_word_mask_for_shots(runtime.active_shots, word);
+            if (nwords == 1) {
+                out[0] = (*expression_words)[base] & live_word_mask_for_shots(runtime.active_shots, 0);
+            } else {
+                for (std::size_t word = 0; word < nwords; ++word) {
+                    out[word] = (*expression_words)[base + word] & live_word_mask_for_shots(runtime.active_shots, word);
+                }
             }
         }
-        std::fill(out.begin() + static_cast<std::ptrdiff_t>(nwords), out.end(), 0);
+        if (nwords < out.size()) {
+            std::fill(out.begin() + static_cast<std::ptrdiff_t>(nwords), out.end(), 0);
+        }
         if (!expression.residual_plan.conditions.empty()) {
             xor_symbolic_bool_batch_into(out, expression.residual_plan, runtime);
         }
