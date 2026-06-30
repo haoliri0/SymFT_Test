@@ -36,11 +36,10 @@ struct BatchDetectorPostselectionOptions {
     const std::vector<std::vector<int>>* retained_record_uses = nullptr;
 };
 
-// Active storage is a Julia-column-major equivalent SoA layout:
-// active_re[basis * active_pitch + shot] and active_im[basis * active_pitch + shot].
+// Active storage is shot-major SoA:
+// active_re[shot * active_pitch + basis] and active_im[shot * active_pitch + basis].
 // Here batches is the fixed shot capacity for bit columns, while active_pitch is
-// the dense active-state row pitch. Postselection compaction may shrink
-// active_pitch, but never above batches.
+// the per-shot dense active-vector capacity.
 struct BatchFactoredExecutorState {
     int n = 0;
     int k = 0;
@@ -62,7 +61,6 @@ struct BatchFactoredExecutorState {
     std::vector<std::uint64_t> measurement_words;
     std::vector<std::uint64_t> detector_words;
     std::vector<std::uint64_t> eval_scratch;
-    std::vector<double> rotation_coefficients;
     std::vector<double> branch_prob_true;
     std::vector<double> branch_invnorms;
     std::uint64_t rng_state = 1;

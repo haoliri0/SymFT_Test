@@ -323,7 +323,7 @@ void check_high_pivot_batch_rotation_kernel(const symft::PauliString& pauli, dou
         rotate_pauli(expected, pauli, sign ? -theta : theta);
         expected_by_shot.push_back(std::move(expected.alpha));
         for (std::size_t basis = 0; basis < dim; ++basis) {
-            const std::size_t offset = basis * static_cast<std::size_t>(runtime.active_pitch) + static_cast<std::size_t>(shot);
+            const std::size_t offset = batch_active_offset(runtime, basis, shot);
             runtime.active_re[offset] = alpha[basis].real();
             runtime.active_im[offset] = alpha[basis].imag();
         }
@@ -343,7 +343,7 @@ void check_high_pivot_batch_rotation_kernel(const symft::PauliString& pauli, dou
     rotate_pauli_batch(runtime, kernel, sign_bits);
     for (int shot = 0; shot < shots; ++shot) {
         for (std::size_t basis = 0; basis < dim; ++basis) {
-            const std::size_t offset = basis * static_cast<std::size_t>(runtime.active_pitch) + static_cast<std::size_t>(shot);
+            const std::size_t offset = batch_active_offset(runtime, basis, shot);
             require(
                 approx({runtime.active_re[offset], runtime.active_im[offset]}, expected_by_shot[static_cast<std::size_t>(shot)][basis], 1e-9),
                 "batch high-pivot rotation kernel matches generic rotation");

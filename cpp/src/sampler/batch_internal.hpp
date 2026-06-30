@@ -81,7 +81,7 @@ inline void set_batch_bit(std::vector<std::uint64_t>& bits, int shot) {
 }
 
 inline std::size_t batch_active_offset(const BatchFactoredExecutorState& runtime, std::size_t basis, int shot) {
-    return basis * static_cast<std::size_t>(runtime.active_pitch) + static_cast<std::size_t>(shot);
+    return static_cast<std::size_t>(shot) * static_cast<std::size_t>(runtime.active_pitch) + basis;
 }
 
 inline std::size_t batch_condition_offset(const BatchFactoredExecutorState& runtime, int condition, std::size_t word) {

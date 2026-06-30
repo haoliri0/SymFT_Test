@@ -562,47 +562,28 @@ void collect_live_sources(
     }
 }
 
-int compacted_active_pitch(int survivor_count, int capacity) {
-    if (survivor_count <= 0) {
-        return 1;
-    }
-    constexpr int kActivePitchAlignment = 4;
-    const int aligned = ((survivor_count + kActivePitchAlignment - 1) / kActivePitchAlignment) *
-                        kActivePitchAlignment;
-    return std::min(capacity, aligned);
-}
-
 void compact_active_columns(
     BatchFactoredExecutorState& runtime,
     int survivor_count,
     const std::vector<int>& live_sources) {
-    const int old_pitch_int = runtime.active_pitch > 0 ? runtime.active_pitch : runtime.batches;
-    const int new_pitch_int = compacted_active_pitch(survivor_count, runtime.batches);
     int first_moved = 0;
     while (first_moved < survivor_count &&
            live_sources[static_cast<std::size_t>(first_moved)] == first_moved) {
         ++first_moved;
     }
-    if (first_moved == survivor_count && new_pitch_int == old_pitch_int) {
+    if (first_moved == survivor_count) {
         return;
     }
 
-    const std::size_t old_pitch = static_cast<std::size_t>(old_pitch_int);
-    const std::size_t new_pitch = static_cast<std::size_t>(new_pitch_int);
+    const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
     const std::size_t dim = active_length(runtime.k);
-    for (std::size_t basis = 0; basis < dim; ++basis) {
-        const std::size_t old_base = basis * old_pitch;
-        const std::size_t new_base = basis * new_pitch;
-        const int first_dst = new_pitch_int == old_pitch_int ? first_moved : 0;
-        for (int dst = first_dst; dst < survivor_count; ++dst) {
-            const int src = live_sources[static_cast<std::size_t>(dst)];
-            runtime.active_re[new_base + static_cast<std::size_t>(dst)] =
-                runtime.active_re[old_base + static_cast<std::size_t>(src)];
-            runtime.active_im[new_base + static_cast<std::size_t>(dst)] =
-                runtime.active_im[old_base + static_cast<std::size_t>(src)];
-        }
+    for (int dst = first_moved; dst < survivor_count; ++dst) {
+        const int src = live_sources[static_cast<std::size_t>(dst)];
+        const std::size_t old_base = static_cast<std::size_t>(src) * pitch;
+        const std::size_t new_base = static_cast<std::size_t>(dst) * pitch;
+        std::copy_n(runtime.active_re.data() + old_base, dim, runtime.active_re.data() + new_base);
+        std::copy_n(runtime.active_im.data() + old_base, dim, runtime.active_im.data() + new_base);
     }
-    runtime.active_pitch = new_pitch_int;
 }
 
 void compact_surviving_shots(
@@ -1088,7 +1069,7 @@ int default_postselected_batch_count(int max_k) {
 }
 
 const char* active_batch_backend() {
-    return batch_simd::scalar_table().name;
+    return "shot-major-active";
 }
 
 void assign_presampled_exogenous_batch_in_place(
@@ -1131,15 +1112,14 @@ void reset_batch_executor(
     runtime.k = program.initial_k;
     runtime.ndormant = program.n - program.initial_k;
     runtime.active_shots = shots;
-    runtime.active_pitch = runtime.batches;
+    runtime.active_pitch = static_cast<int>(active_length(program.max_k));
     runtime.nsymbols = program.nsymbols;
     runtime.nrecords = program.nrecords;
     runtime.ndetectors = program.ndetectors;
     runtime.max_k = program.max_k;
     runtime.batch_words = batch_word_count(runtime.batches);
 
-    const std::size_t max_dim = active_length(program.max_k);
-    const std::size_t active_size = max_dim * static_cast<std::size_t>(runtime.batches);
+    const std::size_t active_size = static_cast<std::size_t>(runtime.batches) * static_cast<std::size_t>(runtime.active_pitch);
     if (runtime.active_re.size() < active_size) {
         runtime.active_re.resize(active_size, 0.0);
     }
@@ -1179,9 +1159,6 @@ void reset_batch_executor(
         runtime.eval_scratch.resize(runtime.batch_words, 0);
     }
     std::fill(runtime.eval_scratch.begin(), runtime.eval_scratch.end(), 0);
-    if (runtime.rotation_coefficients.size() < static_cast<std::size_t>(runtime.batches)) {
-        runtime.rotation_coefficients.resize(static_cast<std::size_t>(runtime.batches), 0.0);
-    }
     if (runtime.branch_prob_true.size() < static_cast<std::size_t>(runtime.batches)) {
         runtime.branch_prob_true.resize(static_cast<std::size_t>(runtime.batches), 0.0);
     }
@@ -1190,13 +1167,12 @@ void reset_batch_executor(
     }
 
     const std::size_t dim = active_length(program.initial_k);
-    for (std::size_t basis = 0; basis < dim; ++basis) {
-        const std::size_t base = basis * static_cast<std::size_t>(runtime.active_pitch);
-        const double re = basis == 0 ? 1.0 : 0.0;
-        for (int shot = 0; shot < runtime.active_shots; ++shot) {
-            runtime.active_re[base + static_cast<std::size_t>(shot)] = re;
-            runtime.active_im[base + static_cast<std::size_t>(shot)] = 0.0;
-        }
+    const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
+    for (int shot = 0; shot < runtime.active_shots; ++shot) {
+        const std::size_t base = static_cast<std::size_t>(shot) * pitch;
+        std::fill_n(runtime.active_re.data() + base, dim, 0.0);
+        std::fill_n(runtime.active_im.data() + base, dim, 0.0);
+        runtime.active_re[base] = 1.0;
     }
 }
 
