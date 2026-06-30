@@ -258,7 +258,6 @@ void check_batch_active_measurement_projection_kernel(const symft::PauliString& 
     constexpr int shots = 7;
     ActivePauliAction action(pauli);
     PrecomputedActivePauliMeasurementKernel kernel(action);
-    require(!kernel.is_diagonal && kernel.pivot == k - 1, "batch active measurement test uses highest non-diagonal pivot");
     MeasurePrecomputedActivePauli instruction{
         pauli,
         kernel,
@@ -526,6 +525,8 @@ void test_high_pivot_measurement_kernels() {
     const int k = 8;
     check_diagonal_active_measurement_projection_kernel(symft::pauli_z(k, 2) * symft::pauli_z(k, k - 1), k, 601);
     check_diagonal_active_measurement_projection_kernel(symft::pauli_z(k, 2), k, 602);
+    check_batch_active_measurement_projection_kernel(symft::pauli_z(k, 2) * symft::pauli_z(k, k - 1), k, 603);
+    check_batch_active_measurement_projection_kernel(symft::pauli_z(k, 2), k, 604);
     for (const std::uint64_t lower_mask : {std::uint64_t{1}, std::uint64_t{2}, std::uint64_t{3}}) {
         check_active_measurement_projection_kernel(uniform_xmask_pauli(k, k - 1, lower_mask), k, 701 + lower_mask);
         check_active_measurement_projection_kernel(real_xmask_pauli(k, k - 1, lower_mask), k, 801 + lower_mask);

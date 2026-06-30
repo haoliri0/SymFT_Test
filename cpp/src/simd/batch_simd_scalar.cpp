@@ -1,7 +1,9 @@
 #include "simd/batch_simd.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
+#include <cstdint>
 
 namespace symft::batch_simd {
 namespace {
@@ -28,6 +30,12 @@ std::uint64_t low_bits_mask(int nbits) {
 
 std::uint64_t live_word_mask(int active_shots, std::size_t word) {
     return low_bits_mask(active_shots - static_cast<int>(word << 6));
+}
+
+double select_double_bits(double false_value, double true_value, std::uint64_t branch_mask) {
+    const std::uint64_t false_bits = std::bit_cast<std::uint64_t>(false_value);
+    const std::uint64_t true_bits = std::bit_cast<std::uint64_t>(true_value);
+    return std::bit_cast<double>((~branch_mask & false_bits) ^ (branch_mask & true_bits));
 }
 
 std::size_t insert_zero_bit(std::size_t packed, unsigned bit) {
@@ -582,10 +590,10 @@ void scalar_diagonal_project(
             } else {
                 SYMFT_BATCH_SIMD_LOOP
                 for (int shot = first; shot < last; ++shot) {
-                    const bool branch = ((bits >> (shot - first)) & 1ULL) != 0;
+                    const std::uint64_t branch_mask = 0 - ((bits >> (shot - first)) & 1ULL);
                     const double n = invnorms[shot];
-                    dst_r[shot] = (branch ? true_r[shot] : false_r[shot]) * n;
-                    dst_i[shot] = (branch ? true_i[shot] : false_i[shot]) * n;
+                    dst_r[shot] = select_double_bits(false_r[shot], true_r[shot], branch_mask) * n;
+                    dst_i[shot] = select_double_bits(false_i[shot], true_i[shot], branch_mask) * n;
                 }
             }
         }
