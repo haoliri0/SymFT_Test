@@ -1262,27 +1262,39 @@ BatchDetectorPostselectionResult execute_batch_postselected_with_expressions(
     if (runtime.active_shots == 0) {
         return {};
     }
-    initialize_expression_workspace(
-        scratch.expression_words,
-        expression_plan,
-        expression_block,
-        runtime.batch_words,
-        runtime.active_shots,
-        first_sample_shot);
     int discarded = 0;
     BatchExpressionEvaluator evaluator{
         expression_plan,
-        &scratch.expression_words,
         nullptr,
-        runtime.batch_words,
+        &expression_block,
         0,
+        first_sample_shot,
         runtime.eval_scratch};
+    bool expression_workspace_materialized = false;
+    auto materialize_expression_workspace = [&]() {
+        if (expression_workspace_materialized) {
+            return;
+        }
+        initialize_expression_workspace(
+            scratch.expression_words,
+            expression_plan,
+            expression_block,
+            runtime.batch_words,
+            runtime.active_shots,
+            first_sample_shot);
+        evaluator.expression_words = &scratch.expression_words;
+        evaluator.expression_block = nullptr;
+        evaluator.expression_stride_words = runtime.batch_words;
+        evaluator.first_sample_shot = 0;
+        expression_workspace_materialized = true;
+    };
 
     for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
         if (runtime.active_shots == 0) {
             break;
         }
         if (should_compact_dead_before_instruction(runtime, scratch, options, program.instructions[idx])) {
+            materialize_expression_workspace();
             compact_dead_shots_if_needed(
                 runtime,
                 scratch,
@@ -1316,6 +1328,10 @@ BatchDetectorPostselectionResult execute_batch_postselected_with_expressions(
                 evaluator,
                 idx,
                 scratch);
+            if (scratch.dead_count >= runtime.active_shots) {
+                runtime.active_shots = 0;
+                break;
+            }
             continue;
         }
         discarded += std::visit(
@@ -1336,8 +1352,8 @@ BatchDetectorPostselectionResult execute_batch_postselected_with_expressions(
         scratch.record_last_use_by_index,
         static_cast<int>(program.instructions.size()),
         true,
-        &scratch.expression_words,
-        &expression_plan.block_expression_last_use_by_index);
+        expression_workspace_materialized ? &scratch.expression_words : nullptr,
+        expression_workspace_materialized ? &expression_plan.block_expression_last_use_by_index : nullptr);
     return {discarded, runtime.active_shots};
 }
 
