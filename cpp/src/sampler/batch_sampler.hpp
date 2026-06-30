@@ -36,11 +36,10 @@ struct BatchDetectorPostselectionOptions {
     const std::vector<std::vector<int>>* retained_record_uses = nullptr;
 };
 
-// By default active storage is basis-major SoA:
-// active_re[basis * active_pitch + shot] and active_im[basis * active_pitch + shot].
-// In dense-shot-major mode, used by the prepared no-post batch path, active
-// vectors are contiguous per shot:
+// The prepared batch sampler uses shot-major active storage:
 // active_re[shot * active_stride + basis].
+// Basis-major storage is still supported by lower-level helpers:
+// active_re[basis * active_pitch + shot].
 // active_pitch remains the padded shot-column capacity for packed batch lanes.
 struct BatchFactoredExecutorState {
     int n = 0;
@@ -80,7 +79,6 @@ struct BatchFactoredExecutorState {
 };
 
 int default_batch_count(int max_k);
-int default_postselected_batch_count(int max_k);
 void reset_batch_executor(
     BatchFactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,

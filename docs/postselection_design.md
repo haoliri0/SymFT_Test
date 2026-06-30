@@ -228,22 +228,24 @@ postselection paths.
 
 ### Batch State
 
-The batch runtime stores shots in columns:
+The prepared batch runtime stores each shot's dense active vector contiguously:
 
 ```text
-active_re[basis * active_pitch + shot]
-active_im[basis * active_pitch + shot]
+active_re[shot * active_stride + basis]
+active_im[shot * active_stride + basis]
 ```
 
 The bit-packed dynamic symbol, measurement-record, and detector-record columns
 use fixed `batch_words`, based on the batch capacity. The dense active-state
-rows use `active_pitch`, which may shrink after compaction.
+storage uses `active_stride`, based on the maximum active dimension for the
+program.
 
 This split matters:
 
 - bit columns stay simple and fixed-width;
-- active amplitudes avoid dragging a full original batch stride after many lanes
-  have been rejected.
+- active rotations and promotions can skip dead shots without touching their
+  dense vectors;
+- compaction is still available when later instructions need a survivor prefix.
 
 ### Expression Workspace
 
@@ -264,7 +266,6 @@ When the batch sampler reaches a `RecordDetector` instruction:
 
 ```text
 value_bits = evaluate instruction.outcome_plan over live lanes
-write value_bits into runtime.detector_words
 if postselection is enabled:
     mark lanes with value_bits == 1 as dead
 ```
@@ -276,32 +277,32 @@ scratch.dead_bits
 scratch.dead_count
 ```
 
-The detector value is computed through the same packed symbolic-expression path
-as measurement outcomes. The sampler does not xor detector measurement records
-at runtime.
+Symbolic detector values are computed through the same packed symbolic-expression
+path as measurement outcomes. Record-parity detectors update the dead-lane mask
+directly from measurement-record columns instead of materializing a temporary
+detector record column.
 
 ### Deferred Compaction
 
 The sampler does not compact after every detector. It marks lanes dead and
-compacts before later work when the cost model says it is worthwhile or
-necessary.
+compacts before later work when it is necessary.
 
 Compaction is forced before instructions that cannot safely execute over dead
 lanes, such as active measurements and dormant measurement branches.
 
-For pure-over-dead instructions, such as rotations, record-only symbolic writes,
-and detector instructions, compaction is thresholded. The public option is:
+For pure-over-dead instructions, such as rotations, promotions, record-only
+symbolic writes, and detector instructions, the shot-major path keeps the
+dead-lane mask. Dense rotations and promotions skip dead shots; cheap classical
+instructions may still execute over the full page.
+
+For lower-level basis-major execution, pure-over-dead compaction remains
+thresholded. The public option is:
 
 ```cpp
 BatchDetectorPostselectionOptions::mask_dead_shots_min_fraction_denominator
 ```
 
 The default is `2`.
-
-There is also an internal stronger threshold for expensive pure active-state
-operations. This keeps dead lanes from flowing through costly rotations and
-promotions while avoiding too many compactions before cheap record-only
-instructions.
 
 ### What Compaction Moves
 
@@ -402,7 +403,7 @@ must keep surviving lanes and avoid wasting active-state work on dead lanes.
 This creates a tension:
 
 - compact too often, and lane movement dominates;
-- compact too rarely, and active rotations/projections run over rejected lanes.
+- compact too rarely, and active rotations/promotions run over rejected lanes.
 
 The current design balances this with:
 
@@ -410,8 +411,8 @@ The current design balances this with:
 - dead-lane masks;
 - cost-aware deferred compaction;
 - last-use-aware compaction of only needed columns;
-- dynamic active pitch;
-- larger postselected batch pages;
+- shot-major active storage;
+- dead-shot skipping for active rotations and promotions;
 - packed expression evaluation with parent-delta reuse.
 
 The key performance improvement came from treating postselection as part of the

@@ -827,7 +827,6 @@ void test_presampled_exogenous() {
 
     require(default_single_shot_sample_chunk_shots() == 1024, "single-shot default sample chunk");
     require(default_batch_count(10) == 32, "batch default keeps active footprint cap");
-    require(default_postselected_batch_count(10) == 256, "postselected batch default uses larger pages");
     const auto chunked_records = sample_measurements(program, 9, 17, 3);
     require(chunked_records.size() == 9, "chunked single-shot sample count");
     for (const auto& shot : chunked_records) {

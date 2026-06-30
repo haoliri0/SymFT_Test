@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <type_traits>
 
 #if (defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86))
@@ -267,6 +268,9 @@ bool should_compact_dead_before_instruction(
     }
     if (!instruction_is_pure_over_dead(instruction)) {
         return true;
+    }
+    if (runtime.dense_shot_major_active) {
+        return false;
     }
     int denominator = std::max(1, options.mask_dead_shots_min_fraction_denominator);
     if (instruction_is_expensive_over_dead(instruction)) {
@@ -618,6 +622,10 @@ void compact_surviving_shots(
     if (survivor_count == old_shots) {
         return;
     }
+    if (survivor_count == 0) {
+        runtime.active_shots = 0;
+        return;
+    }
     collect_live_sources(live_sources, old_shots, survivor_count, keep_bits);
     compact_active_columns(runtime, survivor_count, live_sources);
     if (expression_words != nullptr) {
@@ -723,6 +731,69 @@ int mark_dead_from_detector_bits(
         const std::uint64_t newly_dead = fired & ~scratch.dead_bits[word];
         scratch.dead_bits[word] |= fired;
         discarded_now += detail::popcount64(newly_dead);
+    }
+    if (discarded_now != 0) {
+        scratch.dead_count += discarded_now;
+    }
+    return discarded_now;
+}
+
+int mark_dead_from_constant_detector(
+    BatchFactoredExecutorState& runtime,
+    bool fired,
+    BatchDetectorPostselectionScratch& scratch) {
+    if (!fired || runtime.active_shots == 0) {
+        return 0;
+    }
+    const std::size_t nwords = batch_word_count(runtime.active_shots);
+    int discarded_now = 0;
+    for (std::size_t word = 0; word < nwords; ++word) {
+        const std::uint64_t live = live_word_mask_for_shots(runtime.active_shots, word);
+        const std::uint64_t newly_dead = live & ~scratch.dead_bits[word];
+        scratch.dead_bits[word] |= live;
+        discarded_now += detail::popcount64(newly_dead);
+    }
+    if (discarded_now != 0) {
+        scratch.dead_count += discarded_now;
+    }
+    return discarded_now;
+}
+
+int mark_dead_from_detector_records(
+    BatchFactoredExecutorState& runtime,
+    const RecordDetector& instruction,
+    BatchDetectorPostselectionScratch& scratch) {
+    if (runtime.active_shots == 0 || instruction.records.empty()) {
+        return 0;
+    }
+    for (int record : instruction.records) {
+        if (record <= 0 || record > runtime.nrecords) {
+            fail("detector references an out-of-range measurement record");
+        }
+    }
+
+    const std::size_t nwords = batch_word_count(runtime.active_shots);
+    int discarded_now = 0;
+    if (instruction.records.size() == 1) {
+        const std::size_t base = batch_record_offset(runtime, instruction.records.front(), 0);
+        for (std::size_t word = 0; word < nwords; ++word) {
+            const std::uint64_t live = live_word_mask_for_shots(runtime.active_shots, word);
+            const std::uint64_t fired = runtime.measurement_words[base + word] & live;
+            const std::uint64_t newly_dead = fired & ~scratch.dead_bits[word];
+            scratch.dead_bits[word] |= fired;
+            discarded_now += detail::popcount64(newly_dead);
+        }
+    } else {
+        for (std::size_t word = 0; word < nwords; ++word) {
+            std::uint64_t fired = 0;
+            for (int record : instruction.records) {
+                fired ^= runtime.measurement_words[batch_record_offset(runtime, record, word)];
+            }
+            fired &= live_word_mask_for_shots(runtime.active_shots, word);
+            const std::uint64_t newly_dead = fired & ~scratch.dead_bits[word];
+            scratch.dead_bits[word] |= fired;
+            discarded_now += detail::popcount64(newly_dead);
+        }
     }
     if (discarded_now != 0) {
         scratch.dead_count += discarded_now;
@@ -880,11 +951,21 @@ bool rotation_run_sign_at(
     return (sign_words[run_offset * stride_words + word] & batch_shot_mask(shot)) != 0;
 }
 
+bool packed_bit_at(const std::vector<std::uint64_t>& bits, int shot) {
+    const std::size_t word = batch_shot_word(shot);
+    return word < bits.size() && ((bits[word] & batch_shot_mask(shot)) != 0);
+}
+
+bool postselected_shot_is_dead(const BatchDetectorPostselectionScratch& scratch, int shot) {
+    return scratch.dead_count != 0 && packed_bit_at(scratch.dead_bits, shot);
+}
+
 std::size_t execute_shot_major_rotation_run(
     BatchFactoredExecutorState& runtime,
     const FactoredInstructionProgram& program,
     const BatchExpressionEvaluator& evaluator,
-    std::size_t first_index) {
+    std::size_t first_index,
+    const BatchDetectorPostselectionScratch* postselection_scratch = nullptr) {
     const std::size_t run_len = shot_major_rotation_run_length(program, first_index);
     if (run_len <= 1 || runtime.active_shots == 0) {
         return 0;
@@ -911,6 +992,9 @@ std::size_t execute_shot_major_rotation_run(
 
     const std::size_t dim = active_length(runtime.k);
     for (int shot = 0; shot < runtime.active_shots; ++shot) {
+        if (postselection_scratch != nullptr && postselected_shot_is_dead(*postselection_scratch, shot)) {
+            continue;
+        }
         double* re = batch_active_re_for_shot(runtime, shot);
         double* im = batch_active_im_for_shot(runtime, shot);
         for (std::size_t run_offset = 0; run_offset < run_len; ++run_offset) {
@@ -924,6 +1008,72 @@ std::size_t execute_shot_major_rotation_run(
         }
     }
     return run_len;
+}
+
+void rotate_shot_major_postselected(
+    BatchFactoredExecutorState& runtime,
+    const PrecomputedActivePauliRotationKernel& kernel,
+    const std::vector<std::uint64_t>& sign_bits,
+    const BatchDetectorPostselectionScratch& scratch) {
+    if (!runtime.dense_shot_major_active || scratch.dead_count == 0) {
+        rotate_pauli_batch(runtime, kernel, sign_bits);
+        return;
+    }
+    if (kernel.action.nqubits != runtime.k) {
+        fail("rotation kernel dimension does not match batch active state");
+    }
+    const std::size_t dim = active_length(runtime.k);
+    for (int shot = 0; shot < runtime.active_shots; ++shot) {
+        if (postselected_shot_is_dead(scratch, shot)) {
+            continue;
+        }
+        rotate_contiguous_active(
+            batch_active_re_for_shot(runtime, shot),
+            batch_active_im_for_shot(runtime, shot),
+            dim,
+            kernel,
+            packed_bit_at(sign_bits, shot));
+    }
+}
+
+void promote_first_dormant_rotation_shot_major_postselected(
+    BatchFactoredExecutorState& runtime,
+    double theta,
+    const std::vector<std::uint64_t>& sign_bits,
+    const BatchDetectorPostselectionScratch& scratch) {
+    if (!runtime.dense_shot_major_active || scratch.dead_count == 0) {
+        promote_first_dormant_rotation_batch(runtime, theta, sign_bits);
+        return;
+    }
+    if (runtime.ndormant <= 0) {
+        fail("cannot promote a dormant qubit when none remain");
+    }
+    const std::size_t dim = active_length(runtime.k);
+    const std::size_t promoted_dim = 2 * dim;
+    if (runtime.active_stride < promoted_dim) {
+        fail("batch active shot-major stride is too short for dormant promotion");
+    }
+    const double c = std::cos(theta);
+    const double s = std::sin(theta);
+    for (int shot = 0; shot < runtime.active_shots; ++shot) {
+        if (postselected_shot_is_dead(scratch, shot)) {
+            continue;
+        }
+        const double q = packed_bit_at(sign_bits, shot) ? s : -s;
+        double* re = batch_active_re_for_shot(runtime, shot);
+        double* im = batch_active_im_for_shot(runtime, shot);
+        SYMFT_SINGLE_SIMD_LOOP
+        for (std::size_t basis = 0; basis < dim; ++basis) {
+            const double r = re[basis];
+            const double i = im[basis];
+            re[basis] = c * r;
+            im[basis] = c * i;
+            re[dim + basis] = -q * i;
+            im[dim + basis] = q * r;
+        }
+    }
+    ++runtime.k;
+    --runtime.ndormant;
 }
 
 void execute_batch_instruction_presampled(
@@ -973,13 +1123,39 @@ void execute_batch_instruction_presampled(
 
 int execute_batch_instruction_postselected(
     BatchFactoredExecutorState& runtime,
+    const ApplyPrecomputedActivePauliRotation& instruction,
+    const BatchExpressionEvaluator& evaluator,
+    std::size_t instruction_index,
+    BatchDetectorPostselectionScratch& scratch) {
+    const auto& sign_bits = evaluator.eval(instruction_index, runtime);
+    rotate_shot_major_postselected(runtime, instruction.rotation_kernel, sign_bits, scratch);
+    return 0;
+}
+
+int execute_batch_instruction_postselected(
+    BatchFactoredExecutorState& runtime,
+    const PromoteDormantRotation& instruction,
+    const BatchExpressionEvaluator& evaluator,
+    std::size_t instruction_index,
+    BatchDetectorPostselectionScratch& scratch) {
+    const auto& sign_bits = evaluator.eval(instruction_index, runtime);
+    promote_first_dormant_rotation_shot_major_postselected(runtime, instruction.theta, sign_bits, scratch);
+    return 0;
+}
+
+int execute_batch_instruction_postselected(
+    BatchFactoredExecutorState& runtime,
     const RecordDetector& instruction,
     const BatchExpressionEvaluator& evaluator,
     std::size_t instruction_index,
     BatchDetectorPostselectionScratch& scratch) {
-    const auto& outcome_bits = !instruction.records.empty() || instruction.outcome.conditions.empty()
-                                   ? detector_record_outcome_bits(runtime, instruction, runtime.eval_scratch)
-                                   : evaluator.eval(instruction_index, runtime);
+    if (!instruction.records.empty()) {
+        return mark_dead_from_detector_records(runtime, instruction, scratch);
+    }
+    if (instruction.outcome.conditions.empty()) {
+        return mark_dead_from_constant_detector(runtime, instruction.outcome.constant, scratch);
+    }
+    const auto& outcome_bits = evaluator.eval(instruction_index, runtime);
     return mark_dead_from_detector_bits(runtime, outcome_bits, scratch);
 }
 
@@ -1120,6 +1296,18 @@ BatchDetectorPostselectionResult execute_batch_postselected_with_expressions(
                 break;
             }
         }
+        if (runtime.dense_shot_major_active) {
+            const std::size_t consumed = execute_shot_major_rotation_run(
+                runtime,
+                program,
+                evaluator,
+                idx,
+                &scratch);
+            if (consumed != 0) {
+                idx += consumed - 1;
+                continue;
+            }
+        }
         const auto& instruction = program.instructions[idx];
         if (const auto* detector = std::get_if<RecordDetector>(&instruction)) {
             discarded += execute_batch_instruction_postselected(
@@ -1161,16 +1349,6 @@ int default_batch_count(int max_k) {
     const std::size_t count = std::min<std::size_t>(
         kDefaultBatchShots,
         std::max<std::size_t>(1, kDefaultBatchActiveAmplitudes / dim));
-    return static_cast<int>(count);
-}
-
-int default_postselected_batch_count(int max_k) {
-    constexpr int kPostselectedBatchShots = 256;
-    constexpr std::size_t kPostselectedBatchActiveAmplitudes = std::size_t{1} << 18;
-    const std::size_t dim = active_length(max_k);
-    const std::size_t count = std::min<std::size_t>(
-        kPostselectedBatchShots,
-        std::max<std::size_t>(1, kPostselectedBatchActiveAmplitudes / dim));
     return static_cast<int>(count);
 }
 

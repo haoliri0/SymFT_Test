@@ -169,7 +169,7 @@ void accumulate_logical_counts_for_survivors(
     std::vector<std::uint64_t>& logical_bits,
     std::vector<std::uint64_t>& scratch) {
     counts.accepted += static_cast<std::uint64_t>(runtime.active_shots);
-    if (runtime.active_shots == 0) {
+    if (runtime.active_shots == 0 || logical_records.empty()) {
         return;
     }
     const std::size_t nwords = batch_word_count(runtime.active_shots);
@@ -216,14 +216,11 @@ int sample_chunk_or_default(int requested) {
 
 int batch_size_or_default(
     int requested,
-    const FactoredInstructionProgram& program,
-    bool postselect_detectors) {
+    const FactoredInstructionProgram& program) {
     if (requested > 0) {
         return requested;
     }
-    return postselect_detectors
-               ? default_postselected_batch_count(program.max_k)
-               : default_batch_count(program.max_k);
+    return default_batch_count(program.max_k);
 }
 
 } // namespace
@@ -398,8 +395,7 @@ PreparedCircuitBatchSampler::PreparedCircuitBatchSampler(
 
     options_.batch_size = batch_size_or_default(
         options_.batch_size,
-        program_,
-        options_.postselect_detectors);
+        program_);
     options_.sample_chunk_shots = sample_chunk_or_default(options_.sample_chunk_shots);
     options_.threads = std::max(1, options_.threads);
     postselection_options_.mask_dead_shots_min_fraction_denominator =
@@ -421,8 +417,8 @@ PreparedCircuitBatchSampler::PreparedCircuitBatchSampler(
             program_,
             options_.batch_size,
             block_seed(0x5eed1234ULL, 0, static_cast<std::uint64_t>(worker_id)));
-        context->runtime.store_detector_records = options_.postselect_detectors;
-        context->runtime.dense_shot_major_active = !options_.postselect_detectors;
+        context->runtime.store_detector_records = false;
+        context->runtime.dense_shot_major_active = true;
         if (options_.postselect_detectors) {
             prepare_batch_detector_postselection_scratch(
                 context->postselection_scratch,
