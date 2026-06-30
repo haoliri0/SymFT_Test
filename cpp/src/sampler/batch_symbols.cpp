@@ -399,13 +399,24 @@ void write_batch_detector_record(
     if (detector <= 0) {
         fail("detector id must be positive");
     }
+    if (!runtime.store_detector_records) {
+        for (std::size_t word = 0; word < nwords; ++word) {
+            runtime.detector_any_words[word] |= outcome_bits[word] & batch_live_word_mask(runtime, word);
+        }
+        return;
+    }
     ensure_batch_detector_storage(runtime, detector);
     const std::size_t base = batch_detector_offset(runtime, detector, 0);
     if (nwords == runtime.batch_words && (runtime.active_shots & 63) == 0) {
         std::copy_n(outcome_bits.data(), nwords, runtime.detector_words.data() + base);
+        for (std::size_t word = 0; word < nwords; ++word) {
+            runtime.detector_any_words[word] |= outcome_bits[word];
+        }
     } else {
         for (std::size_t word = 0; word < nwords; ++word) {
-            runtime.detector_words[base + word] = outcome_bits[word] & batch_live_word_mask(runtime, word);
+            const std::uint64_t bits = outcome_bits[word] & batch_live_word_mask(runtime, word);
+            runtime.detector_words[base + word] = bits;
+            runtime.detector_any_words[word] |= bits;
         }
         for (std::size_t word = nwords; word < runtime.batch_words; ++word) {
             runtime.detector_words[base + word] = 0;

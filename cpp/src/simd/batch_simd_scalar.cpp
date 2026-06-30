@@ -5,6 +5,10 @@
 #include <cmath>
 #include <cstdint>
 
+#if defined(__AVX2__) && defined(__FMA__)
+#include <immintrin.h>
+#endif
+
 namespace symft::batch_simd {
 namespace {
 
@@ -114,6 +118,205 @@ void rotate_general_pair_const(
     }
 }
 
+#if defined(__AVX2__) && defined(__FMA__)
+__m256d pitch2_coeff_lanes(double shot0, double shot1) {
+    return _mm256_set_pd(shot1, shot0, shot1, shot0);
+}
+
+__m256d pitch2_pair_lanes(double row0, double row1) {
+    return _mm256_set_pd(row1, row1, row0, row0);
+}
+
+__m256d maybe_swap_pitch2_basis_rows(__m256d lanes, bool swap) {
+    return swap ? _mm256_permute4x64_pd(lanes, 0x4e) : lanes;
+}
+
+void store_pitch2_partner(double* ptr, __m256d lanes, bool swapped) {
+    _mm256_storeu_pd(ptr, maybe_swap_pitch2_basis_rows(lanes, swapped));
+}
+
+bool rotate_uniform_imag_xmask_pitch2_avx2(
+    double* re,
+    double* im,
+    std::size_t leading_shots,
+    int active_shots,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    std::size_t npairs,
+    double c,
+    const double* q_by_shot) {
+    if (leading_shots != 2 || active_shots != 2) {
+        return false;
+    }
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t dim = npairs << 1;
+    const std::size_t step = selector << 1;
+    const std::size_t lower_mask = static_cast<std::size_t>(xmask) & (selector - 1);
+    const __m256d vc = _mm256_set1_pd(c);
+    const __m256d vq = pitch2_coeff_lanes(q_by_shot[0], q_by_shot[1]);
+    if (selector == 1) {
+        for (std::size_t block = 0; block < dim; block += 2) {
+            double* rp = re + block * 2;
+            double* ip = im + block * 2;
+            const __m256d r = _mm256_loadu_pd(rp);
+            const __m256d v = _mm256_loadu_pd(ip);
+            const __m256d partner_r = _mm256_permute4x64_pd(r, 0x4e);
+            const __m256d partner_i = _mm256_permute4x64_pd(v, 0x4e);
+            _mm256_storeu_pd(rp, _mm256_fnmadd_pd(vq, partner_i, _mm256_mul_pd(vc, r)));
+            _mm256_storeu_pd(ip, _mm256_fmadd_pd(vq, partner_r, _mm256_mul_pd(vc, v)));
+        }
+        return true;
+    }
+    for (std::size_t block = 0; block < dim; block += step) {
+        for (std::size_t offset = 0; offset < selector; offset += 2) {
+            const std::size_t low = block + offset;
+            const std::size_t high0 = block + selector + (offset ^ lower_mask);
+            const std::size_t high1 = block + selector + ((offset + 1) ^ lower_mask);
+            const bool swapped = high0 > high1;
+            const std::size_t high = swapped ? high1 : high0;
+            double* r0p = re + low * 2;
+            double* i0p = im + low * 2;
+            double* r1p = re + high * 2;
+            double* i1p = im + high * 2;
+            const __m256d r0 = _mm256_loadu_pd(r0p);
+            const __m256d i0 = _mm256_loadu_pd(i0p);
+            const __m256d r1 = maybe_swap_pitch2_basis_rows(_mm256_loadu_pd(r1p), swapped);
+            const __m256d i1 = maybe_swap_pitch2_basis_rows(_mm256_loadu_pd(i1p), swapped);
+            _mm256_storeu_pd(r0p, _mm256_fnmadd_pd(vq, i1, _mm256_mul_pd(vc, r0)));
+            _mm256_storeu_pd(i0p, _mm256_fmadd_pd(vq, r1, _mm256_mul_pd(vc, i0)));
+            store_pitch2_partner(r1p, _mm256_fnmadd_pd(vq, i0, _mm256_mul_pd(vc, r1)), swapped);
+            store_pitch2_partner(i1p, _mm256_fmadd_pd(vq, r0, _mm256_mul_pd(vc, i1)), swapped);
+        }
+    }
+    return true;
+}
+
+bool rotate_uniform_imag_xmask_const_pitch2_avx2(
+    double* re,
+    double* im,
+    std::size_t leading_shots,
+    int active_shots,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    std::size_t npairs,
+    double c,
+    double q) {
+    const double q_by_shot[2] = {q, q};
+    return rotate_uniform_imag_xmask_pitch2_avx2(
+        re,
+        im,
+        leading_shots,
+        active_shots,
+        xmask,
+        pair_bit,
+        npairs,
+        c,
+        q_by_shot);
+}
+
+bool nondiagonal_xmask_measure_true_prob_pitch2_avx2(
+    const double* re,
+    const double* im,
+    std::size_t leading_shots,
+    int active_shots,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    std::size_t npairs,
+    const double* coeff1_false_real,
+    const double* coeff1_false_imag,
+    double* prob_true) {
+    if (leading_shots != 2 || active_shots != 2 || pair_bit == 0) {
+        return false;
+    }
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t dim = npairs << 1;
+    const std::size_t step = selector << 1;
+    const std::size_t lower_mask = static_cast<std::size_t>(xmask) & (selector - 1);
+    const __m256d vinv_sqrt2 = _mm256_set1_pd(kInvSqrt2);
+    __m256d sum = _mm256_setzero_pd();
+    std::size_t pair_idx = 0;
+    for (std::size_t block = 0; block < dim; block += step) {
+        for (std::size_t offset = 0; offset < selector; offset += 2) {
+            const std::size_t source0 = block + offset;
+            const std::size_t source1_0 = block + selector + (offset ^ lower_mask);
+            const std::size_t source1_1 = block + selector + ((offset + 1) ^ lower_mask);
+            const bool swapped = source1_0 > source1_1;
+            const std::size_t source1 = swapped ? source1_1 : source1_0;
+            const __m256d r0 = _mm256_loadu_pd(re + source0 * 2);
+            const __m256d i0 = _mm256_loadu_pd(im + source0 * 2);
+            const __m256d r1 = maybe_swap_pitch2_basis_rows(_mm256_loadu_pd(re + source1 * 2), swapped);
+            const __m256d i1 = maybe_swap_pitch2_basis_rows(_mm256_loadu_pd(im + source1 * 2), swapped);
+            const __m256d c1r = pitch2_pair_lanes(coeff1_false_real[pair_idx], coeff1_false_real[pair_idx + 1]);
+            const __m256d c1i = pitch2_pair_lanes(coeff1_false_imag[pair_idx], coeff1_false_imag[pair_idx + 1]);
+            const __m256d prod_r = _mm256_fnmadd_pd(c1i, i1, _mm256_mul_pd(c1r, r1));
+            const __m256d prod_i = _mm256_fmadd_pd(c1i, r1, _mm256_mul_pd(c1r, i1));
+            const __m256d amp_r = _mm256_sub_pd(_mm256_mul_pd(vinv_sqrt2, r0), prod_r);
+            const __m256d amp_i = _mm256_sub_pd(_mm256_mul_pd(vinv_sqrt2, i0), prod_i);
+            sum = _mm256_fmadd_pd(amp_r, amp_r, _mm256_fmadd_pd(amp_i, amp_i, sum));
+            pair_idx += 2;
+        }
+    }
+    alignas(32) double lanes[4];
+    _mm256_store_pd(lanes, sum);
+    prob_true[0] = lanes[0] + lanes[2];
+    prob_true[1] = lanes[1] + lanes[3];
+    return true;
+}
+
+bool nondiagonal_xmask_project_pitch2_avx2(
+    const double* re,
+    const double* im,
+    double* scratch_re,
+    double* scratch_im,
+    std::size_t leading_shots,
+    int active_shots,
+    std::uint64_t xmask,
+    unsigned pair_bit,
+    std::size_t npairs,
+    const double* coeff1_false_real,
+    const double* coeff1_false_imag,
+    const std::uint64_t* branch_bits,
+    const double* invnorms) {
+    if (leading_shots != 2 || active_shots != 2 || pair_bit == 0) {
+        return false;
+    }
+    const std::size_t selector = std::size_t{1} << pair_bit;
+    const std::size_t dim = npairs << 1;
+    const std::size_t step = selector << 1;
+    const std::size_t lower_mask = static_cast<std::size_t>(xmask) & (selector - 1);
+    const std::uint64_t bits = branch_bits[0] & 0x3ULL;
+    const double sign0 = (bits & 0x1ULL) != 0 ? -1.0 : 1.0;
+    const double sign1 = (bits & 0x2ULL) != 0 ? -1.0 : 1.0;
+    const __m256d vinv_sqrt2 = _mm256_set1_pd(kInvSqrt2);
+    const __m256d branch_sign = pitch2_coeff_lanes(sign0, sign1);
+    const __m256d invnorm = pitch2_coeff_lanes(invnorms[0], invnorms[1]);
+    std::size_t pair_idx = 0;
+    for (std::size_t block = 0; block < dim; block += step) {
+        for (std::size_t offset = 0; offset < selector; offset += 2) {
+            const std::size_t source0 = block + offset;
+            const std::size_t source1_0 = block + selector + (offset ^ lower_mask);
+            const std::size_t source1_1 = block + selector + ((offset + 1) ^ lower_mask);
+            const bool swapped = source1_0 > source1_1;
+            const std::size_t source1 = swapped ? source1_1 : source1_0;
+            const __m256d r0 = _mm256_loadu_pd(re + source0 * 2);
+            const __m256d i0 = _mm256_loadu_pd(im + source0 * 2);
+            const __m256d r1 = maybe_swap_pitch2_basis_rows(_mm256_loadu_pd(re + source1 * 2), swapped);
+            const __m256d i1 = maybe_swap_pitch2_basis_rows(_mm256_loadu_pd(im + source1 * 2), swapped);
+            const __m256d c1r = pitch2_pair_lanes(coeff1_false_real[pair_idx], coeff1_false_real[pair_idx + 1]);
+            const __m256d c1i = pitch2_pair_lanes(coeff1_false_imag[pair_idx], coeff1_false_imag[pair_idx + 1]);
+            const __m256d prod_r = _mm256_fnmadd_pd(c1i, i1, _mm256_mul_pd(c1r, r1));
+            const __m256d prod_i = _mm256_fmadd_pd(c1i, r1, _mm256_mul_pd(c1r, i1));
+            const __m256d amp_r = _mm256_fmadd_pd(branch_sign, prod_r, _mm256_mul_pd(vinv_sqrt2, r0));
+            const __m256d amp_i = _mm256_fmadd_pd(branch_sign, prod_i, _mm256_mul_pd(vinv_sqrt2, i0));
+            _mm256_storeu_pd(scratch_re + pair_idx * 2, _mm256_mul_pd(amp_r, invnorm));
+            _mm256_storeu_pd(scratch_im + pair_idx * 2, _mm256_mul_pd(amp_i, invnorm));
+            pair_idx += 2;
+        }
+    }
+    return true;
+}
+#endif
+
 void scalar_rotate_uniform_imag_pairs(
     double* re,
     double* im,
@@ -156,6 +359,12 @@ void scalar_rotate_uniform_imag_xmask(
     std::size_t npairs,
     double c,
     const double* q_by_shot) {
+#if defined(__AVX2__) && defined(__FMA__)
+    if (rotate_uniform_imag_xmask_pitch2_avx2(
+            re, im, leading_shots, active_shots, xmask, pair_bit, npairs, c, q_by_shot)) {
+        return;
+    }
+#endif
     const std::size_t selector = std::size_t{1} << pair_bit;
     const std::size_t dim = npairs << 1;
     const std::size_t step = selector << 1;
@@ -193,6 +402,12 @@ void scalar_rotate_uniform_imag_xmask_const(
     std::size_t npairs,
     double c,
     double q) {
+#if defined(__AVX2__) && defined(__FMA__)
+    if (rotate_uniform_imag_xmask_const_pitch2_avx2(
+            re, im, leading_shots, active_shots, xmask, pair_bit, npairs, c, q)) {
+        return;
+    }
+#endif
     const std::size_t selector = std::size_t{1} << pair_bit;
     const std::size_t dim = npairs << 1;
     const std::size_t step = selector << 1;
@@ -641,31 +856,38 @@ void scalar_nondiagonal_xmask_measure_true_prob(
     const double* coeff1_false_real,
     const double* coeff1_false_imag,
     double* prob_true) {
+#if defined(__AVX2__) && defined(__FMA__)
+    if (nondiagonal_xmask_measure_true_prob_pitch2_avx2(
+            re,
+            im,
+            leading_shots,
+            active_shots,
+            xmask,
+            pair_bit,
+            npairs,
+            coeff1_false_real,
+            coeff1_false_imag,
+            prob_true)) {
+        return;
+    }
+#endif
     std::fill(prob_true, prob_true + active_shots, 0.0);
-    const std::size_t selector = std::size_t{1} << pair_bit;
-    const std::size_t lower_mask = static_cast<std::size_t>(xmask) & (selector - 1);
-    const std::size_t dim = npairs << 1;
-    const std::size_t step = selector << 1;
-    std::size_t pair_idx = 0;
-    for (std::size_t block = 0; block < dim; block += step) {
-        for (std::size_t offset = 0; offset < selector; ++offset) {
-            const std::size_t source0 = block + offset;
-            const std::size_t source1 = block + selector + (offset ^ lower_mask);
-            const double* r0p = re + source0 * leading_shots;
-            const double* i0p = im + source0 * leading_shots;
-            const double* r1p = re + source1 * leading_shots;
-            const double* i1p = im + source1 * leading_shots;
-            const double c1r = coeff1_false_real[pair_idx];
-            const double c1i = coeff1_false_imag[pair_idx];
-            SYMFT_BATCH_SIMD_LOOP
-            for (int shot = 0; shot < active_shots; ++shot) {
-                const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
-                const double prod_i = c1r * i1p[shot] + c1i * r1p[shot];
-                const double amp_r = kInvSqrt2 * r0p[shot] - prod_r;
-                const double amp_i = kInvSqrt2 * i0p[shot] - prod_i;
-                prob_true[shot] += amp_r * amp_r + amp_i * amp_i;
-            }
-            ++pair_idx;
+    for (std::size_t pair_idx = 0; pair_idx < npairs; ++pair_idx) {
+        const std::size_t source0 = insert_zero_bit(pair_idx, pair_bit);
+        const std::size_t source1 = source0 ^ static_cast<std::size_t>(xmask);
+        const double* r0p = re + source0 * leading_shots;
+        const double* i0p = im + source0 * leading_shots;
+        const double* r1p = re + source1 * leading_shots;
+        const double* i1p = im + source1 * leading_shots;
+        const double c1r = coeff1_false_real[pair_idx];
+        const double c1i = coeff1_false_imag[pair_idx];
+        SYMFT_BATCH_SIMD_LOOP
+        for (int shot = 0; shot < active_shots; ++shot) {
+            const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
+            const double prod_i = c1r * i1p[shot] + c1i * r1p[shot];
+            const double amp_r = kInvSqrt2 * r0p[shot] - prod_r;
+            const double amp_i = kInvSqrt2 * i0p[shot] - prod_i;
+            prob_true[shot] += amp_r * amp_r + amp_i * amp_i;
         }
     }
 }
@@ -738,52 +960,62 @@ void scalar_nondiagonal_xmask_project(
     const double* coeff1_false_imag,
     const std::uint64_t* branch_bits,
     const double* invnorms) {
+#if defined(__AVX2__) && defined(__FMA__)
+    if (nondiagonal_xmask_project_pitch2_avx2(
+            re,
+            im,
+            scratch_re,
+            scratch_im,
+            leading_shots,
+            active_shots,
+            xmask,
+            pair_bit,
+            npairs,
+            coeff1_false_real,
+            coeff1_false_imag,
+            branch_bits,
+            invnorms)) {
+        return;
+    }
+#endif
     const std::size_t nwords = static_cast<std::size_t>((active_shots + 63) >> 6);
-    const std::size_t selector = std::size_t{1} << pair_bit;
-    const std::size_t lower_mask = static_cast<std::size_t>(xmask) & (selector - 1);
-    const std::size_t dim = npairs << 1;
-    const std::size_t step = selector << 1;
-    std::size_t pair_idx = 0;
-    for (std::size_t block = 0; block < dim; block += step) {
-        for (std::size_t offset = 0; offset < selector; ++offset) {
-            const std::size_t source0 = block + offset;
-            const std::size_t source1 = block + selector + (offset ^ lower_mask);
-            const double* r0p = re + source0 * leading_shots;
-            const double* i0p = im + source0 * leading_shots;
-            const double* r1p = re + source1 * leading_shots;
-            const double* i1p = im + source1 * leading_shots;
-            double* dst_r = scratch_re + pair_idx * leading_shots;
-            double* dst_i = scratch_im + pair_idx * leading_shots;
-            const double c1r = coeff1_false_real[pair_idx];
-            const double c1i = coeff1_false_imag[pair_idx];
-            for (std::size_t word = 0; word < nwords; ++word) {
-                const int first = static_cast<int>(word << 6);
-                const int last = std::min(active_shots, first + 64);
-                const std::uint64_t live = live_word_mask(active_shots, word);
-                const std::uint64_t bits = branch_bits[word] & live;
-                if (bits == 0 || bits == live) {
-                    const double branch_sign = bits == 0 ? 1.0 : -1.0;
-                    SYMFT_BATCH_SIMD_LOOP
-                    for (int shot = first; shot < last; ++shot) {
-                        const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
-                        const double prod_i = c1r * i1p[shot] + c1i * r1p[shot];
-                        const double n = invnorms[shot];
-                        dst_r[shot] = (kInvSqrt2 * r0p[shot] + branch_sign * prod_r) * n;
-                        dst_i[shot] = (kInvSqrt2 * i0p[shot] + branch_sign * prod_i) * n;
-                    }
-                } else {
-                    SYMFT_BATCH_SIMD_LOOP
-                    for (int shot = first; shot < last; ++shot) {
-                        const double branch_sign = ((bits >> (shot - first)) & 1ULL) != 0 ? -1.0 : 1.0;
-                        const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
-                        const double prod_i = c1r * i1p[shot] + c1i * r1p[shot];
-                        const double n = invnorms[shot];
-                        dst_r[shot] = (kInvSqrt2 * r0p[shot] + branch_sign * prod_r) * n;
-                        dst_i[shot] = (kInvSqrt2 * i0p[shot] + branch_sign * prod_i) * n;
-                    }
+    for (std::size_t pair_idx = 0; pair_idx < npairs; ++pair_idx) {
+        const std::size_t source0 = insert_zero_bit(pair_idx, pair_bit);
+        const std::size_t source1 = source0 ^ static_cast<std::size_t>(xmask);
+        const double* r0p = re + source0 * leading_shots;
+        const double* i0p = im + source0 * leading_shots;
+        const double* r1p = re + source1 * leading_shots;
+        const double* i1p = im + source1 * leading_shots;
+        double* dst_r = scratch_re + pair_idx * leading_shots;
+        double* dst_i = scratch_im + pair_idx * leading_shots;
+        const double c1r = coeff1_false_real[pair_idx];
+        const double c1i = coeff1_false_imag[pair_idx];
+        for (std::size_t word = 0; word < nwords; ++word) {
+            const int first = static_cast<int>(word << 6);
+            const int last = std::min(active_shots, first + 64);
+            const std::uint64_t live = live_word_mask(active_shots, word);
+            const std::uint64_t bits = branch_bits[word] & live;
+            if (bits == 0 || bits == live) {
+                const double branch_sign = bits == 0 ? 1.0 : -1.0;
+                SYMFT_BATCH_SIMD_LOOP
+                for (int shot = first; shot < last; ++shot) {
+                    const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
+                    const double prod_i = c1r * i1p[shot] + c1i * r1p[shot];
+                    const double n = invnorms[shot];
+                    dst_r[shot] = (kInvSqrt2 * r0p[shot] + branch_sign * prod_r) * n;
+                    dst_i[shot] = (kInvSqrt2 * i0p[shot] + branch_sign * prod_i) * n;
+                }
+            } else {
+                SYMFT_BATCH_SIMD_LOOP
+                for (int shot = first; shot < last; ++shot) {
+                    const double branch_sign = ((bits >> (shot - first)) & 1ULL) != 0 ? -1.0 : 1.0;
+                    const double prod_r = c1r * r1p[shot] - c1i * i1p[shot];
+                    const double prod_i = c1r * i1p[shot] + c1i * r1p[shot];
+                    const double n = invnorms[shot];
+                    dst_r[shot] = (kInvSqrt2 * r0p[shot] + branch_sign * prod_r) * n;
+                    dst_i[shot] = (kInvSqrt2 * i0p[shot] + branch_sign * prod_i) * n;
                 }
             }
-            ++pair_idx;
         }
     }
 }

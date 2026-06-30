@@ -253,9 +253,13 @@ void check_diagonal_active_measurement_projection_kernel(const symft::PauliStrin
     }
 }
 
-void check_batch_active_measurement_projection_kernel(const symft::PauliString& pauli, int k, std::uint64_t seed) {
+void check_batch_active_measurement_projection_kernel(
+    const symft::PauliString& pauli,
+    int k,
+    std::uint64_t seed,
+    int shots = 7,
+    bool shot_major = false) {
     using namespace symft;
-    constexpr int shots = 7;
     ActivePauliAction action(pauli);
     PrecomputedActivePauliMeasurementKernel kernel(action);
     MeasurePrecomputedActivePauli instruction{
@@ -269,6 +273,11 @@ void check_batch_active_measurement_projection_kernel(const symft::PauliString& 
     };
     const FactoredInstructionProgram program(k, k, {FactoredInstruction(instruction)}, k);
     BatchFactoredExecutorState runtime(program, shots, seed);
+    if (shot_major) {
+        runtime.dense_shot_major_active = true;
+        reset_batch_executor(runtime, program, shots);
+    }
+    require(runtime.active_pitch == padded_batch_active_pitch(shots), "batch measurement test uses expected active pitch");
     const std::size_t dim = std::size_t{1} << k;
     std::vector<std::vector<Complex>> alpha_by_shot;
     alpha_by_shot.reserve(shots);
@@ -301,18 +310,34 @@ void check_batch_active_measurement_projection_kernel(const symft::PauliString& 
             reference_active_measurement_projection(alpha_by_shot[static_cast<std::size_t>(shot)], kernel, branch, probability);
         for (std::size_t basis = 0; basis < out_dim; ++basis) {
             const std::size_t offset = batch_active_offset(runtime, basis, shot);
+            const Complex actual{runtime.active_re[offset], runtime.active_im[offset]};
             require(
-                approx({runtime.active_re[offset], runtime.active_im[offset]}, expected[basis], 1e-9),
-                "batch active measurement projection matches reference");
+                approx(actual, expected[basis], 1e-9),
+                std::string("batch active measurement projection matches reference; shots=") +
+                    std::to_string(shots) +
+                    " shot=" + std::to_string(shot) +
+                    " basis=" + std::to_string(basis) +
+                    " diagonal=" + (kernel.is_diagonal ? "true" : "false") +
+                    " shot_major=" + (shot_major ? "true" : "false"));
         }
     }
 }
 
-void check_high_pivot_batch_rotation_kernel(const symft::PauliString& pauli, double theta, int k, bool mixed_signs) {
+void check_high_pivot_batch_rotation_kernel(
+    const symft::PauliString& pauli,
+    double theta,
+    int k,
+    bool mixed_signs,
+    int shots = 5,
+    bool shot_major = false) {
     using namespace symft;
-    constexpr int shots = 5;
     const auto program = active_only_program(k);
     BatchFactoredExecutorState runtime(program, shots, 321);
+    if (shot_major) {
+        runtime.dense_shot_major_active = true;
+        reset_batch_executor(runtime, program, shots);
+    }
+    require(runtime.active_pitch == padded_batch_active_pitch(shots), "batch rotation test uses expected active pitch");
     const std::size_t dim = std::size_t{1} << k;
     std::vector<std::vector<Complex>> expected_by_shot;
     expected_by_shot.reserve(shots);
@@ -346,7 +371,8 @@ void check_high_pivot_batch_rotation_kernel(const symft::PauliString& pauli, dou
             const std::size_t offset = batch_active_offset(runtime, basis, shot);
             require(
                 approx({runtime.active_re[offset], runtime.active_im[offset]}, expected_by_shot[static_cast<std::size_t>(shot)][basis], 1e-9),
-                "batch high-pivot rotation kernel matches generic rotation");
+                std::string("batch high-pivot rotation kernel matches generic rotation; shot_major=") +
+                    (shot_major ? "true" : "false"));
         }
     }
 }
@@ -519,6 +545,11 @@ void test_high_pivot_rotation_kernels() {
     check_high_pivot_batch_rotation_kernel(real_large, theta, large_k, true);
     check_high_pivot_batch_rotation_kernel(general_large, theta, large_k, false);
     check_high_pivot_batch_rotation_kernel(general_large, theta, large_k, true);
+    check_high_pivot_batch_rotation_kernel(uniform_large, theta, large_k, false, 2);
+    check_high_pivot_batch_rotation_kernel(uniform_large, theta, large_k, true, 2);
+    check_high_pivot_batch_rotation_kernel(uniform_large, theta, large_k, true, 5, true);
+    check_high_pivot_batch_rotation_kernel(real_large, theta, large_k, true, 5, true);
+    check_high_pivot_batch_rotation_kernel(general_large, theta, large_k, true, 5, true);
 }
 
 void test_high_pivot_measurement_kernels() {
@@ -527,6 +558,7 @@ void test_high_pivot_measurement_kernels() {
     check_diagonal_active_measurement_projection_kernel(symft::pauli_z(k, 2), k, 602);
     check_batch_active_measurement_projection_kernel(symft::pauli_z(k, 2) * symft::pauli_z(k, k - 1), k, 603);
     check_batch_active_measurement_projection_kernel(symft::pauli_z(k, 2), k, 604);
+    check_batch_active_measurement_projection_kernel(symft::pauli_z(k, 2) * symft::pauli_z(k, k - 1), k, 605, 7, true);
     for (const std::uint64_t lower_mask : {std::uint64_t{1}, std::uint64_t{2}, std::uint64_t{3}}) {
         check_active_measurement_projection_kernel(uniform_xmask_pauli(k, k - 1, lower_mask), k, 701 + lower_mask);
         check_active_measurement_projection_kernel(real_xmask_pauli(k, k - 1, lower_mask), k, 801 + lower_mask);
@@ -534,6 +566,12 @@ void test_high_pivot_measurement_kernels() {
         check_batch_active_measurement_projection_kernel(uniform_xmask_pauli(k, k - 1, lower_mask), k, 1001 + lower_mask);
         check_batch_active_measurement_projection_kernel(real_xmask_pauli(k, k - 1, lower_mask), k, 1101 + lower_mask);
         check_batch_active_measurement_projection_kernel(general_xmask_pauli(k, k - 1, lower_mask), k, 1201 + lower_mask);
+        check_batch_active_measurement_projection_kernel(uniform_xmask_pauli(k, k - 1, lower_mask), k, 1301 + lower_mask, 2);
+        check_batch_active_measurement_projection_kernel(real_xmask_pauli(k, k - 1, lower_mask), k, 1401 + lower_mask, 2);
+        check_batch_active_measurement_projection_kernel(general_xmask_pauli(k, k - 1, lower_mask), k, 1501 + lower_mask, 2);
+        check_batch_active_measurement_projection_kernel(uniform_xmask_pauli(k, k - 1, lower_mask), k, 1601 + lower_mask, 7, true);
+        check_batch_active_measurement_projection_kernel(real_xmask_pauli(k, k - 1, lower_mask), k, 1701 + lower_mask, 7, true);
+        check_batch_active_measurement_projection_kernel(general_xmask_pauli(k, k - 1, lower_mask), k, 1801 + lower_mask, 7, true);
     }
 }
 
@@ -788,7 +826,7 @@ void test_presampled_exogenous() {
     }
 
     require(default_single_shot_sample_chunk_shots() == 1024, "single-shot default sample chunk");
-    require(default_batch_count(10) == 64, "batch default keeps active footprint cap");
+    require(default_batch_count(10) == 32, "batch default keeps active footprint cap");
     require(default_postselected_batch_count(10) == 256, "postselected batch default uses larger pages");
     const auto chunked_records = sample_measurements(program, 9, 17, 3);
     require(chunked_records.size() == 9, "chunked single-shot sample count");

@@ -130,16 +130,24 @@ void accumulate_block_counts(
     std::vector<std::uint64_t>& scratch) {
     const std::size_t stride_words = runtime.batch_words;
     const std::size_t nwords = batch_word_count(block);
-    std::fill(discard_bits.begin(), discard_bits.begin() + static_cast<std::ptrdiff_t>(nwords), 0);
-    std::fill(logical_bits.begin(), logical_bits.begin() + static_cast<std::ptrdiff_t>(nwords), 0);
-
-    for (int detector = 1; detector <= runtime.ndetectors; ++detector) {
-        const std::size_t base = static_cast<std::size_t>(detector - 1) * stride_words;
-        for (std::size_t word = 0; word < nwords; ++word) {
-            discard_bits[word] |= runtime.detector_words[base + word];
-        }
+    for (std::size_t word = 0; word < nwords; ++word) {
+        discard_bits[word] = runtime.detector_any_words[word] & live_word_mask(block, word);
     }
 
+    bool any_accepted = false;
+    for (std::size_t word = 0; word < nwords; ++word) {
+        const std::uint64_t live = live_word_mask(block, word);
+        const std::uint64_t discarded_word = discard_bits[word] & live;
+        const std::uint64_t accepted_word = (~discarded_word) & live;
+        any_accepted = any_accepted || accepted_word != 0;
+        counts.discarded += static_cast<std::uint64_t>(popcount64(discarded_word));
+        counts.accepted += static_cast<std::uint64_t>(popcount64(accepted_word));
+    }
+    if (!any_accepted || logical_records.empty()) {
+        return;
+    }
+
+    std::fill(logical_bits.begin(), logical_bits.begin() + static_cast<std::ptrdiff_t>(nwords), 0);
     for (const auto& records : logical_records) {
         xor_records_into(scratch, runtime.measurement_words, stride_words, nwords, records);
         for (std::size_t word = 0; word < nwords; ++word) {
@@ -149,10 +157,7 @@ void accumulate_block_counts(
 
     for (std::size_t word = 0; word < nwords; ++word) {
         const std::uint64_t live = live_word_mask(block, word);
-        const std::uint64_t discarded_word = discard_bits[word] & live;
-        const std::uint64_t accepted_word = (~discarded_word) & live;
-        counts.discarded += static_cast<std::uint64_t>(popcount64(discarded_word));
-        counts.accepted += static_cast<std::uint64_t>(popcount64(accepted_word));
+        const std::uint64_t accepted_word = (~discard_bits[word]) & live;
         counts.logical_errors += static_cast<std::uint64_t>(popcount64(logical_bits[word] & accepted_word));
     }
 }
@@ -416,6 +421,8 @@ PreparedCircuitBatchSampler::PreparedCircuitBatchSampler(
             program_,
             options_.batch_size,
             block_seed(0x5eed1234ULL, 0, static_cast<std::uint64_t>(worker_id)));
+        context->runtime.store_detector_records = options_.postselect_detectors;
+        context->runtime.dense_shot_major_active = !options_.postselect_detectors;
         if (options_.postselect_detectors) {
             prepare_batch_detector_postselection_scratch(
                 context->postselection_scratch,

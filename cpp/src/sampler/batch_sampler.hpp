@@ -36,10 +36,12 @@ struct BatchDetectorPostselectionOptions {
     const std::vector<std::vector<int>>* retained_record_uses = nullptr;
 };
 
-// Active storage is shot-major SoA:
-// active_re[shot * active_pitch + basis] and active_im[shot * active_pitch + basis].
-// Here batches is the fixed shot capacity for bit columns, while active_pitch is
-// the per-shot dense active-vector capacity.
+// By default active storage is basis-major SoA:
+// active_re[basis * active_pitch + shot] and active_im[basis * active_pitch + shot].
+// In dense-shot-major mode, used by the prepared no-post batch path, active
+// vectors are contiguous per shot:
+// active_re[shot * active_stride + basis].
+// active_pitch remains the padded shot-column capacity for packed batch lanes.
 struct BatchFactoredExecutorState {
     int n = 0;
     int k = 0;
@@ -47,11 +49,14 @@ struct BatchFactoredExecutorState {
     int batches = 0;
     int active_shots = 0;
     int active_pitch = 0;
+    std::size_t active_stride = 0;
     int nsymbols = 0;
     int nrecords = 0;
     int ndetectors = 0;
     int max_k = 0;
     std::size_t batch_words = 0;
+    bool store_detector_records = true;
+    bool dense_shot_major_active = false;
     std::vector<double> active_re;
     std::vector<double> active_im;
     std::vector<double> scratch_re;
@@ -60,7 +65,10 @@ struct BatchFactoredExecutorState {
     std::vector<std::uint64_t> assigned_words;
     std::vector<std::uint64_t> measurement_words;
     std::vector<std::uint64_t> detector_words;
+    std::vector<std::uint64_t> detector_any_words;
     std::vector<std::uint64_t> eval_scratch;
+    std::vector<std::uint64_t> rotation_run_sign_words;
+    std::vector<double> rotation_coefficients;
     std::vector<double> branch_prob_true;
     std::vector<double> branch_invnorms;
     std::uint64_t rng_state = 1;

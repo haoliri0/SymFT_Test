@@ -1,6 +1,7 @@
 #include "batch_internal.hpp"
 
 #include <algorithm>
+#include <array>
 #include <type_traits>
 
 #if (defined(__x86_64__) || defined(_M_X64) || defined(__i386) || defined(_M_IX86))
@@ -575,14 +576,28 @@ void compact_active_columns(
         return;
     }
 
-    const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
     const std::size_t dim = active_length(runtime.k);
-    for (int dst = first_moved; dst < survivor_count; ++dst) {
-        const int src = live_sources[static_cast<std::size_t>(dst)];
-        const std::size_t old_base = static_cast<std::size_t>(src) * pitch;
-        const std::size_t new_base = static_cast<std::size_t>(dst) * pitch;
-        std::copy_n(runtime.active_re.data() + old_base, dim, runtime.active_re.data() + new_base);
-        std::copy_n(runtime.active_im.data() + old_base, dim, runtime.active_im.data() + new_base);
+    if (runtime.dense_shot_major_active) {
+        const std::size_t stride = runtime.active_stride;
+        for (int dst = first_moved; dst < survivor_count; ++dst) {
+            const int src = live_sources[static_cast<std::size_t>(dst)];
+            const std::size_t src_base = static_cast<std::size_t>(src) * stride;
+            const std::size_t dst_base = static_cast<std::size_t>(dst) * stride;
+            std::copy_n(runtime.active_re.data() + src_base, dim, runtime.active_re.data() + dst_base);
+            std::copy_n(runtime.active_im.data() + src_base, dim, runtime.active_im.data() + dst_base);
+        }
+        return;
+    }
+
+    const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
+    for (std::size_t basis = 0; basis < dim; ++basis) {
+        double* row_re = runtime.active_re.data() + basis * pitch;
+        double* row_im = runtime.active_im.data() + basis * pitch;
+        for (int dst = first_moved; dst < survivor_count; ++dst) {
+            const int src = live_sources[static_cast<std::size_t>(dst)];
+            row_re[dst] = row_re[src];
+            row_im[dst] = row_im[src];
+        }
     }
 }
 
@@ -827,6 +842,90 @@ struct BatchExpressionEvaluator {
     }
 };
 
+constexpr std::size_t kShotMajorRotationRunLimit = 32;
+
+bool is_active_rotation_instruction(const FactoredInstruction& instruction) {
+    return std::get_if<ApplyPrecomputedActivePauliRotation>(&instruction) != nullptr;
+}
+
+const ApplyPrecomputedActivePauliRotation& active_rotation_instruction_at(
+    const FactoredInstructionProgram& program,
+    std::size_t instruction_index) {
+    const auto* rotation = std::get_if<ApplyPrecomputedActivePauliRotation>(
+        &program.instructions[instruction_index]);
+    if (rotation == nullptr) {
+        fail("internal shot-major rotation run contains a non-rotation instruction");
+    }
+    return *rotation;
+}
+
+std::size_t shot_major_rotation_run_length(
+    const FactoredInstructionProgram& program,
+    std::size_t first_index) {
+    std::size_t run_len = 0;
+    while (first_index + run_len < program.instructions.size() &&
+           run_len < kShotMajorRotationRunLimit &&
+           is_active_rotation_instruction(program.instructions[first_index + run_len])) {
+        ++run_len;
+    }
+    return run_len;
+}
+
+bool rotation_run_sign_at(
+    const std::vector<std::uint64_t>& sign_words,
+    std::size_t stride_words,
+    std::size_t run_offset,
+    int shot) {
+    const std::size_t word = batch_shot_word(shot);
+    return (sign_words[run_offset * stride_words + word] & batch_shot_mask(shot)) != 0;
+}
+
+std::size_t execute_shot_major_rotation_run(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    const BatchExpressionEvaluator& evaluator,
+    std::size_t first_index) {
+    const std::size_t run_len = shot_major_rotation_run_length(program, first_index);
+    if (run_len <= 1 || runtime.active_shots == 0) {
+        return 0;
+    }
+
+    const std::size_t active_words = runtime_batch_word_count(runtime);
+    const std::size_t total_words = run_len * active_words;
+    if (runtime.rotation_run_sign_words.size() < total_words) {
+        runtime.rotation_run_sign_words.resize(total_words, 0);
+    }
+    std::array<const ApplyPrecomputedActivePauliRotation*, kShotMajorRotationRunLimit> rotations{};
+    for (std::size_t run_offset = 0; run_offset < run_len; ++run_offset) {
+        const auto& rotation = active_rotation_instruction_at(program, first_index + run_offset);
+        rotations[run_offset] = &rotation;
+        if (rotation.rotation_kernel.action.nqubits != runtime.k) {
+            fail("rotation kernel dimension does not match batch active state");
+        }
+        const auto& sign_bits = evaluator.eval(first_index + run_offset, runtime);
+        std::copy_n(
+            sign_bits.data(),
+            active_words,
+            runtime.rotation_run_sign_words.data() + run_offset * active_words);
+    }
+
+    const std::size_t dim = active_length(runtime.k);
+    for (int shot = 0; shot < runtime.active_shots; ++shot) {
+        double* re = batch_active_re_for_shot(runtime, shot);
+        double* im = batch_active_im_for_shot(runtime, shot);
+        for (std::size_t run_offset = 0; run_offset < run_len; ++run_offset) {
+            const auto& rotation = *rotations[run_offset];
+            rotate_contiguous_active(
+                re,
+                im,
+                dim,
+                rotation.rotation_kernel,
+                rotation_run_sign_at(runtime.rotation_run_sign_words, active_words, run_offset, shot));
+        }
+    }
+    return run_len;
+}
+
 void execute_batch_instruction_presampled(
     BatchFactoredExecutorState& runtime,
     const ApplyPrecomputedActivePauliRotation& instruction,
@@ -862,6 +961,13 @@ void execute_batch_instruction_presampled(
     const auto& outcome_bits = !instruction.records.empty() || instruction.outcome.conditions.empty()
                                    ? detector_record_outcome_bits(runtime, instruction, runtime.eval_scratch)
                                    : evaluator.eval(instruction_index, runtime);
+    if (!runtime.store_detector_records) {
+        const std::size_t nwords = runtime_batch_word_count(runtime);
+        for (std::size_t word = 0; word < nwords; ++word) {
+            runtime.detector_any_words[word] |= outcome_bits[word] & batch_live_word_mask(runtime, word);
+        }
+        return;
+    }
     write_batch_detector_record(runtime, instruction.detector, outcome_bits);
 }
 
@@ -1069,7 +1175,7 @@ int default_postselected_batch_count(int max_k) {
 }
 
 const char* active_batch_backend() {
-    return "shot-major-active";
+    return batch_simd::scalar_table().name;
 }
 
 void assign_presampled_exogenous_batch_in_place(
@@ -1112,14 +1218,16 @@ void reset_batch_executor(
     runtime.k = program.initial_k;
     runtime.ndormant = program.n - program.initial_k;
     runtime.active_shots = shots;
-    runtime.active_pitch = static_cast<int>(active_length(program.max_k));
+    runtime.active_pitch = padded_batch_active_pitch(runtime.batches);
     runtime.nsymbols = program.nsymbols;
     runtime.nrecords = program.nrecords;
     runtime.ndetectors = program.ndetectors;
     runtime.max_k = program.max_k;
     runtime.batch_words = batch_word_count(runtime.batches);
 
-    const std::size_t active_size = static_cast<std::size_t>(runtime.batches) * static_cast<std::size_t>(runtime.active_pitch);
+    const std::size_t max_dim = active_length(program.max_k);
+    runtime.active_stride = max_dim;
+    const std::size_t active_size = max_dim * static_cast<std::size_t>(runtime.active_pitch);
     if (runtime.active_re.size() < active_size) {
         runtime.active_re.resize(active_size, 0.0);
     }
@@ -1150,29 +1258,53 @@ void reset_batch_executor(
         runtime.measurement_words.resize(measurement_size, 0);
     }
     std::fill(runtime.measurement_words.begin(), runtime.measurement_words.end(), 0);
-    const std::size_t detector_size = static_cast<std::size_t>(program.ndetectors) * runtime.batch_words;
-    if (runtime.detector_words.size() != detector_size) {
-        runtime.detector_words.resize(detector_size, 0);
+    if (runtime.store_detector_records) {
+        const std::size_t detector_size = static_cast<std::size_t>(program.ndetectors) * runtime.batch_words;
+        if (runtime.detector_words.size() != detector_size) {
+            runtime.detector_words.resize(detector_size, 0);
+        }
+        std::fill(runtime.detector_words.begin(), runtime.detector_words.end(), 0);
     }
-    std::fill(runtime.detector_words.begin(), runtime.detector_words.end(), 0);
+    if (runtime.detector_any_words.size() != runtime.batch_words) {
+        runtime.detector_any_words.resize(runtime.batch_words, 0);
+    }
+    std::fill(runtime.detector_any_words.begin(), runtime.detector_any_words.end(), 0);
     if (runtime.eval_scratch.size() != runtime.batch_words) {
         runtime.eval_scratch.resize(runtime.batch_words, 0);
     }
     std::fill(runtime.eval_scratch.begin(), runtime.eval_scratch.end(), 0);
-    if (runtime.branch_prob_true.size() < static_cast<std::size_t>(runtime.batches)) {
-        runtime.branch_prob_true.resize(static_cast<std::size_t>(runtime.batches), 0.0);
+    if (runtime.rotation_coefficients.size() < static_cast<std::size_t>(runtime.active_pitch)) {
+        runtime.rotation_coefficients.resize(static_cast<std::size_t>(runtime.active_pitch), 0.0);
     }
-    if (runtime.branch_invnorms.size() < static_cast<std::size_t>(runtime.batches)) {
-        runtime.branch_invnorms.resize(static_cast<std::size_t>(runtime.batches), 0.0);
+    if (runtime.branch_prob_true.size() < static_cast<std::size_t>(runtime.active_pitch)) {
+        runtime.branch_prob_true.resize(static_cast<std::size_t>(runtime.active_pitch), 0.0);
+    }
+    if (runtime.branch_invnorms.size() < static_cast<std::size_t>(runtime.active_pitch)) {
+        runtime.branch_invnorms.resize(static_cast<std::size_t>(runtime.active_pitch), 0.0);
     }
 
     const std::size_t dim = active_length(program.initial_k);
-    const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
-    for (int shot = 0; shot < runtime.active_shots; ++shot) {
-        const std::size_t base = static_cast<std::size_t>(shot) * pitch;
-        std::fill_n(runtime.active_re.data() + base, dim, 0.0);
-        std::fill_n(runtime.active_im.data() + base, dim, 0.0);
-        runtime.active_re[base] = 1.0;
+    if (runtime.dense_shot_major_active) {
+        for (int shot = 0; shot < runtime.active_shots; ++shot) {
+            const std::size_t base = static_cast<std::size_t>(shot) * runtime.active_stride;
+            std::fill_n(runtime.active_re.data() + base, dim, 0.0);
+            std::fill_n(runtime.active_im.data() + base, dim, 0.0);
+            if (dim > 0) {
+                runtime.active_re[base] = 1.0;
+            }
+        }
+    } else {
+        const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
+        for (std::size_t basis = 0; basis < dim; ++basis) {
+            const std::size_t base = basis * pitch;
+            std::fill_n(runtime.active_re.data() + base, pitch, 0.0);
+            std::fill_n(runtime.active_im.data() + base, pitch, 0.0);
+        }
+        if (dim > 0) {
+            for (int shot = 0; shot < runtime.active_shots; ++shot) {
+                runtime.active_re[static_cast<std::size_t>(shot)] = 1.0;
+            }
+        }
     }
 }
 
@@ -1244,13 +1376,25 @@ void execute_batch_in_place(
         0,
         first_sample_shot,
         runtime.eval_scratch};
-    for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+    for (std::size_t idx = 0; idx < program.instructions.size();) {
+        if (runtime.dense_shot_major_active) {
+            const std::size_t consumed = execute_shot_major_rotation_run(
+                runtime,
+                program,
+                evaluator,
+                idx);
+            if (consumed != 0) {
+                idx += consumed;
+                continue;
+            }
+        }
         const auto& instruction = program.instructions[idx];
         std::visit(
             [&](const auto& inst) {
                 execute_batch_instruction_presampled(runtime, inst, evaluator, idx);
             },
             instruction);
+        ++idx;
     }
 }
 

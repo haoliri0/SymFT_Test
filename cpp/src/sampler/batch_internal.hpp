@@ -17,9 +17,10 @@
 namespace symft {
 
 inline constexpr int kDefaultBatchShots = 2048;
-inline constexpr std::size_t kDefaultBatchActiveAmplitudes = std::size_t{1} << 16;
+inline constexpr std::size_t kDefaultBatchActiveAmplitudes = std::size_t{1} << 15;
 inline constexpr std::size_t kXmaskRotationPairThreshold = 64;
 inline constexpr std::size_t kBatchScalarSymbolicEvalThreshold = 32;
+inline constexpr int kBatchActiveLaneAlignment = 4;
 
 #if defined(__clang__)
 #define SYMFT_BATCH_SIMD_LOOP _Pragma("clang loop vectorize(enable) interleave(enable)")
@@ -47,6 +48,14 @@ inline std::size_t batch_word_count(int shots) {
         return 0;
     }
     return static_cast<std::size_t>((shots + 63) >> 6);
+}
+
+inline int padded_batch_active_pitch(int shot_capacity) {
+    if (shot_capacity <= 2) {
+        return std::max(shot_capacity, 1);
+    }
+    const int lanes = std::max(shot_capacity, kBatchActiveLaneAlignment);
+    return ((lanes + kBatchActiveLaneAlignment - 1) / kBatchActiveLaneAlignment) * kBatchActiveLaneAlignment;
 }
 
 inline std::uint64_t low_bits_mask(int nbits) {
@@ -81,7 +90,26 @@ inline void set_batch_bit(std::vector<std::uint64_t>& bits, int shot) {
 }
 
 inline std::size_t batch_active_offset(const BatchFactoredExecutorState& runtime, std::size_t basis, int shot) {
-    return static_cast<std::size_t>(shot) * static_cast<std::size_t>(runtime.active_pitch) + basis;
+    if (runtime.dense_shot_major_active) {
+        return static_cast<std::size_t>(shot) * runtime.active_stride + basis;
+    }
+    return basis * static_cast<std::size_t>(runtime.active_pitch) + static_cast<std::size_t>(shot);
+}
+
+inline double* batch_active_re_for_shot(BatchFactoredExecutorState& runtime, int shot) {
+    return runtime.active_re.data() + static_cast<std::size_t>(shot) * runtime.active_stride;
+}
+
+inline double* batch_active_im_for_shot(BatchFactoredExecutorState& runtime, int shot) {
+    return runtime.active_im.data() + static_cast<std::size_t>(shot) * runtime.active_stride;
+}
+
+inline double* batch_scratch_re_for_shot(BatchFactoredExecutorState& runtime, int shot) {
+    return runtime.scratch_re.data() + static_cast<std::size_t>(shot) * runtime.active_stride;
+}
+
+inline double* batch_scratch_im_for_shot(BatchFactoredExecutorState& runtime, int shot) {
+    return runtime.scratch_im.data() + static_cast<std::size_t>(shot) * runtime.active_stride;
 }
 
 inline std::size_t batch_condition_offset(const BatchFactoredExecutorState& runtime, int condition, std::size_t word) {
@@ -195,6 +223,12 @@ void rotate_pauli_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliRotationKernel& kernel,
     const std::vector<std::uint64_t>& sign_bits);
+void rotate_contiguous_active(
+    double* re,
+    double* im,
+    std::size_t dim,
+    const PrecomputedActivePauliRotationKernel& kernel,
+    bool sign);
 void promote_first_dormant_rotation_batch(
     BatchFactoredExecutorState& runtime,
     double theta,
