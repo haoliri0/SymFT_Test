@@ -210,8 +210,11 @@ CircuitSamplingInfo make_info(
     return info;
 }
 
-int sample_chunk_or_default(int requested) {
-    return requested > 0 ? requested : default_single_shot_sample_chunk_shots();
+int sample_chunk_or_default(int requested, int min_auto_shots = 1) {
+    if (requested > 0) {
+        return requested;
+    }
+    return std::max(default_single_shot_sample_chunk_shots(), min_auto_shots);
 }
 
 int batch_size_or_default(
@@ -396,7 +399,9 @@ PreparedCircuitBatchSampler::PreparedCircuitBatchSampler(
     options_.batch_size = batch_size_or_default(
         options_.batch_size,
         program_);
-    options_.sample_chunk_shots = sample_chunk_or_default(options_.sample_chunk_shots);
+    options_.sample_chunk_shots = sample_chunk_or_default(
+        options_.sample_chunk_shots,
+        options_.batch_size);
     options_.threads = std::max(1, options_.threads);
     postselection_options_.mask_dead_shots_min_fraction_denominator =
         options_.batch_mask_threshold_denominator;
