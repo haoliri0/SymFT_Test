@@ -60,17 +60,6 @@ void xor_packed_presampled_condition(
     value_words[packed_condition_offset(shot_words, condition, word)] ^= mask;
 }
 
-void xor_packed_presampled_condition_all(
-    std::vector<std::uint64_t>& value_words,
-    std::size_t shot_words,
-    int shots,
-    int condition) {
-    for (std::size_t word = 0; word < shot_words; ++word) {
-        value_words[packed_condition_offset(shot_words, condition, word)] ^=
-            packed_live_word_mask(shots, word);
-    }
-}
-
 void or_low_probability_bits_packed(
     std::uint64_t* row,
     std::size_t shot_words,
@@ -127,6 +116,8 @@ void generate_packed_biased_bits(
     } else if (p < kLowProbabilitySampleThreshold) {
         or_low_probability_bits_packed(row, shot_words, rng_state, p, shots);
     } else {
+        // Decompose p into bit-sliced fair-coin prefixes, then add the
+        // remaining probability mass with a sparse geometric pass.
         constexpr int kCoinFlips = 8;
         constexpr double kBuckets = static_cast<double>(std::uint64_t{1} << kCoinFlips);
         const double scaled = p * kBuckets;
@@ -337,10 +328,6 @@ void presample_bernoulli_condition_packed(
     int shots) {
     const double p = check_probability(probability);
     if (p <= 0.0) {
-        return;
-    }
-    if (p >= 1.0) {
-        xor_packed_presampled_condition_all(value_words, shot_words, shots, condition);
         return;
     }
     generate_packed_biased_bits(

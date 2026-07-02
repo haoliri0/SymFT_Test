@@ -14,7 +14,7 @@ using namespace detail;
 
 namespace {
 
-constexpr int kDefaultSingleShotSampleChunkShots = 1 << 10;
+constexpr int kDefaultSingleShotSampleChunkShots = 2048;
 constexpr std::uint64_t kSingleShotBranchSeedXor = 0x5eed1234ULL;
 
 void check_symbol_slot(const FactoredExecutorState& runtime, int condition) {

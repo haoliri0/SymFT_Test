@@ -615,7 +615,7 @@ void sample_bernoulli_condition_batch(BatchFactoredExecutorState& runtime, int c
     if (batch_symbol_assigned(runtime, condition)) {
         return;
     }
-    const double p = std::clamp(probability, 0.0, 1.0);
+    const double p = check_probability(probability);
     if (p <= 0.0) {
         set_batch_symbol_false_unchecked(runtime, condition);
         return;

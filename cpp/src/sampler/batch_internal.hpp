@@ -37,6 +37,7 @@ enum class BatchSignMode {
 };
 
 using detail::active_length;
+using detail::check_probability;
 using detail::fail;
 using detail::symbol_bit_mask;
 using detail::symbol_word_count;

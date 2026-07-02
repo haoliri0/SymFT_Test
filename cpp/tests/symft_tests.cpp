@@ -5,7 +5,6 @@
 #include "sampler/exogenous.hpp"
 #include "sampler/single_shot.hpp"
 
-#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstdio>
@@ -825,7 +824,7 @@ void test_presampled_exogenous() {
         require(packed_bit(runtime.measurement_words, 0), "packed presampled expression deterministic X error");
     }
 
-    require(default_single_shot_sample_chunk_shots() == 1024, "single-shot default sample chunk");
+    require(default_single_shot_sample_chunk_shots() == 2048, "single-shot default sample chunk");
     require(default_batch_count(10) == 32, "batch default keeps active footprint cap");
     const auto chunked_records = sample_measurements(program, 9, 17, 3);
     require(chunked_records.size() == 9, "chunked single-shot sample count");
