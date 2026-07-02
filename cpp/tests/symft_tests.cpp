@@ -836,26 +836,13 @@ void test_presampled_exogenous() {
     const auto random_error = parse_stim_text("X_ERROR(0.5) 0\nM 0\n");
     PendingFactoredState pending_random(random_error.state);
     const auto random_program = plan_factored_updates(pending_random);
-    const auto scalar_samples = presample_exogenous(random_program, 11, 31);
     const auto packed_random_samples = presample_exogenous_packed(random_program, 11, 31);
-    PresampledExogenous scalar_block;
-    scalar_block.nshots = 5;
-    scalar_block.nsymbols = scalar_samples.nsymbols;
-    scalar_block.nwords = scalar_samples.nwords;
-    scalar_block.next_rng_state = scalar_samples.next_rng_state;
-    scalar_block.exogenous_assigned_words = scalar_samples.exogenous_assigned_words;
-    scalar_block.value_words.resize(5 * scalar_block.nwords);
-    std::copy_n(
-        scalar_samples.value_words.begin() + static_cast<std::ptrdiff_t>(3 * scalar_block.nwords),
-        5 * scalar_block.nwords,
-        scalar_block.value_words.begin());
-    BatchFactoredExecutorState scalar_runtime(random_program, 5, 41);
-    execute_batch_in_place(scalar_runtime, random_program, scalar_block);
+    const int random_condition = random_program.sampled_bernoulli_conditions.front();
+    const auto random_row =
+        packed_random_samples.value_words[(static_cast<std::size_t>(random_condition - 1) * packed_random_samples.shot_words)];
+    require(random_row != 0 && random_row != ((std::uint64_t{1} << 11) - 1), "packed fair Bernoulli bits are non-degenerate");
     BatchFactoredExecutorState packed_runtime(random_program, 5, 41);
     execute_batch_in_place(packed_runtime, random_program, packed_random_samples, 3);
-    require(
-        scalar_runtime.measurement_words == packed_runtime.measurement_words,
-        "packed batch exogenous slice matches shot-major presample");
     PresampledExpressionPlan random_expression_plan;
     prepare_presampled_expression_plan(random_expression_plan, random_program, packed_random_samples);
     PresampledExpressionBlock random_expression_block;
@@ -873,6 +860,22 @@ void test_presampled_exogenous() {
     require(
         expression_runtime.measurement_words == packed_runtime.measurement_words,
         "batch presampled expression slice matches packed exogenous execution");
+
+    const auto mid_error = parse_stim_text("X_ERROR(0.3) 0\nM 0\n");
+    PendingFactoredState pending_mid(mid_error.state);
+    const auto mid_program = plan_factored_updates(pending_mid);
+    const int mid_shots = 4096;
+    const auto mid_samples = presample_exogenous_packed(mid_program, mid_shots, 1234);
+    const int mid_condition = mid_program.sampled_bernoulli_conditions.front();
+    const std::size_t mid_base = static_cast<std::size_t>(mid_condition - 1) * mid_samples.shot_words;
+    int mid_ones = 0;
+    for (int shot = 0; shot < mid_shots; ++shot) {
+        const std::size_t word = static_cast<std::size_t>(shot >> 6);
+        if ((mid_samples.value_words[mid_base + word] & (std::uint64_t{1} << (shot & 63))) != 0) {
+            ++mid_ones;
+        }
+    }
+    require(mid_ones > 1000 && mid_ones < 1450, "packed mid-probability Bernoulli has plausible weight");
 }
 
 void test_batch_sampler() {

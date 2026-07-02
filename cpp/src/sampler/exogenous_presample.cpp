@@ -71,6 +71,101 @@ void xor_packed_presampled_condition_all(
     }
 }
 
+void or_low_probability_bits_packed(
+    std::uint64_t* row,
+    std::size_t shot_words,
+    std::uint64_t& rng_state,
+    double probability,
+    int shots) {
+    if (probability <= 0.0 || shots <= 0) {
+        return;
+    }
+    int draw = 0;
+    while (true) {
+        const int gap = static_cast<int>(sample_geometric_gap(rng_state, probability));
+        if (gap >= shots - draw) {
+            return;
+        }
+        draw += gap;
+        const std::size_t word = static_cast<std::size_t>(draw >> 6);
+        if (word >= shot_words) {
+            return;
+        }
+        row[word] |= std::uint64_t{1} << (draw & 63);
+        ++draw;
+    }
+}
+
+void generate_packed_biased_bits(
+    std::uint64_t* row,
+    std::size_t shot_words,
+    std::uint64_t& rng_state,
+    double probability,
+    int shots) {
+    if (shots <= 0 || shot_words == 0 || probability <= 0.0) {
+        return;
+    }
+    if (probability >= 1.0) {
+        for (std::size_t word = 0; word < shot_words; ++word) {
+            row[word] = packed_live_word_mask(shots, word);
+        }
+        return;
+    }
+
+    const bool invert = probability > 0.5;
+    const double p = invert ? 1.0 - probability : probability;
+    if (p <= 0.0) {
+        for (std::size_t word = 0; word < shot_words; ++word) {
+            row[word] = invert ? packed_live_word_mask(shots, word) : 0;
+        }
+        return;
+    }
+    if (p == 0.5) {
+        for (std::size_t word = 0; word < shot_words; ++word) {
+            row[word] = next_random_u64(rng_state) & packed_live_word_mask(shots, word);
+        }
+    } else if (p < kLowProbabilitySampleThreshold) {
+        or_low_probability_bits_packed(row, shot_words, rng_state, p, shots);
+    } else {
+        constexpr int kCoinFlips = 8;
+        constexpr double kBuckets = static_cast<double>(std::uint64_t{1} << kCoinFlips);
+        const double scaled = p * kBuckets;
+        const auto raw_top_bits = static_cast<std::uint64_t>(scaled);
+        const auto top_bits = raw_top_bits < (std::uint64_t{1} << (kCoinFlips - 1))
+                                  ? raw_top_bits
+                                  : (std::uint64_t{1} << (kCoinFlips - 1)) - 1;
+        const double p_truncated = static_cast<double>(top_bits) / kBuckets;
+        for (std::size_t word = 0; word < shot_words; ++word) {
+            std::uint64_t alive = next_random_u64(rng_state);
+            std::uint64_t result = 0;
+            for (int bit = kCoinFlips - 2; bit >= 0; --bit) {
+                const std::uint64_t shoot = next_random_u64(rng_state);
+                if (((top_bits >> bit) & 1ULL) != 0) {
+                    result |= shoot & alive;
+                }
+                alive &= ~shoot;
+            }
+            row[word] = result & packed_live_word_mask(shots, word);
+        }
+
+        const double p_leftover = p - p_truncated;
+        if (p_leftover > 0.0) {
+            or_low_probability_bits_packed(
+                row,
+                shot_words,
+                rng_state,
+                p_leftover / (1.0 - p_truncated),
+                shots);
+        }
+    }
+
+    if (invert) {
+        for (std::size_t word = 0; word < shot_words; ++word) {
+            row[word] = (~row[word]) & packed_live_word_mask(shots, word);
+        }
+    }
+}
+
 void mark_exogenous_conditions(std::vector<std::uint64_t>& words, const std::vector<int>& conditions) {
     for (int condition : conditions) {
         const std::size_t word = symbol_word_index(condition);
@@ -248,23 +343,12 @@ void presample_bernoulli_condition_packed(
         xor_packed_presampled_condition_all(value_words, shot_words, shots, condition);
         return;
     }
-    if (p < kLowProbabilitySampleThreshold) {
-        int draw = 0;
-        while (true) {
-            const int gap = static_cast<int>(sample_geometric_gap(rng_state, p));
-            if (gap >= shots - draw) {
-                return;
-            }
-            draw += gap;
-            xor_packed_presampled_condition(value_words, shot_words, draw, condition);
-            ++draw;
-        }
-    }
-    for (int shot = 0; shot < shots; ++shot) {
-        if (sample_bernoulli(rng_state, p)) {
-            xor_packed_presampled_condition(value_words, shot_words, shot, condition);
-        }
-    }
+    generate_packed_biased_bits(
+        value_words.data() + packed_condition_offset(shot_words, condition, 0),
+        shot_words,
+        rng_state,
+        p,
+        shots);
 }
 
 void presample_low_probability_bernoulli_group(
