@@ -159,6 +159,11 @@ private:
 };
 
 double parse_numeric_expression(const std::string& input) {
+    char* end = nullptr;
+    const double value = std::strtod(input.c_str(), &end);
+    if (end != input.c_str() && *end == '\0') {
+        return value;
+    }
     return ArgumentExpressionParser(input).parse();
 }
 

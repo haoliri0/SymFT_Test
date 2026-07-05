@@ -111,8 +111,27 @@ bool has_lower_sampling_cost(const SymbolicBool& candidate, const SymbolicBool& 
     return candidate.conditions.size() < current.conditions.size();
 }
 
+bool conditions_overlap(const std::vector<int>& lhs, const std::vector<int>& rhs) {
+    std::size_t i = 0;
+    std::size_t j = 0;
+    while (i < lhs.size() && j < rhs.size()) {
+        if (lhs[i] == rhs[j]) {
+            return true;
+        }
+        if (lhs[i] < rhs[j]) {
+            ++i;
+        } else {
+            ++j;
+        }
+    }
+    return false;
+}
+
 SymbolicBool reduce_by_relation_once(const SymbolicBool& expr, const SymbolicBool& relation) {
     if (relation.conditions.empty() && !relation.constant) {
+        return expr;
+    }
+    if (!conditions_overlap(expr.conditions, relation.conditions)) {
         return expr;
     }
     const SymbolicBool candidate = xor_bool(expr, relation);

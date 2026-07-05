@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -174,79 +175,121 @@ void mul_rows(CliffordFrame& frame, int dst, int lhs, int rhs, int extra_phase =
     frame.rows[static_cast<std::size_t>(dst)] = out;
 }
 
-PauliString axis_image_from_rows(
-    const CliffordFrame& frame,
-    const std::vector<PauliString>& rows,
-    int q,
-    char axis) {
+PauliString axis_image_from_rows(const CliffordFrame& frame, const PauliString& x, const PauliString& z, char axis) {
     if (axis == '_') {
         return pauli_identity(frame.nqubits);
     }
     if (axis == 'X') {
-        return rows[static_cast<std::size_t>(frame.xrow(q))];
+        return x;
     }
     if (axis == 'Z') {
-        return rows[static_cast<std::size_t>(frame.zrow(q))];
+        return z;
     }
     if (axis == 'Y') {
-        PauliString out =
-            rows[static_cast<std::size_t>(frame.xrow(q))] * rows[static_cast<std::size_t>(frame.zrow(q))];
+        PauliString out = x * z;
         out.phase_shift(1);
         return out;
     }
     fail("invalid Clifford image axis");
 }
 
-PauliString image_from_body(
+PauliString image_from_single_body(
     const CliffordFrame& frame,
-    const std::vector<PauliString>& rows,
-    const std::vector<int>& qubits,
-    std::string body) {
+    const PauliString& x,
+    const PauliString& z,
+    std::string_view body) {
     bool negative = false;
     if (!body.empty() && body[0] == '-') {
         negative = true;
-        body = body.substr(1);
+        body.remove_prefix(1);
     }
-    if (body.size() != qubits.size()) {
+    if (body.size() != 1) {
         fail("invalid Clifford image body");
     }
-    PauliString out = pauli_identity(frame.nqubits);
-    for (std::size_t i = 0; i < qubits.size(); ++i) {
-        out = out * axis_image_from_rows(frame, rows, qubits[i], body[i]);
-    }
+    PauliString out = axis_image_from_rows(frame, x, z, body[0]);
     if (negative) {
         out.phase_shift(2);
     }
     return out;
 }
 
-void left_apply_single_qubit_images(CliffordFrame& frame, int q, const std::string& x_image, const std::string& z_image) {
+PauliString axis_image_from_pair(
+    const CliffordFrame& frame,
+    const PauliString& xa,
+    const PauliString& za,
+    const PauliString& xb,
+    const PauliString& zb,
+    int qubit_index,
+    char axis) {
+    if (qubit_index == 0) {
+        return axis_image_from_rows(frame, xa, za, axis);
+    }
+    return axis_image_from_rows(frame, xb, zb, axis);
+}
+
+PauliString image_from_two_body(
+    const CliffordFrame& frame,
+    const PauliString& xa,
+    const PauliString& za,
+    const PauliString& xb,
+    const PauliString& zb,
+    std::string_view body) {
+    bool negative = false;
+    if (!body.empty() && body[0] == '-') {
+        negative = true;
+        body.remove_prefix(1);
+    }
+    if (body.size() != 2) {
+        fail("invalid Clifford image body");
+    }
+    PauliString out =
+        axis_image_from_pair(frame, xa, za, xb, zb, 0, body[0]) *
+        axis_image_from_pair(frame, xa, za, xb, zb, 1, body[1]);
+    if (negative) {
+        out.phase_shift(2);
+    }
+    return out;
+}
+
+void left_apply_single_qubit_images(CliffordFrame& frame, int q, std::string_view x_image, std::string_view z_image) {
     const int qi = check_qubit(frame.nqubits, q);
-    const auto rows = frame.rows;
-    const std::vector<int> qubits{qi};
-    frame.rows[static_cast<std::size_t>(frame.xrow(qi))] = image_from_body(frame, rows, qubits, x_image);
-    frame.rows[static_cast<std::size_t>(frame.zrow(qi))] = image_from_body(frame, rows, qubits, z_image);
+    const int x_row = frame.xrow(qi);
+    const int z_row = frame.zrow(qi);
+    const PauliString old_x = frame.rows[static_cast<std::size_t>(x_row)];
+    const PauliString old_z = frame.rows[static_cast<std::size_t>(z_row)];
+    frame.rows[static_cast<std::size_t>(x_row)] = image_from_single_body(frame, old_x, old_z, x_image);
+    frame.rows[static_cast<std::size_t>(z_row)] = image_from_single_body(frame, old_x, old_z, z_image);
 }
 
 void left_apply_two_qubit_images(
     CliffordFrame& frame,
     int a,
     int b,
-    const std::string& xa_image,
-    const std::string& za_image,
-    const std::string& xb_image,
-    const std::string& zb_image) {
+    std::string_view xa_image,
+    std::string_view za_image,
+    std::string_view xb_image,
+    std::string_view zb_image) {
     const int ai = check_qubit(frame.nqubits, a);
     const int bi = check_qubit(frame.nqubits, b);
     if (ai == bi) {
         fail("two-qubit Clifford gate requires distinct qubits");
     }
-    const auto rows = frame.rows;
-    const std::vector<int> qubits{ai, bi};
-    frame.rows[static_cast<std::size_t>(frame.xrow(ai))] = image_from_body(frame, rows, qubits, xa_image);
-    frame.rows[static_cast<std::size_t>(frame.zrow(ai))] = image_from_body(frame, rows, qubits, za_image);
-    frame.rows[static_cast<std::size_t>(frame.xrow(bi))] = image_from_body(frame, rows, qubits, xb_image);
-    frame.rows[static_cast<std::size_t>(frame.zrow(bi))] = image_from_body(frame, rows, qubits, zb_image);
+    const int xa_row = frame.xrow(ai);
+    const int za_row = frame.zrow(ai);
+    const int xb_row = frame.xrow(bi);
+    const int zb_row = frame.zrow(bi);
+    const PauliString old_xa = frame.rows[static_cast<std::size_t>(xa_row)];
+    const PauliString old_za = frame.rows[static_cast<std::size_t>(za_row)];
+    const PauliString old_xb = frame.rows[static_cast<std::size_t>(xb_row)];
+    const PauliString old_zb = frame.rows[static_cast<std::size_t>(zb_row)];
+    frame.rows[static_cast<std::size_t>(xa_row)] =
+        image_from_two_body(frame, old_xa, old_za, old_xb, old_zb, xa_image);
+    frame.rows[static_cast<std::size_t>(za_row)] =
+        image_from_two_body(frame, old_xa, old_za, old_xb, old_zb, za_image);
+    frame.rows[static_cast<std::size_t>(xb_row)] =
+        image_from_two_body(frame, old_xa, old_za, old_xb, old_zb, xb_image);
+    frame.rows[static_cast<std::size_t>(zb_row)] =
+        image_from_two_body(frame, old_xa, old_za, old_xb, old_zb, zb_image);
 }
 
 void right_apply_clifford(CliffordFrame& frame, const CliffordFrame& gate) {
