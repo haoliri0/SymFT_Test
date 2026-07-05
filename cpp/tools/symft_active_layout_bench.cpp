@@ -161,7 +161,7 @@ double checksum_soa(const SoAState& state) {
 }
 
 void apply_soa_block(SoAState& state, const symft::PrecomputedActivePauliRotationKernel& kernel, bool sign) {
-    const double c = kernel.cos_theta;
+    const double c = kernel.cos_kernel_angle;
     double* re = state.re.data();
     double* im = state.im.data();
     const std::size_t dim = state.re.size();
@@ -349,7 +349,7 @@ void apply_soa_block(SoAState& state, const symft::PrecomputedActivePauliRotatio
 
 void apply_soa_dispatch(SoAState& state, const symft::PrecomputedActivePauliRotationKernel& kernel, bool sign) {
     const auto& table = symft::simd::dispatch_table();
-    const double c = kernel.cos_theta;
+    const double c = kernel.cos_kernel_angle;
     if (kernel.is_diagonal) {
         const auto& coefficients = sign ? kernel.diagonal_plus_coefficients : kernel.diagonal_minus_coefficients;
         table.mul_assign_soa(state.re.data(), state.im.data(), coefficients.data(), c, coefficients.size());

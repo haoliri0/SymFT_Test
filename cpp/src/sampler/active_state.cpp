@@ -47,10 +47,15 @@ ActivePauliAction::ActivePauliAction(const PauliString& pauli) : nqubits(pauli.n
     xz_overlap_odd = is_odd_popcount(xmask & zmask);
 }
 
-PrecomputedActivePauliRotationKernel::PrecomputedActivePauliRotationKernel(const ActivePauliAction& action_, double theta_)
-    : action(action_), is_diagonal(action.xmask == 0), theta(theta_), cos_theta(std::cos(theta_)) {
-    const Complex minus_i_s(0.0, -std::sin(theta));
-    const Complex plus_i_s(0.0, std::sin(theta));
+PrecomputedActivePauliRotationKernel::PrecomputedActivePauliRotationKernel(
+    const ActivePauliAction& action_,
+    double kernel_angle_)
+    : action(action_),
+      is_diagonal(action.xmask == 0),
+      kernel_angle(kernel_angle_),
+      cos_kernel_angle(std::cos(kernel_angle_)) {
+    const Complex minus_i_s(0.0, -std::sin(kernel_angle));
+    const Complex plus_i_s(0.0, std::sin(kernel_angle));
     const std::size_t dim = active_length(action.nqubits);
     if (is_diagonal) {
         diagonal_minus_coefficients.resize(dim);
@@ -220,17 +225,17 @@ void apply_pauli(ActiveState& state, const PauliString& pauli) {
     }
 }
 
-void rotate_pauli(ActiveState& state, const PauliString& pauli, double theta) {
-    rotate_pauli(state, ActivePauliAction(pauli), theta);
+void rotate_pauli(ActiveState& state, const PauliString& pauli, double kernel_angle) {
+    rotate_pauli(state, ActivePauliAction(pauli), kernel_angle);
 }
 
-void rotate_pauli(ActiveState& state, const ActivePauliAction& action, double theta) {
+void rotate_pauli(ActiveState& state, const ActivePauliAction& action, double kernel_angle) {
     if (action.nqubits != state.k) {
         fail("Pauli action dimension does not match active state");
     }
     const std::size_t dim = state.dim();
-    const double c = std::cos(theta);
-    const Complex minus_i_s(0.0, -std::sin(theta));
+    const double c = std::cos(kernel_angle);
+    const Complex minus_i_s(0.0, -std::sin(kernel_angle));
     if (action.xmask == 0) {
         for (std::size_t basis = 0; basis < dim; ++basis) {
             state.alpha[basis] *= Complex(c, 0.0) + minus_i_s * active_action_phase(action, basis);
@@ -257,7 +262,7 @@ void rotate_pauli(ActiveState& state, const PrecomputedActivePauliRotationKernel
     if (kernel.action.nqubits != state.k) {
         fail("rotation kernel dimension does not match active state");
     }
-    const double c = kernel.cos_theta;
+    const double c = kernel.cos_kernel_angle;
     if (kernel.is_diagonal) {
         const auto& coefficients = sign ? kernel.diagonal_plus_coefficients : kernel.diagonal_minus_coefficients;
         simd::dispatch_table().mul_assign(state.alpha.data(), coefficients.data(), c, coefficients.size());

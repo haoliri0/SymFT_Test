@@ -25,8 +25,32 @@ void require(bool condition, const std::string& message) {
     }
 }
 
+template <typename Fn>
+void require_throws(Fn&& fn, const std::string& message) {
+    bool threw = false;
+    try {
+        fn();
+    } catch (const symft::Error&) {
+        threw = true;
+    }
+    require(threw, message);
+}
+
 bool approx(symft::Complex a, symft::Complex b, double eps = 1e-10) {
     return std::abs(a - b) <= eps;
+}
+
+symft::PauliString expected_pauli_image(std::string image) {
+    bool negative = false;
+    if (!image.empty() && image[0] == '-') {
+        negative = true;
+        image = image.substr(1);
+    }
+    symft::PauliString out = symft::pauli_string(image);
+    if (negative) {
+        out.phase_shift(2);
+    }
+    return out;
 }
 
 symft::Complex deterministic_amplitude(std::size_t basis, int shot = 0) {
@@ -432,6 +456,93 @@ void test_clifford_frame() {
     require(preimage(h, pauli_x(1, 0)) == pauli_y(1, 0), "left composition order");
 }
 
+void test_extended_clifford_frame_images() {
+    using namespace symft;
+    using SingleGate = void (*)(CliffordFrame&, int);
+    struct SingleCase {
+        const char* name;
+        SingleGate apply;
+        const char* x_image;
+        const char* z_image;
+    };
+    const std::vector<SingleCase> single_cases{
+        {"H_NXY", static_cast<SingleGate>(&left_H_NXY), "-Y", "-Z"},
+        {"H_NXZ", static_cast<SingleGate>(&left_H_NXZ), "-Z", "-X"},
+        {"H_NYZ", static_cast<SingleGate>(&left_H_NYZ), "-X", "-Y"},
+        {"H_XY", static_cast<SingleGate>(&left_H_XY), "Y", "-Z"},
+        {"H_YZ", static_cast<SingleGate>(&left_H_YZ), "-X", "Y"},
+        {"C_NXYZ", static_cast<SingleGate>(&left_C_NXYZ), "-Y", "-X"},
+        {"C_NZYX", static_cast<SingleGate>(&left_C_NZYX), "-Z", "-Y"},
+        {"C_XNYZ", static_cast<SingleGate>(&left_C_XNYZ), "-Y", "X"},
+        {"C_XYNZ", static_cast<SingleGate>(&left_C_XYNZ), "Y", "-X"},
+        {"C_XYZ", static_cast<SingleGate>(&left_C_XYZ), "Y", "X"},
+        {"C_ZNYX", static_cast<SingleGate>(&left_C_ZNYX), "Z", "-Y"},
+        {"C_ZYNX", static_cast<SingleGate>(&left_C_ZYNX), "-Z", "Y"},
+        {"C_ZYX", static_cast<SingleGate>(&left_C_ZYX), "Z", "Y"},
+        {"SQRT_X", static_cast<SingleGate>(&left_SQRT_X), "X", "-Y"},
+        {"SQRT_X_DAG", static_cast<SingleGate>(&left_SQRT_X_DAG), "X", "Y"},
+        {"SQRT_Y", static_cast<SingleGate>(&left_SQRT_Y), "-Z", "X"},
+        {"SQRT_Y_DAG", static_cast<SingleGate>(&left_SQRT_Y_DAG), "Z", "-X"},
+        {"Y", static_cast<SingleGate>(&left_Y), "-X", "-Z"},
+    };
+    for (const auto& c : single_cases) {
+        CliffordFrame frame(1);
+        c.apply(frame, 0);
+        require(
+            preimage(frame, pauli_x(1, 0)) == expected_pauli_image(c.x_image),
+            std::string(c.name) + " X generator image");
+        require(
+            preimage(frame, pauli_z(1, 0)) == expected_pauli_image(c.z_image),
+            std::string(c.name) + " Z generator image");
+    }
+
+    using TwoGate = void (*)(CliffordFrame&, int, int);
+    struct TwoCase {
+        const char* name;
+        TwoGate apply;
+        const char* xa_image;
+        const char* za_image;
+        const char* xb_image;
+        const char* zb_image;
+    };
+    const std::vector<TwoCase> two_cases{
+        {"CY", static_cast<TwoGate>(&left_CY), "XY", "Z_", "ZX", "ZZ"},
+        {"CXSWAP", static_cast<TwoGate>(&left_CXSWAP), "XX", "_Z", "X_", "ZZ"},
+        {"CZSWAP", static_cast<TwoGate>(&left_CZSWAP), "ZX", "_Z", "XZ", "Z_"},
+        {"ISWAP", static_cast<TwoGate>(&left_ISWAP), "ZY", "_Z", "YZ", "Z_"},
+        {"ISWAP_DAG", static_cast<TwoGate>(&left_ISWAP_DAG), "-ZY", "_Z", "-YZ", "Z_"},
+        {"SQRT_XX", static_cast<TwoGate>(&left_SQRT_XX), "X_", "-YX", "_X", "-XY"},
+        {"SQRT_XX_DAG", static_cast<TwoGate>(&left_SQRT_XX_DAG), "X_", "YX", "_X", "XY"},
+        {"SQRT_YY", static_cast<TwoGate>(&left_SQRT_YY), "-ZY", "XY", "-YZ", "YX"},
+        {"SQRT_YY_DAG", static_cast<TwoGate>(&left_SQRT_YY_DAG), "ZY", "-XY", "YZ", "-YX"},
+        {"SQRT_ZZ", static_cast<TwoGate>(&left_SQRT_ZZ), "YZ", "Z_", "ZY", "_Z"},
+        {"SQRT_ZZ_DAG", static_cast<TwoGate>(&left_SQRT_ZZ_DAG), "-YZ", "Z_", "-ZY", "_Z"},
+        {"SWAPCX", static_cast<TwoGate>(&left_SWAPCX), "_X", "ZZ", "XX", "Z_"},
+        {"XCX", static_cast<TwoGate>(&left_XCX), "X_", "ZX", "_X", "XZ"},
+        {"XCY", static_cast<TwoGate>(&left_XCY), "X_", "ZY", "XX", "XZ"},
+        {"XCZ", static_cast<TwoGate>(&left_XCZ), "X_", "ZZ", "XX", "_Z"},
+        {"YCX", static_cast<TwoGate>(&left_YCX), "XX", "ZX", "_X", "YZ"},
+        {"YCY", static_cast<TwoGate>(&left_YCY), "XY", "ZY", "YX", "YZ"},
+        {"YCZ", static_cast<TwoGate>(&left_YCZ), "XZ", "ZZ", "YX", "_Z"},
+    };
+    for (const auto& c : two_cases) {
+        CliffordFrame frame(2);
+        c.apply(frame, 0, 1);
+        require(
+            preimage(frame, pauli_x(2, 0)) == expected_pauli_image(c.xa_image),
+            std::string(c.name) + " X_ generator image");
+        require(
+            preimage(frame, pauli_z(2, 0)) == expected_pauli_image(c.za_image),
+            std::string(c.name) + " Z_ generator image");
+        require(
+            preimage(frame, pauli_x(2, 1)) == expected_pauli_image(c.xb_image),
+            std::string(c.name) + " _X generator image");
+        require(
+            preimage(frame, pauli_z(2, 1)) == expected_pauli_image(c.zb_image),
+            std::string(c.name) + " _Z generator image");
+    }
+}
+
 void test_active_rotation() {
     using namespace symft;
     ActiveState st(1);
@@ -778,6 +889,131 @@ void test_stim_frontend_circuit_lowering() {
     require(packed_bit(ordinary_cy_records, 0), "ordinary CY deterministic target record");
 }
 
+void test_extended_stim_frontend() {
+    using namespace symft;
+    {
+        const auto parsed = parse_stim_text("R_X(0.5*pi) 0\n");
+        require(parsed.state.pending_operations.size() == 1, "R_X emits one pending rotation");
+        const auto& rotation = std::get<PendingPauliRotation>(parsed.state.pending_operations[0]);
+        require(std::abs(rotation.kernel_angle - M_PI / 4.0) < 1e-12, "R_X radian angle conversion");
+        require(rotation.pauli.pauli.same_body(pauli_x(1, 0)), "R_X rotation body");
+    }
+    {
+        const auto parsed = parse_stim_text("R_Z(pi/pi) 0\n");
+        const auto& rotation = std::get<PendingPauliRotation>(parsed.state.pending_operations[0]);
+        require(std::abs(rotation.kernel_angle - 0.5) < 1e-12, "rotation expression with pi parses as radians");
+    }
+    {
+        const auto circuit = parse_stim_circuit_text(
+            "MXX !0 1\n"
+            "MPAD 1 0\n"
+            "OBSERVABLE_INCLUDE(0) rec[-1] X0\n");
+        require(circuit.nrecords == 3, "pair measurement and MPAD record count");
+        require(circuit.instructions.size() == 2, "observable Pauli target ignored as an operation");
+        require(circuit.observables.size() == 1, "observable parsed");
+        require(circuit.observables[0].records.size() == 1, "observable ignores Pauli targets for circuit sampling");
+        require(circuit.observables[0].records[0] == 3, "observable record index after MPAD");
+    }
+    {
+        const auto circuit = parse_stim_circuit_text("MPAD 1\n");
+        require(circuit.nqubits == 0, "MPAD targets do not imply qubits");
+        require(circuit.nrecords == 1, "MPAD still appends a measurement record");
+    }
+    {
+        require_throws(
+            [] { (void)parse_stim_text("X 0\nCX sweep[x] 0\n"); },
+            "invalid sweep target is rejected");
+        require_throws(
+            [] { (void)parse_stim_text("X 0\nCX sweep[0] !0\n"); },
+            "sweep-controlled feedback rejects inverted qubit targets");
+    }
+    {
+        require_throws(
+            [] { (void)parse_stim_circuit_text("REPEAT 0 {\nM 0\n}\n"); },
+            "zero-count REPEAT is rejected");
+        require_throws(
+            [] { (void)parse_stim_circuit_text("REPEAT(2) 1 {\nM 0\n}\n"); },
+            "REPEAT rejects parens arguments");
+        require_throws(
+            [] { (void)parse_stim_circuit_text("M 0\nOBSERVABLE_INCLUDE(0.6) rec[-1]\n"); },
+            "OBSERVABLE_INCLUDE rejects non-integer indices");
+        require_throws(
+            [] { (void)parse_stim_circuit_text("R(0.25) 0\n"); },
+            "reset rejects parens arguments");
+        require_throws(
+            [] { (void)parse_stim_circuit_text("I_ERROR(0.8,0.8) 0\n"); },
+            "I_ERROR rejects probability sums above one");
+        require_throws(
+            [] { (void)parse_stim_circuit_text("II_ERROR(0.8,0.8) 0 1\n"); },
+            "II_ERROR rejects probability sums above one");
+        require_throws(
+            [] { (void)parse_stim_circuit_text("TICK 0\n"); },
+            "TICK rejects targets");
+        require_throws(
+            [] { (void)parse_stim_circuit_text("TICK()\n"); },
+            "TICK rejects empty parens");
+        require_throws(
+            [] { (void)parse_stim_circuit_text("SHIFT_COORDS(1) 0\n"); },
+            "SHIFT_COORDS rejects targets");
+        require_throws(
+            [] { (void)parse_stim_circuit_text("SHIFT_COORDS\n"); },
+            "SHIFT_COORDS requires offsets");
+        require_throws(
+            [] { (void)parse_stim_circuit_text("QUBIT_COORDS foo\n"); },
+            "QUBIT_COORDS rejects non-qubit targets");
+        require_throws(
+            [] { (void)parse_stim_circuit_text("QUBIT_COORDS() 0\n"); },
+            "QUBIT_COORDS rejects empty parens");
+    }
+    {
+        const auto circuit = parse_stim_circuit_text(
+            "E(0.25) X0\n"
+            "ELSE_CORRELATED_ERROR(0.5) Z0\n"
+            "M 0\n");
+        require(circuit.instructions.size() == 2, "correlated error chain flushes before measurement");
+        require(circuit.instructions[0].kind == CircuitInstructionKind::PauliProductChannel, "correlated error channel kind");
+        require(circuit.instructions[0].probabilities.size() == 2, "correlated error channel alternatives");
+        require(std::abs(circuit.instructions[0].probabilities[0] - 0.25) < 1e-12, "first correlated error probability");
+        require(std::abs(circuit.instructions[0].probabilities[1] - 0.375) < 1e-12, "else correlated error probability");
+    }
+    {
+        const auto parsed = parse_stim_text(
+            "H_XY 0\n"
+            "ZCX 0 1\n"
+            "SWAPCZ 0 1\n"
+            "SQRT_YY_DAG 0 1\n"
+            "R_YY(0.25*pi) 0 1\n"
+            "R_PAULI(pi) X0*Z1\n"
+            "M 0 1\n");
+        PendingFactoredState pending(parsed.state);
+        const auto program = plan_factored_updates(pending);
+        const auto records = sample_measurements(program, 4, 11);
+        require(records.size() == 4, "extended Stim and rotation gates sample");
+    }
+    {
+        const auto parsed = parse_stim_text(
+            "SPP X0*Z1\n"
+            "PAULI_CHANNEL_1(0.1, 0.2, 0.3) 0\n"
+            "PAULI_CHANNEL_2(0,0,0,0,0,0,0,0,0,0,0,0,0,0,0.1) 0 1\n"
+            "DEPOLARIZE3(0.1) 0 1 2\n"
+            "HERALDED_ERASE(0.1) 0\n"
+            "HERALDED_PAULI_CHANNEL_1(0, 0.1, 0, 0) 1\n"
+            "M 0 1\n");
+        PendingFactoredState pending(parsed.state);
+        const auto program = plan_factored_updates(pending);
+        require(program.nrecords == 4, "heralded channels add measurement records");
+        const auto records = sample_measurements(program, 3, 13);
+        require(records.size() == 3, "extended noise gates sample");
+    }
+    {
+        const auto parsed = parse_stim_text("X 0\nCX sweep[0] 0\nM 0\n");
+        PendingFactoredState pending(parsed.state);
+        const auto program = plan_factored_updates(pending);
+        const auto records = sample_measurements(program);
+        require(packed_bit(records, 0), "missing sweep data defaults to false");
+    }
+}
+
 void test_t_gate_exact_rotation() {
     using namespace symft;
     const auto parsed = parse_stim_text("H 0\nT 0\nM 0\n");
@@ -1028,6 +1264,7 @@ void test_prepared_circuit_sampler_reuse() {
 int main() {
     test_pauli_algebra();
     test_clifford_frame();
+    test_extended_clifford_frame_images();
     test_active_rotation();
     test_high_pivot_selection();
     test_high_pivot_rotation_kernels();
@@ -1040,6 +1277,7 @@ int main() {
     test_measurement_relation_keeps_sparse_record_sign();
     test_parser_feedback();
     test_stim_frontend_circuit_lowering();
+    test_extended_stim_frontend();
     test_t_gate_exact_rotation();
     test_presampled_exogenous();
     test_batch_sampler();

@@ -41,9 +41,21 @@ std::optional<int> measurement_record(PendingFactoredState& state, const Pending
     return measurement.record;
 }
 
+std::optional<int> measurement_record(PendingFactoredState& state, const PendingClassicalRecord& record) {
+    if (!record.record) {
+        if (record.record_condition) {
+            return std::nullopt;
+        }
+        return state.next_record++;
+    }
+    state.next_record = std::max(state.next_record, *record.record + 1);
+    return record.record;
+}
+
 PauliString transform_by_frame(const CliffordFrame& frame, const PauliString& pauli);
 PendingPauliRotation transform_operation_by_frame(const PendingPauliRotation& operation, const CliffordFrame& frame);
 PendingPauliMeasurement transform_operation_by_frame(const PendingPauliMeasurement& operation, const CliffordFrame& frame);
+PendingClassicalRecord transform_operation_by_frame(const PendingClassicalRecord& operation, const CliffordFrame& frame);
 void transform_pending_operations_by_frame(PendingFactoredState& state, const CliffordFrame& frame);
 
 PendingPauliRotation xor_operation_sign_if_anticommutes(
@@ -53,7 +65,7 @@ PendingPauliRotation xor_operation_sign_if_anticommutes(
     if (!pauli_anticommutes(pauli, operation.pauli.pauli)) {
         return operation;
     }
-    return PendingPauliRotation{operation.theta, SymbolicPauliString(operation.pauli.pauli, xor_bool(operation.pauli.sign, sign))};
+    return PendingPauliRotation{operation.kernel_angle, SymbolicPauliString(operation.pauli.pauli, xor_bool(operation.pauli.sign, sign))};
 }
 
 PendingPauliMeasurement xor_operation_sign_if_anticommutes(
@@ -68,6 +80,13 @@ PendingPauliMeasurement xor_operation_sign_if_anticommutes(
         operation.record,
         operation.record_condition,
     };
+}
+
+PendingClassicalRecord xor_operation_sign_if_anticommutes(
+    const PendingClassicalRecord& operation,
+    const PauliString&,
+    const SymbolicBool&) {
+    return operation;
 }
 
 std::size_t symbolic_word_cost(const SymbolicBool& expr) {
@@ -123,6 +142,14 @@ template <typename Operation>
 Operation reduce_pending_operation_sign(const Operation& operation, const SymbolicBool& relation) {
     Operation out = operation;
     out.pauli.sign = reduce_by_relation_once(out.pauli.sign, relation);
+    return out;
+}
+
+PendingClassicalRecord reduce_pending_operation_sign(
+    const PendingClassicalRecord& operation,
+    const SymbolicBool& relation) {
+    PendingClassicalRecord out = operation;
+    out.outcome = reduce_by_relation_once(out.outcome, relation);
     return out;
 }
 
@@ -240,14 +267,14 @@ CliffordFrame dormant_rotation_promotion_tableau_frame(
 
 ApplyPrecomputedActivePauliRotation active_rotation_instruction(
     const PauliString& active_body,
-    double theta,
+    double kernel_angle,
     const SymbolicBool& sign) {
     ActivePauliAction action(active_body);
     return ApplyPrecomputedActivePauliRotation{
         active_body,
         action,
-        PrecomputedActivePauliRotationKernel(action, theta),
-        theta,
+        PrecomputedActivePauliRotationKernel(action, kernel_angle),
+        kernel_angle,
         sign,
         SymbolicBoolEvaluationPlan(sign),
     };
@@ -264,7 +291,7 @@ std::optional<FactoredInstruction> process_diagonal_dormant_rotation(
     if (!pauli_squares_to_identity(active_body)) {
         fail("active rotation Pauli must square to identity");
     }
-    return push_instruction(state, active_rotation_instruction(active_body, current.theta, sign));
+    return push_instruction(state, active_rotation_instruction(active_body, current.kernel_angle, sign));
 }
 
 std::optional<FactoredInstruction> process_nondiagonal_dormant_rotation(
@@ -279,7 +306,7 @@ std::optional<FactoredInstruction> process_nondiagonal_dormant_rotation(
         fail("dormant rotation tableau reduction did not expose promoted X");
     }
     const SymbolicBool sign = rotation_sign_from_pauli(current.pauli);
-    PromoteDormantRotation instruction{current.theta, sign, SymbolicBoolEvaluationPlan(sign)};
+    PromoteDormantRotation instruction{current.kernel_angle, sign, SymbolicBoolEvaluationPlan(sign)};
     FactoredInstruction pushed = push_instruction(state, instruction);
     set_planning_active_count(state, old_k + 1);
     return pushed;
@@ -382,7 +409,7 @@ PauliString transform_by_frame(const CliffordFrame& frame, const PauliString& pa
 
 PendingPauliRotation transform_operation_by_frame(const PendingPauliRotation& operation, const CliffordFrame& frame) {
     return PendingPauliRotation{
-        operation.theta,
+        operation.kernel_angle,
         SymbolicPauliString(transform_by_frame(frame, operation.pauli.pauli), operation.pauli.sign),
     };
 }
@@ -393,6 +420,10 @@ PendingPauliMeasurement transform_operation_by_frame(const PendingPauliMeasureme
         operation.record,
         operation.record_condition,
     };
+}
+
+PendingClassicalRecord transform_operation_by_frame(const PendingClassicalRecord& operation, const CliffordFrame&) {
+    return operation;
 }
 
 void transform_pending_operations_by_frame(PendingFactoredState& state, const CliffordFrame& frame) {
@@ -508,6 +539,20 @@ std::optional<FactoredInstruction> process_pending_measurement(PendingFactoredSt
     return measure_active_pauli_branches(state, current, active_body, base_outcome, queued_first);
 }
 
+std::optional<FactoredInstruction> process_pending_classical_record(
+    PendingFactoredState& state,
+    const PendingClassicalRecord& record) {
+    state.context->bump_next_condition(max_condition(record));
+    return push_instruction(
+        state,
+        RecordMeasurement{
+            record.outcome,
+            measurement_record(state, record),
+            record.record_condition,
+            SymbolicBoolEvaluationPlan(record.outcome),
+        });
+}
+
 std::optional<FactoredInstruction> process_next_pending_operation(PendingFactoredState& state) {
     if (state.pending_operations.empty()) {
         return std::nullopt;
@@ -521,8 +566,10 @@ std::optional<FactoredInstruction> process_next_pending_operation(PendingFactore
         [&](const auto& op) -> std::optional<FactoredInstruction> {
             if constexpr (std::is_same_v<std::decay_t<decltype(op)>, PendingPauliRotation>) {
                 return process_pending_rotation(state, op);
-            } else {
+            } else if constexpr (std::is_same_v<std::decay_t<decltype(op)>, PendingPauliMeasurement>) {
                 return process_pending_measurement(state, op);
+            } else {
+                return process_pending_classical_record(state, op);
             }
         },
         operation);

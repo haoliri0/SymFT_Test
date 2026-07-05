@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <memory>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace symft {
 using namespace detail;
@@ -172,6 +174,81 @@ void mul_rows(CliffordFrame& frame, int dst, int lhs, int rhs, int extra_phase =
     frame.rows[static_cast<std::size_t>(dst)] = out;
 }
 
+PauliString axis_image_from_rows(
+    const CliffordFrame& frame,
+    const std::vector<PauliString>& rows,
+    int q,
+    char axis) {
+    if (axis == '_') {
+        return pauli_identity(frame.nqubits);
+    }
+    if (axis == 'X') {
+        return rows[static_cast<std::size_t>(frame.xrow(q))];
+    }
+    if (axis == 'Z') {
+        return rows[static_cast<std::size_t>(frame.zrow(q))];
+    }
+    if (axis == 'Y') {
+        PauliString out =
+            rows[static_cast<std::size_t>(frame.xrow(q))] * rows[static_cast<std::size_t>(frame.zrow(q))];
+        out.phase_shift(1);
+        return out;
+    }
+    fail("invalid Clifford image axis");
+}
+
+PauliString image_from_body(
+    const CliffordFrame& frame,
+    const std::vector<PauliString>& rows,
+    const std::vector<int>& qubits,
+    std::string body) {
+    bool negative = false;
+    if (!body.empty() && body[0] == '-') {
+        negative = true;
+        body = body.substr(1);
+    }
+    if (body.size() != qubits.size()) {
+        fail("invalid Clifford image body");
+    }
+    PauliString out = pauli_identity(frame.nqubits);
+    for (std::size_t i = 0; i < qubits.size(); ++i) {
+        out = out * axis_image_from_rows(frame, rows, qubits[i], body[i]);
+    }
+    if (negative) {
+        out.phase_shift(2);
+    }
+    return out;
+}
+
+void left_apply_single_qubit_images(CliffordFrame& frame, int q, const std::string& x_image, const std::string& z_image) {
+    const int qi = check_qubit(frame.nqubits, q);
+    const auto rows = frame.rows;
+    const std::vector<int> qubits{qi};
+    frame.rows[static_cast<std::size_t>(frame.xrow(qi))] = image_from_body(frame, rows, qubits, x_image);
+    frame.rows[static_cast<std::size_t>(frame.zrow(qi))] = image_from_body(frame, rows, qubits, z_image);
+}
+
+void left_apply_two_qubit_images(
+    CliffordFrame& frame,
+    int a,
+    int b,
+    const std::string& xa_image,
+    const std::string& za_image,
+    const std::string& xb_image,
+    const std::string& zb_image) {
+    const int ai = check_qubit(frame.nqubits, a);
+    const int bi = check_qubit(frame.nqubits, b);
+    if (ai == bi) {
+        fail("two-qubit Clifford gate requires distinct qubits");
+    }
+    const auto rows = frame.rows;
+    const std::vector<int> qubits{ai, bi};
+    frame.rows[static_cast<std::size_t>(frame.xrow(ai))] = image_from_body(frame, rows, qubits, xa_image);
+    frame.rows[static_cast<std::size_t>(frame.zrow(ai))] = image_from_body(frame, rows, qubits, za_image);
+    frame.rows[static_cast<std::size_t>(frame.xrow(bi))] = image_from_body(frame, rows, qubits, xb_image);
+    frame.rows[static_cast<std::size_t>(frame.zrow(bi))] = image_from_body(frame, rows, qubits, zb_image);
+}
+
 void right_apply_clifford(CliffordFrame& frame, const CliffordFrame& gate) {
     if (frame.nqubits != gate.nqubits) {
         fail("Clifford frames act on different numbers of qubits");
@@ -233,6 +310,58 @@ void left_H(CliffordFrame& frame, int q) {
     swap_rows(frame, frame.xrow(qi), frame.zrow(qi));
 }
 
+void left_H_NXY(CliffordFrame& frame, int q) {
+    left_apply_single_qubit_images(frame, q, "-Y", "-Z");
+}
+
+void left_H_NXZ(CliffordFrame& frame, int q) {
+    left_apply_single_qubit_images(frame, q, "-Z", "-X");
+}
+
+void left_H_NYZ(CliffordFrame& frame, int q) {
+    left_apply_single_qubit_images(frame, q, "-X", "-Y");
+}
+
+void left_H_XY(CliffordFrame& frame, int q) {
+    left_apply_single_qubit_images(frame, q, "Y", "-Z");
+}
+
+void left_H_YZ(CliffordFrame& frame, int q) {
+    left_apply_single_qubit_images(frame, q, "-X", "Y");
+}
+
+void left_C_NXYZ(CliffordFrame& frame, int q) {
+    left_apply_single_qubit_images(frame, q, "-Y", "-X");
+}
+
+void left_C_NZYX(CliffordFrame& frame, int q) {
+    left_apply_single_qubit_images(frame, q, "-Z", "-Y");
+}
+
+void left_C_XNYZ(CliffordFrame& frame, int q) {
+    left_apply_single_qubit_images(frame, q, "-Y", "X");
+}
+
+void left_C_XYNZ(CliffordFrame& frame, int q) {
+    left_apply_single_qubit_images(frame, q, "Y", "-X");
+}
+
+void left_C_XYZ(CliffordFrame& frame, int q) {
+    left_apply_single_qubit_images(frame, q, "Y", "X");
+}
+
+void left_C_ZNYX(CliffordFrame& frame, int q) {
+    left_apply_single_qubit_images(frame, q, "Z", "-Y");
+}
+
+void left_C_ZYNX(CliffordFrame& frame, int q) {
+    left_apply_single_qubit_images(frame, q, "-Z", "Y");
+}
+
+void left_C_ZYX(CliffordFrame& frame, int q) {
+    left_apply_single_qubit_images(frame, q, "Z", "Y");
+}
+
 void left_S(CliffordFrame& frame, int q) {
     const int qi = check_qubit(frame.nqubits, q);
     mul_rows(frame, frame.xrow(qi), frame.xrow(qi), frame.zrow(qi), 3);
@@ -243,8 +372,30 @@ void left_SDG(CliffordFrame& frame, int q) {
     mul_rows(frame, frame.xrow(qi), frame.xrow(qi), frame.zrow(qi), 1);
 }
 
+void left_SQRT_X(CliffordFrame& frame, int q) {
+    left_apply_single_qubit_images(frame, q, "X", "-Y");
+}
+
+void left_SQRT_X_DAG(CliffordFrame& frame, int q) {
+    left_apply_single_qubit_images(frame, q, "X", "Y");
+}
+
+void left_SQRT_Y(CliffordFrame& frame, int q) {
+    left_apply_single_qubit_images(frame, q, "-Z", "X");
+}
+
+void left_SQRT_Y_DAG(CliffordFrame& frame, int q) {
+    left_apply_single_qubit_images(frame, q, "Z", "-X");
+}
+
 void left_X(CliffordFrame& frame, int q) {
     const int qi = check_qubit(frame.nqubits, q);
+    add_row_phase(frame, frame.zrow(qi), 2);
+}
+
+void left_Y(CliffordFrame& frame, int q) {
+    const int qi = check_qubit(frame.nqubits, q);
+    add_row_phase(frame, frame.xrow(qi), 2);
     add_row_phase(frame, frame.zrow(qi), 2);
 }
 
@@ -261,6 +412,10 @@ void left_CX(CliffordFrame& frame, int control, int target) {
     }
     mul_rows(frame, frame.xrow(c), frame.xrow(c), frame.xrow(t));
     mul_rows(frame, frame.zrow(t), frame.zrow(c), frame.zrow(t));
+}
+
+void left_CY(CliffordFrame& frame, int control, int target) {
+    left_apply_two_qubit_images(frame, control, target, "XY", "Z_", "ZX", "ZZ");
 }
 
 void left_CZ(CliffordFrame& frame, int a, int b) {
@@ -281,6 +436,74 @@ void left_SWAP(CliffordFrame& frame, int a, int b) {
     }
     swap_rows(frame, frame.xrow(ai), frame.xrow(bi));
     swap_rows(frame, frame.zrow(ai), frame.zrow(bi));
+}
+
+void left_CXSWAP(CliffordFrame& frame, int a, int b) {
+    left_apply_two_qubit_images(frame, a, b, "XX", "_Z", "X_", "ZZ");
+}
+
+void left_CZSWAP(CliffordFrame& frame, int a, int b) {
+    left_apply_two_qubit_images(frame, a, b, "ZX", "_Z", "XZ", "Z_");
+}
+
+void left_ISWAP(CliffordFrame& frame, int a, int b) {
+    left_apply_two_qubit_images(frame, a, b, "ZY", "_Z", "YZ", "Z_");
+}
+
+void left_ISWAP_DAG(CliffordFrame& frame, int a, int b) {
+    left_apply_two_qubit_images(frame, a, b, "-ZY", "_Z", "-YZ", "Z_");
+}
+
+void left_SQRT_XX(CliffordFrame& frame, int a, int b) {
+    left_apply_two_qubit_images(frame, a, b, "X_", "-YX", "_X", "-XY");
+}
+
+void left_SQRT_XX_DAG(CliffordFrame& frame, int a, int b) {
+    left_apply_two_qubit_images(frame, a, b, "X_", "YX", "_X", "XY");
+}
+
+void left_SQRT_YY(CliffordFrame& frame, int a, int b) {
+    left_apply_two_qubit_images(frame, a, b, "-ZY", "XY", "-YZ", "YX");
+}
+
+void left_SQRT_YY_DAG(CliffordFrame& frame, int a, int b) {
+    left_apply_two_qubit_images(frame, a, b, "ZY", "-XY", "YZ", "-YX");
+}
+
+void left_SQRT_ZZ(CliffordFrame& frame, int a, int b) {
+    left_apply_two_qubit_images(frame, a, b, "YZ", "Z_", "ZY", "_Z");
+}
+
+void left_SQRT_ZZ_DAG(CliffordFrame& frame, int a, int b) {
+    left_apply_two_qubit_images(frame, a, b, "-YZ", "Z_", "-ZY", "_Z");
+}
+
+void left_SWAPCX(CliffordFrame& frame, int a, int b) {
+    left_apply_two_qubit_images(frame, a, b, "_X", "ZZ", "XX", "Z_");
+}
+
+void left_XCX(CliffordFrame& frame, int control, int target) {
+    left_apply_two_qubit_images(frame, control, target, "X_", "ZX", "_X", "XZ");
+}
+
+void left_XCY(CliffordFrame& frame, int control, int target) {
+    left_apply_two_qubit_images(frame, control, target, "X_", "ZY", "XX", "XZ");
+}
+
+void left_XCZ(CliffordFrame& frame, int control, int target) {
+    left_apply_two_qubit_images(frame, control, target, "X_", "ZZ", "XX", "_Z");
+}
+
+void left_YCX(CliffordFrame& frame, int control, int target) {
+    left_apply_two_qubit_images(frame, control, target, "XX", "ZX", "_X", "YZ");
+}
+
+void left_YCY(CliffordFrame& frame, int control, int target) {
+    left_apply_two_qubit_images(frame, control, target, "XY", "ZY", "YX", "YZ");
+}
+
+void left_YCZ(CliffordFrame& frame, int control, int target) {
+    left_apply_two_qubit_images(frame, control, target, "XZ", "ZZ", "YX", "_Z");
 }
 
 void right_H(CliffordFrame& frame, int q) {

@@ -49,6 +49,10 @@ void set_packed_bit(std::vector<std::uint64_t>& words, int bit_index, bool value
 }
 
 std::vector<std::uint64_t> packed_bits(std::initializer_list<bool> bits) {
+    return packed_bits(std::vector<bool>(bits));
+}
+
+std::vector<std::uint64_t> packed_bits(const std::vector<bool>& bits) {
     std::vector<std::uint64_t> out(bit_word_count(static_cast<int>(bits.size())), 0);
     int bit_index = 0;
     for (bool bit : bits) {

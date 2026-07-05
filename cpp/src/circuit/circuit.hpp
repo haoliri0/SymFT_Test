@@ -9,8 +9,25 @@ namespace symft {
 enum class CircuitInstructionKind {
     Tick,
     H,
+    H_NXY,
+    H_NXZ,
+    H_NYZ,
+    H_XY,
+    H_YZ,
+    C_NXYZ,
+    C_NZYX,
+    C_XNYZ,
+    C_XYNZ,
+    C_XYZ,
+    C_ZNYX,
+    C_ZYNX,
+    C_ZYX,
     S,
     SDG,
+    SqrtX,
+    SqrtXDag,
+    SqrtY,
+    SqrtYDag,
     X,
     Y,
     Z,
@@ -18,8 +35,26 @@ enum class CircuitInstructionKind {
     CY,
     CZ,
     SWAP,
+    CXSWAP,
+    CZSWAP,
+    ISWAP,
+    ISWAP_DAG,
+    SQRT_XX,
+    SQRT_XX_DAG,
+    SQRT_YY,
+    SQRT_YY_DAG,
+    SQRT_ZZ,
+    SQRT_ZZ_DAG,
+    SWAPCX,
+    XCX,
+    XCY,
+    XCZ,
+    YCX,
+    YCY,
+    YCZ,
     T,
     TDag,
+    PauliRotation,
     MZ,
     MX,
     MY,
@@ -35,6 +70,15 @@ enum class CircuitInstructionKind {
     ZError,
     Depolarize1,
     Depolarize2,
+    Depolarize3,
+    PauliChannel1,
+    PauliChannel2,
+    PauliChannel3,
+    PauliProductError,
+    PauliProductChannel,
+    HeraldedErase,
+    HeraldedPauliChannel1,
+    MPad,
     FeedbackX,
     FeedbackY,
     FeedbackZ,
@@ -58,10 +102,12 @@ struct CircuitFeedbackTarget {
 struct CircuitInstruction {
     CircuitInstructionKind kind = CircuitInstructionKind::Tick;
     double probability = 0.0;
+    double kernel_angle = 0.0;
     std::vector<int> qubits;
     std::vector<CircuitMeasurementTarget> measurement_targets;
     std::vector<CircuitPauliProduct> pauli_products;
     std::vector<CircuitFeedbackTarget> feedback_targets;
+    std::vector<double> probabilities;
     int line = 0;
 };
 

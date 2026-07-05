@@ -60,6 +60,14 @@ inline int max_condition(const PendingPauliMeasurement& measurement) {
     return out;
 }
 
+inline int max_condition(const PendingClassicalRecord& record) {
+    int out = record.outcome.max_condition();
+    if (record.record_condition) {
+        out = std::max(out, *record.record_condition);
+    }
+    return out;
+}
+
 template <class... Ts>
 struct Overloaded : Ts... {
     using Ts::operator()...;
@@ -71,6 +79,7 @@ inline int max_condition(const PendingOperation& operation) {
     return std::visit(Overloaded{
                           [](const PendingPauliRotation& op) { return max_condition(op); },
                           [](const PendingPauliMeasurement& op) { return max_condition(op); },
+                          [](const PendingClassicalRecord& op) { return max_condition(op); },
                       },
                       operation);
 }

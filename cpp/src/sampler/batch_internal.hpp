@@ -232,7 +232,7 @@ void rotate_contiguous_active(
     bool sign);
 void promote_first_dormant_rotation_batch(
     BatchFactoredExecutorState& runtime,
-    double theta,
+    double kernel_angle,
     const std::vector<std::uint64_t>& sign_bits);
 void measure_precomputed_active_pauli_batch(
     BatchFactoredExecutorState& runtime,

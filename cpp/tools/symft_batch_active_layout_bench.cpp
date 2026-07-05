@@ -162,10 +162,10 @@ void apply_case(BatchState& state, const BenchCase& bench_case, int shots, SignP
     if (kernel.is_diagonal) {
         if (pattern == SignPattern::AllMinus) {
             table.rotate_diagonal_const(
-                state.re.data(), state.im.data(), static_cast<std::size_t>(shots), shots, dim, kernel.diagonal_minus_coefficients.data(), kernel.cos_theta);
+                state.re.data(), state.im.data(), static_cast<std::size_t>(shots), shots, dim, kernel.diagonal_minus_coefficients.data(), kernel.cos_kernel_angle);
         } else if (pattern == SignPattern::AllPlus) {
             table.rotate_diagonal_const(
-                state.re.data(), state.im.data(), static_cast<std::size_t>(shots), shots, dim, kernel.diagonal_plus_coefficients.data(), kernel.cos_theta);
+                state.re.data(), state.im.data(), static_cast<std::size_t>(shots), shots, dim, kernel.diagonal_plus_coefficients.data(), kernel.cos_kernel_angle);
         } else {
             table.rotate_diagonal_mixed(
                 state.re.data(),
@@ -176,7 +176,7 @@ void apply_case(BatchState& state, const BenchCase& bench_case, int shots, SignP
                 kernel.diagonal_minus_coefficients.data(),
                 kernel.diagonal_plus_coefficients.data(),
                 bits.data(),
-                kernel.cos_theta);
+                kernel.cos_kernel_angle);
         }
         return;
     }
@@ -195,7 +195,7 @@ void apply_case(BatchState& state, const BenchCase& bench_case, int shots, SignP
                 kernel.action.xmask,
                 kernel.pair_bit,
                 kernel.pair_count,
-                kernel.cos_theta,
+                kernel.cos_kernel_angle,
                 q.data());
         } else {
             const double q = pattern == SignPattern::AllPlus
@@ -209,7 +209,7 @@ void apply_case(BatchState& state, const BenchCase& bench_case, int shots, SignP
                 kernel.action.xmask,
                 kernel.pair_bit,
                 kernel.pair_count,
-                kernel.cos_theta,
+                kernel.cos_kernel_angle,
                 q);
         }
         return;
@@ -230,7 +230,7 @@ void apply_case(BatchState& state, const BenchCase& bench_case, int shots, SignP
                 kernel.pair_bit,
                 kernel.real_pair_flip_basis_phase_signs.data(),
                 kernel.pair_count,
-                kernel.cos_theta,
+                kernel.cos_kernel_angle,
                 q.data());
         } else {
             const double q = pattern == SignPattern::AllPlus
@@ -245,7 +245,7 @@ void apply_case(BatchState& state, const BenchCase& bench_case, int shots, SignP
                 kernel.pair_bit,
                 kernel.real_pair_flip_basis_phase_signs.data(),
                 kernel.pair_count,
-                kernel.cos_theta,
+                kernel.cos_kernel_angle,
                 q);
         }
         return;
@@ -261,7 +261,7 @@ void apply_case(BatchState& state, const BenchCase& bench_case, int shots, SignP
             kernel.pair_count,
             kernel.pair_left_minus_coefficients.data(),
             kernel.pair_right_minus_coefficients.data(),
-            kernel.cos_theta);
+            kernel.cos_kernel_angle);
     } else if (pattern == SignPattern::AllPlus) {
         table.rotate_general_xmask_const(
             state.re.data(),
@@ -273,7 +273,7 @@ void apply_case(BatchState& state, const BenchCase& bench_case, int shots, SignP
             kernel.pair_count,
             kernel.pair_left_plus_coefficients.data(),
             kernel.pair_right_plus_coefficients.data(),
-            kernel.cos_theta);
+            kernel.cos_kernel_angle);
     } else {
         table.rotate_general_xmask_mixed(
             state.re.data(),
@@ -288,7 +288,7 @@ void apply_case(BatchState& state, const BenchCase& bench_case, int shots, SignP
             kernel.pair_left_plus_coefficients.data(),
             kernel.pair_right_plus_coefficients.data(),
             bits.data(),
-            kernel.cos_theta);
+            kernel.cos_kernel_angle);
     }
 }
 

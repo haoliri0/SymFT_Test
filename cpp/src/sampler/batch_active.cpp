@@ -54,7 +54,7 @@ void rotate_contiguous_active(
     std::size_t dim,
     const PrecomputedActivePauliRotationKernel& kernel,
     bool sign) {
-    const double c = kernel.cos_theta;
+    const double c = kernel.cos_kernel_angle;
     const auto& simd_table = simd::dispatch_table();
     if (kernel.is_diagonal) {
         const auto& coefficients = sign ? kernel.diagonal_plus_coefficients : kernel.diagonal_minus_coefficients;
@@ -350,7 +350,7 @@ void rotate_uniform_imag_pairs_batch(
             kernel.action.xmask,
             kernel.pair_bit,
             kernel.pair_count,
-            kernel.cos_theta,
+            kernel.cos_kernel_angle,
             q);
         return;
     }
@@ -368,7 +368,7 @@ void rotate_uniform_imag_pairs_batch(
             kernel.action.xmask,
             kernel.pair_bit,
             kernel.pair_count,
-            kernel.cos_theta,
+            kernel.cos_kernel_angle,
             coeffs.data());
         return;
     }
@@ -380,7 +380,7 @@ void rotate_uniform_imag_pairs_batch(
         kernel.action.xmask,
         kernel.pair_bit,
         kernel.pair_count,
-        kernel.cos_theta,
+        kernel.cos_kernel_angle,
         coeffs.data());
 }
 
@@ -402,7 +402,7 @@ void rotate_real_pair_flip_batch(
             kernel.pair_bit,
             kernel.real_pair_flip_basis_phase_signs.data(),
             kernel.pair_count,
-            kernel.cos_theta,
+            kernel.cos_kernel_angle,
             q);
         return;
     }
@@ -421,7 +421,7 @@ void rotate_real_pair_flip_batch(
             kernel.pair_bit,
             kernel.real_pair_flip_basis_phase_signs.data(),
             kernel.pair_count,
-            kernel.cos_theta,
+            kernel.cos_kernel_angle,
             coeffs.data());
         return;
     }
@@ -434,7 +434,7 @@ void rotate_real_pair_flip_batch(
         kernel.pair_bit,
         kernel.real_pair_flip_basis_phase_signs.data(),
         kernel.pair_count,
-        kernel.cos_theta,
+        kernel.cos_kernel_angle,
         coeffs.data());
 }
 
@@ -466,7 +466,7 @@ void rotate_pauli_batch(
             batch_bit_at(sign_bits, 0));
         return;
     }
-    const double c = kernel.cos_theta;
+    const double c = kernel.cos_kernel_angle;
     if (kernel.is_diagonal) {
         const BatchSignMode mode = batch_sign_mode(runtime, sign_bits);
         if (mode == BatchSignMode::AllMinus) {
@@ -554,7 +554,7 @@ void rotate_pauli_batch(
 
 void promote_first_dormant_rotation_batch(
     BatchFactoredExecutorState& runtime,
-    double theta,
+    double kernel_angle,
     const std::vector<std::uint64_t>& sign_bits) {
     if (runtime.ndormant <= 0) {
         fail("cannot promote a dormant qubit when none remain");
@@ -568,8 +568,8 @@ void promote_first_dormant_rotation_batch(
         runtime.active_re.size() < promoted_dim * static_cast<std::size_t>(runtime.active_pitch)) {
         fail("batch active storage has too few columns for dormant promotion");
     }
-    const double c = std::cos(theta);
-    const double s = std::sin(theta);
+    const double c = std::cos(kernel_angle);
+    const double s = std::sin(kernel_angle);
     if (runtime.dense_shot_major_active) {
         for (int shot = 0; shot < runtime.active_shots; ++shot) {
             const double q = batch_bit_at(sign_bits, shot) ? s : -s;

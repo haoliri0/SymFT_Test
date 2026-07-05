@@ -18,7 +18,7 @@ void execute_batch_instruction(BatchFactoredExecutorState& runtime, const ApplyP
 
 void execute_batch_instruction(BatchFactoredExecutorState& runtime, const PromoteDormantRotation& instruction) {
     eval_symbolic_bool_batch(runtime.eval_scratch, instruction.sign_plan, runtime);
-    promote_first_dormant_rotation_batch(runtime, instruction.theta, runtime.eval_scratch);
+    promote_first_dormant_rotation_batch(runtime, instruction.kernel_angle, runtime.eval_scratch);
 }
 
 void execute_batch_instruction(BatchFactoredExecutorState& runtime, const RecordMeasurement& instruction) {
@@ -1038,11 +1038,11 @@ void rotate_shot_major_postselected(
 
 void promote_first_dormant_rotation_shot_major_postselected(
     BatchFactoredExecutorState& runtime,
-    double theta,
+    double kernel_angle,
     const std::vector<std::uint64_t>& sign_bits,
     const BatchDetectorPostselectionScratch& scratch) {
     if (!runtime.dense_shot_major_active || scratch.dead_count == 0) {
-        promote_first_dormant_rotation_batch(runtime, theta, sign_bits);
+        promote_first_dormant_rotation_batch(runtime, kernel_angle, sign_bits);
         return;
     }
     if (runtime.ndormant <= 0) {
@@ -1053,8 +1053,8 @@ void promote_first_dormant_rotation_shot_major_postselected(
     if (runtime.active_stride < promoted_dim) {
         fail("batch active shot-major stride is too short for dormant promotion");
     }
-    const double c = std::cos(theta);
-    const double s = std::sin(theta);
+    const double c = std::cos(kernel_angle);
+    const double s = std::sin(kernel_angle);
     for (int shot = 0; shot < runtime.active_shots; ++shot) {
         if (postselected_shot_is_dead(scratch, shot)) {
             continue;
@@ -1091,7 +1091,7 @@ void execute_batch_instruction_presampled(
     const BatchExpressionEvaluator& evaluator,
     std::size_t instruction_index) {
     const auto& sign_bits = evaluator.eval(instruction_index, runtime);
-    promote_first_dormant_rotation_batch(runtime, instruction.theta, sign_bits);
+    promote_first_dormant_rotation_batch(runtime, instruction.kernel_angle, sign_bits);
 }
 
 void execute_batch_instruction_presampled(
@@ -1139,7 +1139,7 @@ int execute_batch_instruction_postselected(
     std::size_t instruction_index,
     BatchDetectorPostselectionScratch& scratch) {
     const auto& sign_bits = evaluator.eval(instruction_index, runtime);
-    promote_first_dormant_rotation_shot_major_postselected(runtime, instruction.theta, sign_bits, scratch);
+    promote_first_dormant_rotation_shot_major_postselected(runtime, instruction.kernel_angle, sign_bits, scratch);
     return 0;
 }
 

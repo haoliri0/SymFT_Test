@@ -10,7 +10,7 @@
 namespace symft {
 
 struct PendingPauliRotation {
-    double theta = 0.0;
+    double kernel_angle = 0.0;
     SymbolicPauliString pauli;
 };
 
@@ -20,23 +20,30 @@ struct PendingPauliMeasurement {
     std::optional<int> record_condition;
 };
 
-using PendingOperation = std::variant<PendingPauliRotation, PendingPauliMeasurement>;
+struct PendingClassicalRecord {
+    SymbolicBool outcome;
+    std::optional<int> record;
+    std::optional<int> record_condition;
+};
+
+using PendingOperation = std::variant<PendingPauliRotation, PendingPauliMeasurement, PendingClassicalRecord>;
 
 bool operator==(const PendingPauliRotation& lhs, const PendingPauliRotation& rhs);
 bool operator==(const PendingPauliMeasurement& lhs, const PendingPauliMeasurement& rhs);
+bool operator==(const PendingClassicalRecord& lhs, const PendingClassicalRecord& rhs);
 bool operator==(const PendingOperation& lhs, const PendingOperation& rhs);
 
 struct ApplyPrecomputedActivePauliRotation {
     PauliString pauli;
     ActivePauliAction action;
     PrecomputedActivePauliRotationKernel rotation_kernel;
-    double theta = 0.0;
+    double kernel_angle = 0.0;
     SymbolicBool sign;
     SymbolicBoolEvaluationPlan sign_plan;
 };
 
 struct PromoteDormantRotation {
-    double theta = 0.0;
+    double kernel_angle = 0.0;
     SymbolicBool sign;
     SymbolicBoolEvaluationPlan sign_plan;
 };
@@ -118,22 +125,63 @@ struct FrameFactoredState {
 };
 
 void left_H(FrameFactoredState& state, int q);
+void left_H_NXY(FrameFactoredState& state, int q);
+void left_H_NXZ(FrameFactoredState& state, int q);
+void left_H_NYZ(FrameFactoredState& state, int q);
+void left_H_XY(FrameFactoredState& state, int q);
+void left_H_YZ(FrameFactoredState& state, int q);
+void left_C_NXYZ(FrameFactoredState& state, int q);
+void left_C_NZYX(FrameFactoredState& state, int q);
+void left_C_XNYZ(FrameFactoredState& state, int q);
+void left_C_XYNZ(FrameFactoredState& state, int q);
+void left_C_XYZ(FrameFactoredState& state, int q);
+void left_C_ZNYX(FrameFactoredState& state, int q);
+void left_C_ZYNX(FrameFactoredState& state, int q);
+void left_C_ZYX(FrameFactoredState& state, int q);
 void left_S(FrameFactoredState& state, int q);
 void left_SDG(FrameFactoredState& state, int q);
+void left_SQRT_X(FrameFactoredState& state, int q);
+void left_SQRT_X_DAG(FrameFactoredState& state, int q);
+void left_SQRT_Y(FrameFactoredState& state, int q);
+void left_SQRT_Y_DAG(FrameFactoredState& state, int q);
 void left_X(FrameFactoredState& state, int q);
+void left_Y(FrameFactoredState& state, int q);
 void left_Z(FrameFactoredState& state, int q);
 void left_CX(FrameFactoredState& state, int control, int target);
+void left_CY(FrameFactoredState& state, int control, int target);
 void left_CZ(FrameFactoredState& state, int a, int b);
 void left_SWAP(FrameFactoredState& state, int a, int b);
+void left_CXSWAP(FrameFactoredState& state, int a, int b);
+void left_CZSWAP(FrameFactoredState& state, int a, int b);
+void left_ISWAP(FrameFactoredState& state, int a, int b);
+void left_ISWAP_DAG(FrameFactoredState& state, int a, int b);
+void left_SQRT_XX(FrameFactoredState& state, int a, int b);
+void left_SQRT_XX_DAG(FrameFactoredState& state, int a, int b);
+void left_SQRT_YY(FrameFactoredState& state, int a, int b);
+void left_SQRT_YY_DAG(FrameFactoredState& state, int a, int b);
+void left_SQRT_ZZ(FrameFactoredState& state, int a, int b);
+void left_SQRT_ZZ_DAG(FrameFactoredState& state, int a, int b);
+void left_SWAPCX(FrameFactoredState& state, int a, int b);
+void left_XCX(FrameFactoredState& state, int control, int target);
+void left_XCY(FrameFactoredState& state, int control, int target);
+void left_XCZ(FrameFactoredState& state, int control, int target);
+void left_YCX(FrameFactoredState& state, int control, int target);
+void left_YCY(FrameFactoredState& state, int control, int target);
+void left_YCZ(FrameFactoredState& state, int control, int target);
 void apply_pauli(FrameFactoredState& state, const ConditionalPauliString& pauli);
 void apply_pauli(FrameFactoredState& state, const PauliString& pauli, int condition);
 void apply_pauli(FrameFactoredState& state, const PauliString& pauli, const SymbolicBool& condition);
-PendingPauliRotation apply_pauli_rotation(FrameFactoredState& state, const PauliString& pauli, double theta);
+PendingPauliRotation apply_pauli_rotation(FrameFactoredState& state, const PauliString& pauli, double kernel_angle);
 PendingPauliMeasurement apply_pauli_measurement(FrameFactoredState& state, const PauliString& pauli);
 PendingPauliMeasurement apply_pauli_measurement(
     FrameFactoredState& state,
     const PauliString& pauli,
     const SymbolicBool& sign,
+    std::optional<int> record = std::nullopt,
+    std::optional<int> record_condition = std::nullopt);
+PendingClassicalRecord apply_classical_record(
+    FrameFactoredState& state,
+    const SymbolicBool& outcome,
     std::optional<int> record = std::nullopt,
     std::optional<int> record_condition = std::nullopt);
 

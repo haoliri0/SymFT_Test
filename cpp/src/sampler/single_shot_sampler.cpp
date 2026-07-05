@@ -422,7 +422,7 @@ void ensure_runtime_active_capacity(FactoredExecutorState& runtime, int max_k) {
     }
 }
 
-void promote_first_dormant_rotation(FactoredExecutorState& runtime, double theta) {
+void promote_first_dormant_rotation(FactoredExecutorState& runtime, double kernel_angle) {
     if (runtime.ndormant <= 0) {
         fail("cannot promote a dormant qubit when none remain");
     }
@@ -440,8 +440,8 @@ void promote_first_dormant_rotation(FactoredExecutorState& runtime, double theta
     if (runtime.active_scratch_im.size() < promoted_dim) {
         runtime.active_scratch_im.resize(promoted_dim, 0.0);
     }
-    const double c = std::cos(theta);
-    const double s = std::sin(theta);
+    const double c = std::cos(kernel_angle);
+    const double s = std::sin(kernel_angle);
     SYMFT_SINGLE_SIMD_LOOP
     for (std::size_t basis = 0; basis < dim; ++basis) {
         const double r = runtime.active_re[basis];
@@ -459,7 +459,7 @@ void rotate_pauli(FactoredExecutorState& runtime, const PrecomputedActivePauliRo
     if (kernel.action.nqubits != runtime.k) {
         fail("rotation kernel dimension does not match active state");
     }
-    const double c = kernel.cos_theta;
+    const double c = kernel.cos_kernel_angle;
     auto& simd_table = simd::dispatch_table();
     double* active_re = runtime.active_re.data();
     double* active_im = runtime.active_im.data();
@@ -666,7 +666,7 @@ void execute_instruction(FactoredExecutorState& runtime, const ApplyPrecomputedA
 
 void execute_instruction(FactoredExecutorState& runtime, const PromoteDormantRotation& instruction) {
     const bool sign = eval_symbolic_bool_unchecked(instruction.sign_plan, runtime);
-    promote_first_dormant_rotation(runtime, sign ? -instruction.theta : instruction.theta);
+    promote_first_dormant_rotation(runtime, sign ? -instruction.kernel_angle : instruction.kernel_angle);
 }
 
 void execute_instruction(FactoredExecutorState& runtime, const RecordMeasurement& instruction) {
@@ -723,7 +723,7 @@ void execute_instruction_presampled(
     const SingleShotExpressionEvaluator& evaluator,
     std::size_t instruction_index) {
     const bool sign = evaluator.eval(instruction_index, runtime);
-    promote_first_dormant_rotation(runtime, sign ? -instruction.theta : instruction.theta);
+    promote_first_dormant_rotation(runtime, sign ? -instruction.kernel_angle : instruction.kernel_angle);
 }
 
 void execute_instruction_presampled(

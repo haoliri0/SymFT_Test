@@ -40,8 +40,9 @@ struct PrecomputedActivePauliRotationKernel {
     bool real_pair_flip = false;
     unsigned pair_bit = 0;
     std::size_t pair_count = 0;
-    double theta = 0.0;
-    double cos_theta = 1.0;
+    // Internal angle phi for exp(-i phi P). Frontend R_P(theta) passes phi = theta/2.
+    double kernel_angle = 0.0;
+    double cos_kernel_angle = 1.0;
     std::vector<Complex> diagonal_minus_coefficients;
     std::vector<Complex> diagonal_plus_coefficients;
     std::vector<double> real_pair_flip_basis_phase_signs;
@@ -51,7 +52,7 @@ struct PrecomputedActivePauliRotationKernel {
     std::vector<Complex> pair_right_plus_coefficients;
 
     PrecomputedActivePauliRotationKernel() = default;
-    PrecomputedActivePauliRotationKernel(const ActivePauliAction& action, double theta);
+    PrecomputedActivePauliRotationKernel(const ActivePauliAction& action, double kernel_angle);
 };
 
 struct PrecomputedActivePauliMeasurementKernel {
@@ -76,8 +77,8 @@ struct PrecomputedActivePauliMeasurementKernel {
 
 void apply_pauli(std::vector<Complex>& out, const PauliString& pauli, const std::vector<Complex>& alpha);
 void apply_pauli(ActiveState& state, const PauliString& pauli);
-void rotate_pauli(ActiveState& state, const PauliString& pauli, double theta);
-void rotate_pauli(ActiveState& state, const ActivePauliAction& action, double theta);
+void rotate_pauli(ActiveState& state, const PauliString& pauli, double kernel_angle);
+void rotate_pauli(ActiveState& state, const ActivePauliAction& action, double kernel_angle);
 void rotate_pauli(ActiveState& state, const PrecomputedActivePauliRotationKernel& kernel, bool sign);
 std::string active_simd_backend();
 
