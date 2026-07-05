@@ -2,10 +2,7 @@
 
 #include "core/internal.hpp"
 
-#include <algorithm>
 #include <memory>
-#include <string>
-#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -175,121 +172,12 @@ void mul_rows(CliffordFrame& frame, int dst, int lhs, int rhs, int extra_phase =
     frame.rows[static_cast<std::size_t>(dst)] = out;
 }
 
-PauliString axis_image_from_rows(const CliffordFrame& frame, const PauliString& x, const PauliString& z, char axis) {
-    if (axis == '_') {
-        return pauli_identity(frame.nqubits);
-    }
-    if (axis == 'X') {
-        return x;
-    }
-    if (axis == 'Z') {
-        return z;
-    }
-    if (axis == 'Y') {
-        PauliString out = x * z;
-        out.phase_shift(1);
-        return out;
-    }
-    fail("invalid Clifford image axis");
-}
-
-PauliString image_from_single_body(
-    const CliffordFrame& frame,
-    const PauliString& x,
-    const PauliString& z,
-    std::string_view body) {
-    bool negative = false;
-    if (!body.empty() && body[0] == '-') {
-        negative = true;
-        body.remove_prefix(1);
-    }
-    if (body.size() != 1) {
-        fail("invalid Clifford image body");
-    }
-    PauliString out = axis_image_from_rows(frame, x, z, body[0]);
-    if (negative) {
-        out.phase_shift(2);
-    }
-    return out;
-}
-
-PauliString axis_image_from_pair(
-    const CliffordFrame& frame,
-    const PauliString& xa,
-    const PauliString& za,
-    const PauliString& xb,
-    const PauliString& zb,
-    int qubit_index,
-    char axis) {
-    if (qubit_index == 0) {
-        return axis_image_from_rows(frame, xa, za, axis);
-    }
-    return axis_image_from_rows(frame, xb, zb, axis);
-}
-
-PauliString image_from_two_body(
-    const CliffordFrame& frame,
-    const PauliString& xa,
-    const PauliString& za,
-    const PauliString& xb,
-    const PauliString& zb,
-    std::string_view body) {
-    bool negative = false;
-    if (!body.empty() && body[0] == '-') {
-        negative = true;
-        body.remove_prefix(1);
-    }
-    if (body.size() != 2) {
-        fail("invalid Clifford image body");
-    }
-    PauliString out =
-        axis_image_from_pair(frame, xa, za, xb, zb, 0, body[0]) *
-        axis_image_from_pair(frame, xa, za, xb, zb, 1, body[1]);
-    if (negative) {
-        out.phase_shift(2);
-    }
-    return out;
-}
-
-void left_apply_single_qubit_images(CliffordFrame& frame, int q, std::string_view x_image, std::string_view z_image) {
-    const int qi = check_qubit(frame.nqubits, q);
-    const int x_row = frame.xrow(qi);
-    const int z_row = frame.zrow(qi);
-    const PauliString old_x = frame.rows[static_cast<std::size_t>(x_row)];
-    const PauliString old_z = frame.rows[static_cast<std::size_t>(z_row)];
-    frame.rows[static_cast<std::size_t>(x_row)] = image_from_single_body(frame, old_x, old_z, x_image);
-    frame.rows[static_cast<std::size_t>(z_row)] = image_from_single_body(frame, old_x, old_z, z_image);
-}
-
-void left_apply_two_qubit_images(
-    CliffordFrame& frame,
-    int a,
-    int b,
-    std::string_view xa_image,
-    std::string_view za_image,
-    std::string_view xb_image,
-    std::string_view zb_image) {
+void check_two_qubit_gate(const CliffordFrame& frame, int a, int b) {
     const int ai = check_qubit(frame.nqubits, a);
     const int bi = check_qubit(frame.nqubits, b);
     if (ai == bi) {
         fail("two-qubit Clifford gate requires distinct qubits");
     }
-    const int xa_row = frame.xrow(ai);
-    const int za_row = frame.zrow(ai);
-    const int xb_row = frame.xrow(bi);
-    const int zb_row = frame.zrow(bi);
-    const PauliString old_xa = frame.rows[static_cast<std::size_t>(xa_row)];
-    const PauliString old_za = frame.rows[static_cast<std::size_t>(za_row)];
-    const PauliString old_xb = frame.rows[static_cast<std::size_t>(xb_row)];
-    const PauliString old_zb = frame.rows[static_cast<std::size_t>(zb_row)];
-    frame.rows[static_cast<std::size_t>(xa_row)] =
-        image_from_two_body(frame, old_xa, old_za, old_xb, old_zb, xa_image);
-    frame.rows[static_cast<std::size_t>(za_row)] =
-        image_from_two_body(frame, old_xa, old_za, old_xb, old_zb, za_image);
-    frame.rows[static_cast<std::size_t>(xb_row)] =
-        image_from_two_body(frame, old_xa, old_za, old_xb, old_zb, xb_image);
-    frame.rows[static_cast<std::size_t>(zb_row)] =
-        image_from_two_body(frame, old_xa, old_za, old_xb, old_zb, zb_image);
 }
 
 void right_apply_clifford(CliffordFrame& frame, const CliffordFrame& gate) {
@@ -354,55 +242,117 @@ void left_H(CliffordFrame& frame, int q) {
 }
 
 void left_H_NXY(CliffordFrame& frame, int q) {
-    left_apply_single_qubit_images(frame, q, "-Y", "-Z");
+    const int qi = check_qubit(frame.nqubits, q);
+    const int x = frame.xrow(qi);
+    const int z = frame.zrow(qi);
+    mul_rows(frame, x, x, z, 3);
+    add_row_phase(frame, z, 2);
 }
 
 void left_H_NXZ(CliffordFrame& frame, int q) {
-    left_apply_single_qubit_images(frame, q, "-Z", "-X");
+    const int qi = check_qubit(frame.nqubits, q);
+    const int x = frame.xrow(qi);
+    const int z = frame.zrow(qi);
+    swap_rows(frame, x, z);
+    add_row_phase(frame, x, 2);
+    add_row_phase(frame, z, 2);
 }
 
 void left_H_NYZ(CliffordFrame& frame, int q) {
-    left_apply_single_qubit_images(frame, q, "-X", "-Y");
+    const int qi = check_qubit(frame.nqubits, q);
+    const int x = frame.xrow(qi);
+    const int z = frame.zrow(qi);
+    mul_rows(frame, x, x, z, 3);
+    swap_rows(frame, x, z);
+    mul_rows(frame, x, x, z, 1);
 }
 
 void left_H_XY(CliffordFrame& frame, int q) {
-    left_apply_single_qubit_images(frame, q, "Y", "-Z");
+    const int qi = check_qubit(frame.nqubits, q);
+    const int x = frame.xrow(qi);
+    const int z = frame.zrow(qi);
+    mul_rows(frame, x, x, z, 3);
+    add_row_phase(frame, x, 2);
+    add_row_phase(frame, z, 2);
 }
 
 void left_H_YZ(CliffordFrame& frame, int q) {
-    left_apply_single_qubit_images(frame, q, "-X", "Y");
+    const int qi = check_qubit(frame.nqubits, q);
+    const int x = frame.xrow(qi);
+    const int z = frame.zrow(qi);
+    mul_rows(frame, x, x, z, 1);
+    swap_rows(frame, x, z);
+    mul_rows(frame, x, x, z, 3);
 }
 
 void left_C_NXYZ(CliffordFrame& frame, int q) {
-    left_apply_single_qubit_images(frame, q, "-Y", "-X");
+    const int qi = check_qubit(frame.nqubits, q);
+    const int x = frame.xrow(qi);
+    const int z = frame.zrow(qi);
+    swap_rows(frame, x, z);
+    mul_rows(frame, x, x, z, 3);
+    add_row_phase(frame, x, 2);
+    add_row_phase(frame, z, 2);
 }
 
 void left_C_NZYX(CliffordFrame& frame, int q) {
-    left_apply_single_qubit_images(frame, q, "-Z", "-Y");
+    const int qi = check_qubit(frame.nqubits, q);
+    const int x = frame.xrow(qi);
+    const int z = frame.zrow(qi);
+    mul_rows(frame, x, x, z, 3);
+    swap_rows(frame, x, z);
+    add_row_phase(frame, x, 2);
 }
 
 void left_C_XNYZ(CliffordFrame& frame, int q) {
-    left_apply_single_qubit_images(frame, q, "-Y", "X");
+    const int qi = check_qubit(frame.nqubits, q);
+    const int x = frame.xrow(qi);
+    const int z = frame.zrow(qi);
+    swap_rows(frame, x, z);
+    mul_rows(frame, x, x, z, 1);
 }
 
 void left_C_XYNZ(CliffordFrame& frame, int q) {
-    left_apply_single_qubit_images(frame, q, "Y", "-X");
+    const int qi = check_qubit(frame.nqubits, q);
+    const int x = frame.xrow(qi);
+    const int z = frame.zrow(qi);
+    swap_rows(frame, x, z);
+    mul_rows(frame, x, x, z, 3);
+    add_row_phase(frame, z, 2);
 }
 
 void left_C_XYZ(CliffordFrame& frame, int q) {
-    left_apply_single_qubit_images(frame, q, "Y", "X");
+    const int qi = check_qubit(frame.nqubits, q);
+    const int x = frame.xrow(qi);
+    const int z = frame.zrow(qi);
+    swap_rows(frame, x, z);
+    mul_rows(frame, x, x, z, 3);
 }
 
 void left_C_ZNYX(CliffordFrame& frame, int q) {
-    left_apply_single_qubit_images(frame, q, "Z", "-Y");
+    const int qi = check_qubit(frame.nqubits, q);
+    const int x = frame.xrow(qi);
+    const int z = frame.zrow(qi);
+    mul_rows(frame, x, x, z, 3);
+    swap_rows(frame, x, z);
 }
 
 void left_C_ZYNX(CliffordFrame& frame, int q) {
-    left_apply_single_qubit_images(frame, q, "-Z", "Y");
+    const int qi = check_qubit(frame.nqubits, q);
+    const int x = frame.xrow(qi);
+    const int z = frame.zrow(qi);
+    mul_rows(frame, x, x, z, 3);
+    swap_rows(frame, x, z);
+    add_row_phase(frame, x, 2);
+    add_row_phase(frame, z, 2);
 }
 
 void left_C_ZYX(CliffordFrame& frame, int q) {
-    left_apply_single_qubit_images(frame, q, "Z", "Y");
+    const int qi = check_qubit(frame.nqubits, q);
+    const int x = frame.xrow(qi);
+    const int z = frame.zrow(qi);
+    mul_rows(frame, x, x, z, 1);
+    swap_rows(frame, x, z);
 }
 
 void left_S(CliffordFrame& frame, int q) {
@@ -416,19 +366,37 @@ void left_SDG(CliffordFrame& frame, int q) {
 }
 
 void left_SQRT_X(CliffordFrame& frame, int q) {
-    left_apply_single_qubit_images(frame, q, "X", "-Y");
+    const int qi = check_qubit(frame.nqubits, q);
+    const int x = frame.xrow(qi);
+    const int z = frame.zrow(qi);
+    swap_rows(frame, x, z);
+    mul_rows(frame, x, x, z, 1);
+    swap_rows(frame, x, z);
 }
 
 void left_SQRT_X_DAG(CliffordFrame& frame, int q) {
-    left_apply_single_qubit_images(frame, q, "X", "Y");
+    const int qi = check_qubit(frame.nqubits, q);
+    const int x = frame.xrow(qi);
+    const int z = frame.zrow(qi);
+    swap_rows(frame, x, z);
+    mul_rows(frame, x, x, z, 3);
+    swap_rows(frame, x, z);
 }
 
 void left_SQRT_Y(CliffordFrame& frame, int q) {
-    left_apply_single_qubit_images(frame, q, "-Z", "X");
+    const int qi = check_qubit(frame.nqubits, q);
+    const int x = frame.xrow(qi);
+    const int z = frame.zrow(qi);
+    swap_rows(frame, x, z);
+    add_row_phase(frame, x, 2);
 }
 
 void left_SQRT_Y_DAG(CliffordFrame& frame, int q) {
-    left_apply_single_qubit_images(frame, q, "Z", "-X");
+    const int qi = check_qubit(frame.nqubits, q);
+    const int x = frame.xrow(qi);
+    const int z = frame.zrow(qi);
+    swap_rows(frame, x, z);
+    add_row_phase(frame, z, 2);
 }
 
 void left_X(CliffordFrame& frame, int q) {
@@ -458,7 +426,18 @@ void left_CX(CliffordFrame& frame, int control, int target) {
 }
 
 void left_CY(CliffordFrame& frame, int control, int target) {
-    left_apply_two_qubit_images(frame, control, target, "XY", "Z_", "ZX", "ZZ");
+    check_two_qubit_gate(frame, control, target);
+    const int c = check_qubit(frame.nqubits, control);
+    const int t = check_qubit(frame.nqubits, target);
+    const int xc = frame.xrow(c);
+    const int zc = frame.zrow(c);
+    const int xt = frame.xrow(t);
+    const int zt = frame.zrow(t);
+    mul_rows(frame, xc, xc, zc, 3);
+    mul_rows(frame, xc, xc, zt);
+    mul_rows(frame, xt, zc, xt);
+    mul_rows(frame, xc, xc, xt);
+    mul_rows(frame, zt, zc, zt);
 }
 
 void left_CZ(CliffordFrame& frame, int a, int b) {
@@ -482,71 +461,269 @@ void left_SWAP(CliffordFrame& frame, int a, int b) {
 }
 
 void left_CXSWAP(CliffordFrame& frame, int a, int b) {
-    left_apply_two_qubit_images(frame, a, b, "XX", "_Z", "X_", "ZZ");
+    check_two_qubit_gate(frame, a, b);
+    const int ai = check_qubit(frame.nqubits, a);
+    const int bi = check_qubit(frame.nqubits, b);
+    const int xa = frame.xrow(ai);
+    const int za = frame.zrow(ai);
+    const int xb = frame.xrow(bi);
+    const int zb = frame.zrow(bi);
+    mul_rows(frame, xa, xa, xb);
+    mul_rows(frame, zb, za, zb);
+    mul_rows(frame, xb, xb, xa);
+    mul_rows(frame, za, zb, za);
 }
 
 void left_CZSWAP(CliffordFrame& frame, int a, int b) {
-    left_apply_two_qubit_images(frame, a, b, "ZX", "_Z", "XZ", "Z_");
+    check_two_qubit_gate(frame, a, b);
+    const int ai = check_qubit(frame.nqubits, a);
+    const int bi = check_qubit(frame.nqubits, b);
+    const int xa = frame.xrow(ai);
+    const int za = frame.zrow(ai);
+    const int xb = frame.xrow(bi);
+    const int zb = frame.zrow(bi);
+    mul_rows(frame, xa, xa, zb);
+    mul_rows(frame, xb, za, xb);
+    swap_rows(frame, xa, xb);
+    swap_rows(frame, za, zb);
 }
 
 void left_ISWAP(CliffordFrame& frame, int a, int b) {
-    left_apply_two_qubit_images(frame, a, b, "ZY", "_Z", "YZ", "Z_");
+    check_two_qubit_gate(frame, a, b);
+    const int ai = check_qubit(frame.nqubits, a);
+    const int bi = check_qubit(frame.nqubits, b);
+    const int xa = frame.xrow(ai);
+    const int za = frame.zrow(ai);
+    const int xb = frame.xrow(bi);
+    const int zb = frame.zrow(bi);
+    mul_rows(frame, xa, xa, za, 1);
+    mul_rows(frame, xb, xb, zb, 1);
+    mul_rows(frame, xa, xa, zb);
+    mul_rows(frame, xb, za, xb);
+    swap_rows(frame, xa, xb);
+    swap_rows(frame, za, zb);
 }
 
 void left_ISWAP_DAG(CliffordFrame& frame, int a, int b) {
-    left_apply_two_qubit_images(frame, a, b, "-ZY", "_Z", "-YZ", "Z_");
+    check_two_qubit_gate(frame, a, b);
+    const int ai = check_qubit(frame.nqubits, a);
+    const int bi = check_qubit(frame.nqubits, b);
+    const int xa = frame.xrow(ai);
+    const int za = frame.zrow(ai);
+    const int xb = frame.xrow(bi);
+    const int zb = frame.zrow(bi);
+    mul_rows(frame, xa, xa, za, 3);
+    mul_rows(frame, xb, xb, zb, 3);
+    mul_rows(frame, xa, xa, zb);
+    mul_rows(frame, xb, za, xb);
+    swap_rows(frame, xa, xb);
+    swap_rows(frame, za, zb);
 }
 
 void left_SQRT_XX(CliffordFrame& frame, int a, int b) {
-    left_apply_two_qubit_images(frame, a, b, "X_", "-YX", "_X", "-XY");
+    check_two_qubit_gate(frame, a, b);
+    const int ai = check_qubit(frame.nqubits, a);
+    const int bi = check_qubit(frame.nqubits, b);
+    const int xa = frame.xrow(ai);
+    const int za = frame.zrow(ai);
+    const int xb = frame.xrow(bi);
+    const int zb = frame.zrow(bi);
+    mul_rows(frame, xa, xa, za, 3);
+    mul_rows(frame, xa, xa, xb);
+    mul_rows(frame, zb, za, zb);
+    swap_rows(frame, xa, za);
+    mul_rows(frame, xa, xa, za, 3);
+    mul_rows(frame, xa, xa, xb);
+    mul_rows(frame, zb, za, zb);
 }
 
 void left_SQRT_XX_DAG(CliffordFrame& frame, int a, int b) {
-    left_apply_two_qubit_images(frame, a, b, "X_", "YX", "_X", "XY");
+    check_two_qubit_gate(frame, a, b);
+    const int ai = check_qubit(frame.nqubits, a);
+    const int bi = check_qubit(frame.nqubits, b);
+    const int xa = frame.xrow(ai);
+    const int za = frame.zrow(ai);
+    const int xb = frame.xrow(bi);
+    const int zb = frame.zrow(bi);
+    mul_rows(frame, xa, xa, za, 1);
+    mul_rows(frame, xa, xa, xb);
+    mul_rows(frame, zb, za, zb);
+    swap_rows(frame, xa, za);
+    mul_rows(frame, xa, xa, za, 1);
+    mul_rows(frame, xa, xa, xb);
+    mul_rows(frame, zb, za, zb);
 }
 
 void left_SQRT_YY(CliffordFrame& frame, int a, int b) {
-    left_apply_two_qubit_images(frame, a, b, "-ZY", "XY", "-YZ", "YX");
+    check_two_qubit_gate(frame, a, b);
+    const int ai = check_qubit(frame.nqubits, a);
+    const int bi = check_qubit(frame.nqubits, b);
+    const int xa = frame.xrow(ai);
+    const int za = frame.zrow(ai);
+    const int xb = frame.xrow(bi);
+    const int zb = frame.zrow(bi);
+    mul_rows(frame, xa, xa, za, 3);
+    add_row_phase(frame, xb, 2);
+    mul_rows(frame, xb, xb, xa);
+    mul_rows(frame, za, zb, za);
+    swap_rows(frame, xb, zb);
+    mul_rows(frame, xb, xb, xa);
+    mul_rows(frame, za, zb, za);
+    mul_rows(frame, xa, xa, za, 1);
 }
 
 void left_SQRT_YY_DAG(CliffordFrame& frame, int a, int b) {
-    left_apply_two_qubit_images(frame, a, b, "ZY", "-XY", "YZ", "-YX");
+    check_two_qubit_gate(frame, a, b);
+    const int ai = check_qubit(frame.nqubits, a);
+    const int bi = check_qubit(frame.nqubits, b);
+    const int xa = frame.xrow(ai);
+    const int za = frame.zrow(ai);
+    const int xb = frame.xrow(bi);
+    const int zb = frame.zrow(bi);
+    mul_rows(frame, xa, xa, za, 3);
+    mul_rows(frame, xb, xb, xa);
+    mul_rows(frame, za, zb, za);
+    swap_rows(frame, xb, zb);
+    add_row_phase(frame, xa, 2);
+    mul_rows(frame, xb, xb, xa);
+    mul_rows(frame, za, zb, za);
+    mul_rows(frame, xa, xa, za, 3);
 }
 
 void left_SQRT_ZZ(CliffordFrame& frame, int a, int b) {
-    left_apply_two_qubit_images(frame, a, b, "YZ", "Z_", "ZY", "_Z");
+    check_two_qubit_gate(frame, a, b);
+    const int ai = check_qubit(frame.nqubits, a);
+    const int bi = check_qubit(frame.nqubits, b);
+    const int xa = frame.xrow(ai);
+    const int za = frame.zrow(ai);
+    const int xb = frame.xrow(bi);
+    const int zb = frame.zrow(bi);
+    mul_rows(frame, xa, xa, za, 1);
+    mul_rows(frame, xb, xb, zb, 1);
+    mul_rows(frame, xa, xa, zb);
+    mul_rows(frame, xb, za, xb);
 }
 
 void left_SQRT_ZZ_DAG(CliffordFrame& frame, int a, int b) {
-    left_apply_two_qubit_images(frame, a, b, "-YZ", "Z_", "-ZY", "_Z");
+    check_two_qubit_gate(frame, a, b);
+    const int ai = check_qubit(frame.nqubits, a);
+    const int bi = check_qubit(frame.nqubits, b);
+    const int xa = frame.xrow(ai);
+    const int za = frame.zrow(ai);
+    const int xb = frame.xrow(bi);
+    const int zb = frame.zrow(bi);
+    mul_rows(frame, xa, xa, za, 3);
+    mul_rows(frame, xb, xb, zb, 3);
+    mul_rows(frame, xa, xa, zb);
+    mul_rows(frame, xb, za, xb);
 }
 
 void left_SWAPCX(CliffordFrame& frame, int a, int b) {
-    left_apply_two_qubit_images(frame, a, b, "_X", "ZZ", "XX", "Z_");
+    check_two_qubit_gate(frame, a, b);
+    const int ai = check_qubit(frame.nqubits, a);
+    const int bi = check_qubit(frame.nqubits, b);
+    const int xa = frame.xrow(ai);
+    const int za = frame.zrow(ai);
+    const int xb = frame.xrow(bi);
+    const int zb = frame.zrow(bi);
+    mul_rows(frame, xa, xa, xb);
+    mul_rows(frame, zb, za, zb);
+    swap_rows(frame, xa, xb);
+    swap_rows(frame, za, zb);
 }
 
 void left_XCX(CliffordFrame& frame, int control, int target) {
-    left_apply_two_qubit_images(frame, control, target, "X_", "ZX", "_X", "XZ");
+    check_two_qubit_gate(frame, control, target);
+    const int c = check_qubit(frame.nqubits, control);
+    const int t = check_qubit(frame.nqubits, target);
+    const int xc = frame.xrow(c);
+    const int zc = frame.zrow(c);
+    const int xt = frame.xrow(t);
+    const int zt = frame.zrow(t);
+    swap_rows(frame, xc, zc);
+    mul_rows(frame, xc, xc, xt);
+    mul_rows(frame, zt, zc, zt);
+    swap_rows(frame, xc, zc);
 }
 
 void left_XCY(CliffordFrame& frame, int control, int target) {
-    left_apply_two_qubit_images(frame, control, target, "X_", "ZY", "XX", "XZ");
+    check_two_qubit_gate(frame, control, target);
+    const int c = check_qubit(frame.nqubits, control);
+    const int t = check_qubit(frame.nqubits, target);
+    const int xc = frame.xrow(c);
+    const int zc = frame.zrow(c);
+    const int xt = frame.xrow(t);
+    const int zt = frame.zrow(t);
+    swap_rows(frame, xc, zc);
+    mul_rows(frame, xc, xc, zc, 3);
+    mul_rows(frame, xc, xc, zt);
+    mul_rows(frame, xt, zc, xt);
+    mul_rows(frame, xc, xc, xt);
+    mul_rows(frame, zt, zc, zt);
+    swap_rows(frame, xc, zc);
 }
 
 void left_XCZ(CliffordFrame& frame, int control, int target) {
-    left_apply_two_qubit_images(frame, control, target, "X_", "ZZ", "XX", "_Z");
+    check_two_qubit_gate(frame, control, target);
+    const int c = check_qubit(frame.nqubits, control);
+    const int t = check_qubit(frame.nqubits, target);
+    const int xc = frame.xrow(c);
+    const int zc = frame.zrow(c);
+    const int xt = frame.xrow(t);
+    const int zt = frame.zrow(t);
+    mul_rows(frame, xt, xt, xc);
+    mul_rows(frame, zc, zt, zc);
 }
 
 void left_YCX(CliffordFrame& frame, int control, int target) {
-    left_apply_two_qubit_images(frame, control, target, "XX", "ZX", "_X", "YZ");
+    check_two_qubit_gate(frame, control, target);
+    const int c = check_qubit(frame.nqubits, control);
+    const int t = check_qubit(frame.nqubits, target);
+    const int xc = frame.xrow(c);
+    const int zc = frame.zrow(c);
+    const int xt = frame.xrow(t);
+    const int zt = frame.zrow(t);
+    swap_rows(frame, xt, zt);
+    mul_rows(frame, xt, xt, zt, 3);
+    mul_rows(frame, xc, xc, zt);
+    mul_rows(frame, xt, zc, xt);
+    mul_rows(frame, xt, xt, xc);
+    mul_rows(frame, zc, zt, zc);
+    swap_rows(frame, xt, zt);
 }
 
 void left_YCY(CliffordFrame& frame, int control, int target) {
-    left_apply_two_qubit_images(frame, control, target, "XY", "ZY", "YX", "YZ");
+    check_two_qubit_gate(frame, control, target);
+    const int c = check_qubit(frame.nqubits, control);
+    const int t = check_qubit(frame.nqubits, target);
+    const int xc = frame.xrow(c);
+    const int zc = frame.zrow(c);
+    const int xt = frame.xrow(t);
+    const int zt = frame.zrow(t);
+    swap_rows(frame, xc, zc);
+    swap_rows(frame, xt, zt);
+    mul_rows(frame, xc, xc, zc, 3);
+    mul_rows(frame, xt, xt, xc);
+    mul_rows(frame, zc, zt, zc);
+    swap_rows(frame, xt, zt);
+    mul_rows(frame, xt, xt, xc);
+    mul_rows(frame, zc, zt, zc);
+    mul_rows(frame, xc, xc, zc, 3);
 }
 
 void left_YCZ(CliffordFrame& frame, int control, int target) {
-    left_apply_two_qubit_images(frame, control, target, "XZ", "ZZ", "YX", "_Z");
+    check_two_qubit_gate(frame, control, target);
+    const int c = check_qubit(frame.nqubits, control);
+    const int t = check_qubit(frame.nqubits, target);
+    const int xc = frame.xrow(c);
+    const int zc = frame.zrow(c);
+    const int xt = frame.xrow(t);
+    const int zt = frame.zrow(t);
+    mul_rows(frame, xt, xt, zt, 3);
+    mul_rows(frame, xc, xc, zt);
+    mul_rows(frame, xt, zc, xt);
+    mul_rows(frame, xt, xt, xc);
+    mul_rows(frame, zc, zt, zc);
 }
 
 void right_H(CliffordFrame& frame, int q) {
