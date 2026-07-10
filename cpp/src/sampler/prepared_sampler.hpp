@@ -7,7 +7,6 @@
 
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -76,26 +75,28 @@ class PreparedCircuitSingleShotSampler {
 
     PreparedCircuitSingleShotSampler(const PreparedCircuitSingleShotSampler&) = delete;
     PreparedCircuitSingleShotSampler& operator=(const PreparedCircuitSingleShotSampler&) = delete;
-    PreparedCircuitSingleShotSampler(PreparedCircuitSingleShotSampler&&) noexcept = default;
-    PreparedCircuitSingleShotSampler& operator=(PreparedCircuitSingleShotSampler&&) noexcept = default;
+    ~PreparedCircuitSingleShotSampler();
+    PreparedCircuitSingleShotSampler(PreparedCircuitSingleShotSampler&&) noexcept;
+    PreparedCircuitSingleShotSampler& operator=(PreparedCircuitSingleShotSampler&&) noexcept;
 
     const CircuitSamplingInfo& info() const { return info_; }
     const CircuitSamplingTiming& preprocessing_timing() const { return preprocessing_timing_; }
     const FactoredInstructionProgram& program() const { return program_; }
 
+    // Reuses worker storage; calls on the same sampler instance must not overlap.
     CircuitSamplingRunResult sample(std::uint64_t shots);
     CircuitSamplingRunResult sample(std::uint64_t shots, std::uint64_t stream_id);
 
   private:
+    struct WorkerContext;
+
     CircuitSamplingOptions options_;
     FactoredInstructionProgram program_;
     std::vector<std::vector<int>> logical_records_;
     CircuitSamplingInfo info_;
     CircuitSamplingTiming preprocessing_timing_;
-    std::optional<FactoredExecutorState> runtime_;
-    PackedPresampledExogenous samples_;
     PresampledExpressionPlan expression_plan_;
-    PresampledExpressionBlock expression_block_;
+    std::vector<std::unique_ptr<WorkerContext>> workers_;
     std::uint64_t next_stream_id_ = 0;
 };
 
@@ -117,17 +118,21 @@ class PreparedCircuitBatchSampler {
     const CircuitSamplingTiming& preprocessing_timing() const { return preprocessing_timing_; }
     const FactoredInstructionProgram& program() const { return program_; }
 
+    // Reuses worker storage; calls on the same sampler instance must not overlap.
     CircuitSamplingRunResult sample(std::uint64_t shots);
     CircuitSamplingRunResult sample(std::uint64_t shots, std::uint64_t stream_id);
 
   private:
     struct WorkerContext;
 
+    void rebind_after_move() noexcept;
+
     CircuitSamplingOptions options_;
     FactoredInstructionProgram program_;
     std::vector<std::vector<int>> logical_records_;
     CircuitSamplingInfo info_;
     CircuitSamplingTiming preprocessing_timing_;
+    PresampledExpressionPlan expression_plan_;
     BatchDetectorPostselectionOptions postselection_options_;
     std::vector<std::unique_ptr<WorkerContext>> workers_;
     std::uint64_t next_stream_id_ = 0;

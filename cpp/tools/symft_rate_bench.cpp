@@ -139,10 +139,10 @@ void print_usage(const char* argv0) {
         << "  --observable N                    Observable index\n"
         << "  --postselect-detectors            Enable detector postselection inside the sampler\n"
         << "  --no-postselect-detectors         Disable detector postselection\n"
+        << "  --threads N|auto                  Parallel worker threads over independent chunks\n"
         << "\n"
         << "batch-only options:\n"
         << "  --batch-size N|auto               Batch size; auto chooses the sampler default\n"
-        << "  --threads N|auto                  Parallel worker threads over independent chunks\n"
         << "  --batch-mask-threshold-denominator N  Batch postselection compaction threshold; default: 2\n";
 }
 
@@ -302,13 +302,11 @@ BenchResult run_single_sampler(const Options& options) {
         options,
         sampler.info(),
         sampler_name);
-    result.threads = 1;
 
     for (int repeat = 0; repeat < options.repeats; ++repeat) {
         accumulate_run(result, sampler.sample(options.shots, repeat));
     }
     average_repeated_timings(result);
-    result.threads = 1;
     return result;
 }
 
@@ -351,11 +349,9 @@ void print_result(const BenchResult& result) {
     }
     std::cout << "sample_chunk_shots " << result.sample_chunk_shots << "\n";
     std::cout << "repeats " << result.repeats << "\n";
-    if (is_batch_sampler) {
-        std::cout << "threads " << result.threads << "\n";
-        if (result.requested_threads != result.threads) {
-            std::cout << "requested_threads " << result.requested_threads << "\n";
-        }
+    std::cout << "threads " << result.threads << "\n";
+    if (result.requested_threads != result.threads) {
+        std::cout << "requested_threads " << result.requested_threads << "\n";
     }
     if (result.sampler == "batch_postselected") {
         std::cout << "batch_mask_threshold_denominator "
