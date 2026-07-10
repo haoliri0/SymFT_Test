@@ -13,6 +13,7 @@
 #include <iostream>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -23,6 +24,16 @@ void require(bool condition, const std::string& message) {
         std::cerr << "FAILED: " << message << "\n";
         std::exit(1);
     }
+}
+
+void require_same_counts(
+    const symft::CircuitSamplingCounts& lhs,
+    const symft::CircuitSamplingCounts& rhs,
+    const std::string& context) {
+    require(lhs.shots == rhs.shots, context + " sampled count");
+    require(lhs.discarded == rhs.discarded, context + " detector count");
+    require(lhs.accepted == rhs.accepted, context + " accepted count");
+    require(lhs.logical_errors == rhs.logical_errors, context + " logical count");
 }
 
 template <typename Fn>
@@ -1251,12 +1262,110 @@ void test_prepared_circuit_sampler_reuse() {
     require(small.counts.discarded == 0, "prepared batch inactive workers do not leak discarded count");
 
     auto single = prepare_single_shot_sampler_from_stim_file(path, options);
+    require(single.info().threads == 4, "prepared single configured thread count");
+    const auto single_large = single.sample(257);
+    require(single_large.active_threads == 4, "prepared single activates chunk workers");
+    require(single_large.counts.shots == 257, "prepared single large shot count");
+    require(single_large.counts.accepted == 257, "prepared single large accepted count");
     const auto single_a = single.sample(3);
     const auto single_b = single.sample(4);
+    require(single_a.active_threads == 1, "prepared single limits workers to available chunks");
     require(single_a.counts.shots == 3, "prepared single first shot count");
     require(single_b.counts.shots == 4, "prepared single second shot count");
 
     std::remove(path.c_str());
+}
+
+void test_prepared_sampler_multithreading() {
+    using namespace symft;
+
+    const std::string random_path = "/tmp/symft_threaded_single_sampler_test.stim";
+    {
+        std::ofstream out(random_path);
+        out << "X_ERROR(0.25) 0\n"
+            << "M 0\n"
+            << "DETECTOR rec[-1]\n"
+            << "OBSERVABLE_INCLUDE(0) rec[-1]\n";
+    }
+
+    CircuitSamplingOptions serial_options;
+    serial_options.sample_chunk_shots = 64;
+    serial_options.batch_size = 16;
+    CircuitSamplingOptions parallel_options = serial_options;
+    parallel_options.threads = 4;
+
+    auto serial = prepare_single_shot_sampler_from_stim_file(random_path, serial_options);
+    auto parallel = prepare_single_shot_sampler_from_stim_file(random_path, parallel_options);
+    const auto serial_result = serial.sample(1025, 73);
+    const auto parallel_result = parallel.sample(1025, 73);
+    require(parallel_result.active_threads == 4, "threaded single random test activates workers");
+    require_same_counts(serial_result.counts, parallel_result.counts, "threaded single preserves");
+
+    auto serial_batch = prepare_batch_sampler_from_stim_file(random_path, serial_options);
+    auto parallel_batch = prepare_batch_sampler_from_stim_file(random_path, parallel_options);
+    const auto serial_batch_result = serial_batch.sample(1025, 117);
+    const auto parallel_batch_result = parallel_batch.sample(1025, 117);
+    require(parallel_batch_result.active_threads == 4, "threaded batch random test activates workers");
+    require_same_counts(
+        serial_batch_result.counts,
+        parallel_batch_result.counts,
+        "threaded batch preserves");
+
+    serial_options.postselect_detectors = true;
+    parallel_options.postselect_detectors = true;
+    auto serial_postselected = prepare_single_shot_sampler_from_stim_file(random_path, serial_options);
+    auto parallel_postselected = prepare_single_shot_sampler_from_stim_file(random_path, parallel_options);
+    const auto serial_postselected_result = serial_postselected.sample(1025, 91);
+    const auto parallel_postselected_result = parallel_postselected.sample(1025, 91);
+    require_same_counts(
+        serial_postselected_result.counts,
+        parallel_postselected_result.counts,
+        "threaded postselected single preserves");
+
+    auto serial_postselected_batch = prepare_batch_sampler_from_stim_file(random_path, serial_options);
+    auto parallel_postselected_batch = prepare_batch_sampler_from_stim_file(random_path, parallel_options);
+    const auto serial_postselected_batch_result = serial_postselected_batch.sample(1025, 101);
+    const auto parallel_postselected_batch_result = parallel_postselected_batch.sample(1025, 101);
+    require_same_counts(
+        serial_postselected_batch_result.counts,
+        parallel_postselected_batch_result.counts,
+        "threaded postselected batch preserves");
+
+    auto reference_single = prepare_single_shot_sampler_from_stim_file(random_path, parallel_options);
+    auto move_constructed_single = [&] {
+        auto source = prepare_single_shot_sampler_from_stim_file(random_path, parallel_options);
+        return PreparedCircuitSingleShotSampler(std::move(source));
+    }();
+    const auto reference_single_result = reference_single.sample(1025, 109);
+    const auto move_constructed_single_result = move_constructed_single.sample(1025, 109);
+    require_same_counts(
+        reference_single_result.counts,
+        move_constructed_single_result.counts,
+        "move-constructed postselected single preserves");
+
+    auto reference_batch = prepare_batch_sampler_from_stim_file(random_path, parallel_options);
+    auto move_constructed_batch = [&] {
+        auto source = prepare_batch_sampler_from_stim_file(random_path, parallel_options);
+        return PreparedCircuitBatchSampler(std::move(source));
+    }();
+    auto move_assigned_batch = prepare_batch_sampler_from_stim_file(random_path, parallel_options);
+    {
+        auto source = prepare_batch_sampler_from_stim_file(random_path, parallel_options);
+        move_assigned_batch = std::move(source);
+    }
+    const auto reference_batch_result = reference_batch.sample(1025, 131);
+    const auto move_constructed_batch_result = move_constructed_batch.sample(1025, 131);
+    const auto move_assigned_batch_result = move_assigned_batch.sample(1025, 131);
+    require_same_counts(
+        reference_batch_result.counts,
+        move_constructed_batch_result.counts,
+        "move-constructed postselected batch preserves");
+    require_same_counts(
+        reference_batch_result.counts,
+        move_assigned_batch_result.counts,
+        "move-assigned postselected batch preserves");
+
+    std::remove(random_path.c_str());
 }
 
 } // namespace
@@ -1284,6 +1393,7 @@ int main() {
     test_batch_postselection();
     test_detectors();
     test_prepared_circuit_sampler_reuse();
+    test_prepared_sampler_multithreading();
     std::cout << "symft_cpp_tests passed (SIMD backend: " << symft::active_simd_backend() << ")\n";
     return 0;
 }
