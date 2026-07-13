@@ -47,6 +47,18 @@ void require_throws(Fn&& fn, const std::string& message) {
     require(threw, message);
 }
 
+template <typename Fn>
+void require_throws_with_message(Fn&& fn, const std::string& expected, const std::string& message) {
+    bool threw = false;
+    try {
+        fn();
+    } catch (const symft::Error& ex) {
+        threw = true;
+        require(std::string(ex.what()).find(expected) != std::string::npos, message + " error text");
+    }
+    require(threw, message);
+}
+
 bool approx(symft::Complex a, symft::Complex b, double eps = 1e-10) {
     return std::abs(a - b) <= eps;
 }
@@ -934,9 +946,14 @@ void test_extended_stim_frontend() {
         require_throws(
             [] { (void)parse_stim_text("X 0\nCX sweep[x] 0\n"); },
             "invalid sweep target is rejected");
-        require_throws(
-            [] { (void)parse_stim_text("X 0\nCX sweep[0] !0\n"); },
-            "sweep-controlled feedback rejects inverted qubit targets");
+        require_throws_with_message(
+            [] { (void)parse_stim_text("X 0\nCX sweep[0] 0\n"); },
+            "sweep-controlled operations are not supported",
+            "sweep-controlled CX is rejected");
+        require_throws_with_message(
+            [] { (void)parse_stim_text("X 0\nCZ 0 sweep[0]\n"); },
+            "sweep-controlled operations are not supported",
+            "reverse sweep-controlled CZ is rejected");
     }
     {
         require_throws(
@@ -1015,13 +1032,6 @@ void test_extended_stim_frontend() {
         require(program.nrecords == 4, "heralded channels add measurement records");
         const auto records = sample_measurements(program, 3, 13);
         require(records.size() == 3, "extended noise gates sample");
-    }
-    {
-        const auto parsed = parse_stim_text("X 0\nCX sweep[0] 0\nM 0\n");
-        PendingFactoredState pending(parsed.state);
-        const auto program = plan_factored_updates(pending);
-        const auto records = sample_measurements(program);
-        require(packed_bit(records, 0), "missing sweep data defaults to false");
     }
 }
 

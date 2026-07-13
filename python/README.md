@@ -457,8 +457,8 @@ for the full Stim grammar. Supported operations include:
   `PAULI_CHANNEL_1/2/3`, `CORRELATED_ERROR`/`E`,
   `ELSE_CORRELATED_ERROR`, `HERALDED_ERASE`,
   `HERALDED_PAULI_CHANNEL_1`;
-- Pauli feedback controlled by measurement records, plus some sweep-controlled
-  Clifford operations.
+- Pauli feedback controlled by measurement records. Sweep-controlled operations
+  are not supported and are rejected by the parser.
 
 Operation parameters, target counts, and available control directions are still
 validated by the parser. Unsupported operations raise `SymFTError`; the error

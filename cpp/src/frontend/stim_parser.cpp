@@ -421,13 +421,6 @@ bool is_sweep_target(const std::string& target) {
     return all_digits(target.substr(6, target.size() - 7));
 }
 
-int stim_sweep_index(const std::string& target) {
-    if (!is_sweep_target(target)) {
-        fail("invalid sweep target");
-    }
-    return std::stoi(target.substr(6, target.size() - 7));
-}
-
 bool is_pauli_target_or_combiner(std::string target) {
     if (target == "*") {
         return true;
@@ -792,7 +785,7 @@ void append_feedback_pair(StimCircuitBuilder& builder, int line, CircuitInstruct
 int feedback_qubit_target(const std::string& target, int line) {
     auto [q, inverted] = stim_qubit_target(target, line);
     if (inverted) {
-        fail("record/sweep-controlled feedback does not accept inverted qubit targets");
+        fail("record-controlled feedback does not accept inverted qubit targets");
     }
     return q;
 }
@@ -974,11 +967,14 @@ void append_correlated_error(StimCircuitBuilder& builder, const StimInstruction&
     builder.correlated_error_remaining_probability *= (1.0 - p);
 }
 
-bool append_classical_or_sweep_controlled_pairs(StimCircuitBuilder& builder, const StimInstruction& inst) {
+bool append_classical_controlled_pairs(StimCircuitBuilder& builder, const StimInstruction& inst) {
     const std::string& op = inst.op;
     bool has_classical_target = false;
     for (const auto& target : inst.targets) {
-        has_classical_target = has_classical_target || is_record_target(target) || is_sweep_target(target);
+        if (is_sweep_target(target)) {
+            fail("sweep-controlled operations are not supported");
+        }
+        has_classical_target = has_classical_target || is_record_target(target);
     }
     if (!has_classical_target) {
         return false;
@@ -995,9 +991,6 @@ bool append_classical_or_sweep_controlled_pairs(StimCircuitBuilder& builder, con
             if (is_record_target(a)) {
                 const int q = feedback_qubit_target(b, inst.line);
                 append_feedback_pair(builder, inst.line, feedback, stim_record_index(a, builder.circuit.nrecords), q);
-            } else if (is_sweep_target(a)) {
-                (void)stim_sweep_index(a);
-                (void)feedback_qubit_target(b, inst.line);
             } else {
                 auto [qa, inv_a] = stim_qubit_target(a, inst.line);
                 auto [qb, inv_b] = stim_qubit_target(b, inst.line);
@@ -1012,20 +1005,12 @@ bool append_classical_or_sweep_controlled_pairs(StimCircuitBuilder& builder, con
                     qb);
             }
         } else if (op == "CZ" || op == "ZCZ") {
-            if (is_record_target(a) || is_sweep_target(a)) {
+            if (is_record_target(a)) {
                 const int q = feedback_qubit_target(b, inst.line);
-                if (is_record_target(a)) {
-                    append_feedback_pair(builder, inst.line, CircuitInstructionKind::FeedbackZ, stim_record_index(a, builder.circuit.nrecords), q);
-                } else {
-                    (void)stim_sweep_index(a);
-                }
-            } else if (is_record_target(b) || is_sweep_target(b)) {
+                append_feedback_pair(builder, inst.line, CircuitInstructionKind::FeedbackZ, stim_record_index(a, builder.circuit.nrecords), q);
+            } else if (is_record_target(b)) {
                 const int q = feedback_qubit_target(a, inst.line);
-                if (is_record_target(b)) {
-                    append_feedback_pair(builder, inst.line, CircuitInstructionKind::FeedbackZ, stim_record_index(b, builder.circuit.nrecords), q);
-                } else {
-                    (void)stim_sweep_index(b);
-                }
+                append_feedback_pair(builder, inst.line, CircuitInstructionKind::FeedbackZ, stim_record_index(b, builder.circuit.nrecords), q);
             } else {
                 auto [qa, inv_a] = stim_qubit_target(a, inst.line);
                 auto [qb, inv_b] = stim_qubit_target(b, inst.line);
@@ -1037,13 +1022,9 @@ bool append_classical_or_sweep_controlled_pairs(StimCircuitBuilder& builder, con
         } else if (op == "XCZ" || op == "YCZ") {
             const CircuitInstructionKind feedback =
                 op == "YCZ" ? CircuitInstructionKind::FeedbackY : CircuitInstructionKind::FeedbackX;
-            if (is_record_target(b) || is_sweep_target(b)) {
+            if (is_record_target(b)) {
                 const int q = feedback_qubit_target(a, inst.line);
-                if (is_record_target(b)) {
-                    append_feedback_pair(builder, inst.line, feedback, stim_record_index(b, builder.circuit.nrecords), q);
-                } else {
-                    (void)stim_sweep_index(b);
-                }
+                append_feedback_pair(builder, inst.line, feedback, stim_record_index(b, builder.circuit.nrecords), q);
             } else {
                 auto [qa, inv_a] = stim_qubit_target(a, inst.line);
                 auto [qb, inv_b] = stim_qubit_target(b, inst.line);
@@ -1058,7 +1039,7 @@ bool append_classical_or_sweep_controlled_pairs(StimCircuitBuilder& builder, con
                     qb);
             }
         } else {
-            fail("unsupported classical/sweep controlled gate");
+            fail("unsupported classically controlled gate");
         }
     }
     return true;
@@ -1122,7 +1103,7 @@ void append_instruction(StimCircuitBuilder& builder, const StimInstruction& inst
              inst.line});
         return;
     }
-    if (append_classical_or_sweep_controlled_pairs(builder, inst)) {
+    if (append_classical_controlled_pairs(builder, inst)) {
         return;
     }
     if (op == "I") {

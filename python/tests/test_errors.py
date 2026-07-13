@@ -8,6 +8,10 @@ class ErrorHandlingTest(unittest.TestCase):
         with self.assertRaises(symft.SymFTError):
             symft.Circuit("NOT_A_GATE 0\n")
 
+    def test_sweep_controlled_operation_is_rejected(self):
+        with self.assertRaisesRegex(symft.SymFTError, "sweep-controlled operations are not supported"):
+            symft.Circuit("CX sweep[0] 0\n")
+
     def test_circuit_rejects_both_text_and_path(self):
         with self.assertRaises(TypeError):
             symft.Circuit("M 0\n", path="x.stim")
