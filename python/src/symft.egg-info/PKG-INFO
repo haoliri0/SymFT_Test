@@ -1,0 +1,9 @@
+Metadata-Version: 2.2
+Name: symft
+Version: 0.1.0
+Summary: Python bindings for the SymFT Clifford+T simulator
+Requires-Python: >=3.9
+Requires-Dist: numpy>=1.20
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
