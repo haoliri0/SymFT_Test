@@ -13,6 +13,13 @@ option(SYMFT_CPP_BUILD_TESTS "Build C++ SymFT tests" ON)
 option(SYMFT_CPP_ENABLE_AVX2 "Build AVX2 active kernels when the compiler supports them" ON)
 option(SYMFT_CPP_ENABLE_AVX512 "Build AVX512 active kernels when the compiler supports them" ON)
 option(SYMFT_CPP_NATIVE "Build host-vectorized kernels with -march=native" ON)
+option(SYMFT_CPP_ENABLE_CUDA "Build CUDA SymFT sampler" OFF)
+option(SYMFT_CPP_CUDA_REAL_DOUBLE "Build CUDA sampler active-state arithmetic with double precision" OFF)
+
+if(SYMFT_CPP_ENABLE_CUDA)
+    enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)
+endif()
 
 add_library(symft_cpp
     src/core/common.cpp
@@ -37,16 +44,34 @@ add_library(symft_cpp
     src/simd/batch_simd_scalar.cpp
 )
 
+if(SYMFT_CPP_ENABLE_CUDA)
+    target_sources(symft_cpp PRIVATE
+        src/cuda/cuda_program.cpp
+        src/cuda/cuda_sampler.cpp
+        src/cuda/cuda_runtime.cu
+    )
+endif()
+
 target_include_directories(symft_cpp PUBLIC src)
 target_link_libraries(symft_cpp PUBLIC Threads::Threads)
 target_compile_features(symft_cpp PUBLIC cxx_std_20)
 target_compile_options(symft_cpp PRIVATE
-    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wpedantic>
+    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:GNU,Clang,AppleClang>>:-Wall -Wextra -Wpedantic>
 )
+
+if(SYMFT_CPP_ENABLE_CUDA)
+    target_link_libraries(symft_cpp PUBLIC CUDA::cudart)
+    target_compile_definitions(symft_cpp PUBLIC SYMFT_CPP_ENABLE_CUDA=1)
+    if(SYMFT_CPP_CUDA_REAL_DOUBLE)
+        target_compile_definitions(symft_cpp PUBLIC SYMFT_CUDA_REAL_DOUBLE=1)
+    endif()
+    set_property(TARGET symft_cpp PROPERTY CUDA_STANDARD 20)
+    set_property(TARGET symft_cpp PROPERTY CUDA_STANDARD_REQUIRED ON)
+endif()
 
 if(SYMFT_CPP_NATIVE)
     target_compile_options(symft_cpp PRIVATE
-        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-march=native>
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CXX_COMPILER_ID:GNU,Clang,AppleClang>>:-march=native>
     )
     target_compile_definitions(symft_cpp PRIVATE SYMFT_CPP_NATIVE_BUILD=1)
 endif()
@@ -89,6 +114,11 @@ target_link_libraries(symft_batch_active_layout_bench PRIVATE symft_cpp)
 add_executable(symft_rate_bench tools/symft_rate_bench.cpp)
 target_link_libraries(symft_rate_bench PRIVATE symft_cpp Threads::Threads)
 
+if(SYMFT_CPP_ENABLE_CUDA)
+    add_executable(symft_cuda_rate_bench tools/symft_cuda_rate_bench.cpp)
+    target_link_libraries(symft_cuda_rate_bench PRIVATE symft_cpp)
+endif()
+
 if(SYMFT_CPP_NATIVE)
     target_compile_options(symft_active_layout_bench PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-march=native>
@@ -103,4 +133,10 @@ if(SYMFT_CPP_BUILD_TESTS)
     add_executable(symft_cpp_tests tests/symft_tests.cpp)
     target_link_libraries(symft_cpp_tests PRIVATE symft_cpp)
     add_test(NAME symft_cpp_tests COMMAND symft_cpp_tests)
+    if(SYMFT_CPP_ENABLE_CUDA)
+        add_executable(symft_cuda_tests tests/symft_cuda_tests.cpp)
+        target_link_libraries(symft_cuda_tests PRIVATE symft_cpp)
+        add_test(NAME symft_cuda_tests COMMAND symft_cuda_tests)
+        set_tests_properties(symft_cuda_tests PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+    endif()
 endif()
