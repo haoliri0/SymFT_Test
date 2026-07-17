@@ -1,0 +1,1 @@
+cuda=1;cuda_real_double=0;cuda_arch=sm_120;cuda_nvcc_flags=

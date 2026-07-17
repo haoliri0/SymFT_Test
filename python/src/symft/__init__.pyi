@@ -9,7 +9,9 @@ from ._native import (
     PackedSamples as _PackedSamples,
     SymFTError as SymFTError,
     active_batch_backend as active_batch_backend,
+    active_cuda_backend as active_cuda_backend,
     active_simd_backend as active_simd_backend,
+    cuda_enabled as cuda_enabled,
 )
 
 __version__: str

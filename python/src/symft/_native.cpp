@@ -11,6 +11,13 @@
 #include "sampler/prepared_sampler.hpp"
 #include "sampler/single_shot.hpp"
 
+#ifdef SYMFT_CPP_ENABLE_CUDA
+#include "cuda/cuda_runtime.hpp"
+#include "cuda/cuda_sampler.hpp"
+#endif
+
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -66,8 +73,22 @@ struct PyCompiledCountsSampler {
     PyObject_HEAD
     symft::PreparedCircuitSingleShotSampler* single;
     symft::PreparedCircuitBatchSampler* batch;
+#ifdef SYMFT_CPP_ENABLE_CUDA
+    symft::cuda::PreparedCircuitCudaSampler* cuda;
+#endif
     int use_batch;
+    int use_cuda;
     PyThread_type_lock lock;
+};
+
+struct PyCudaSamplingOptions {
+    bool postselect_detectors = false;
+    bool sample_exogenous_on_device = true;
+    bool gpu_presample_expressions = false;
+    bool lazy_exogenous_on_device = false;
+    bool gpu_on_demand_expressions = false;
+    int shots_per_launch = 0;
+    int threads_per_block = 0;
 };
 
 PyTypeObject CircuitType = {PyVarObject_HEAD_INIT(nullptr, 0)};
@@ -163,6 +184,85 @@ symft::CircuitSamplingOptions make_options(
     options.threads = threads;
     return options;
 }
+
+std::string normalized_cuda_mode(std::string mode) {
+    std::string out;
+    out.reserve(mode.size());
+    for (unsigned char ch : mode) {
+        out.push_back(ch == '-' ? '_' : static_cast<char>(std::tolower(ch)));
+    }
+    return out;
+}
+
+void clear_cuda_exogenous_modes(PyCudaSamplingOptions& options) {
+    options.sample_exogenous_on_device = false;
+    options.gpu_presample_expressions = false;
+    options.lazy_exogenous_on_device = false;
+    options.gpu_on_demand_expressions = false;
+}
+
+bool configure_cuda_mode(PyCudaSamplingOptions& options, const std::string& raw_mode) {
+    const std::string mode = normalized_cuda_mode(raw_mode);
+    clear_cuda_exogenous_modes(options);
+    if (mode == "gpu" || mode == "gpu_exogenous" || mode == "device" || mode == "device_exogenous") {
+        options.sample_exogenous_on_device = true;
+        return true;
+    }
+    if (mode == "cpu" || mode == "cpu_presampled" || mode == "cpu_presample_exogenous") {
+        return true;
+    }
+    if (mode == "gpu_presample_expressions" || mode == "gpu_presampled_expressions") {
+        options.gpu_presample_expressions = true;
+        return true;
+    }
+    if (mode == "gpu_on_demand" || mode == "gpu_on_demand_expressions" || mode == "on_demand") {
+        options.gpu_on_demand_expressions = true;
+        return true;
+    }
+    if (mode == "gpu_lazy" || mode == "gpu_lazy_exogenous" || mode == "lazy" || mode == "lazy_exogenous") {
+        options.lazy_exogenous_on_device = true;
+        return true;
+    }
+    PyErr_Format(
+        PyExc_ValueError,
+        "cuda_mode must be one of 'gpu', 'cpu_presampled', "
+        "'gpu_presample_expressions', 'gpu_on_demand_expressions', or 'gpu_lazy', not '%s'",
+        raw_mode.c_str());
+    return false;
+}
+
+bool make_py_cuda_options(
+    int postselect_detectors,
+    int shots_per_launch,
+    int threads_per_block,
+    PyObject* mode_object,
+    PyCudaSamplingOptions& options) {
+    options.postselect_detectors = postselect_detectors != 0;
+    options.shots_per_launch = shots_per_launch;
+    options.threads_per_block = threads_per_block;
+
+    std::string mode = "gpu";
+    if (mode_object != nullptr && mode_object != Py_None) {
+        if (!object_to_string(mode_object, mode, "cuda_mode")) {
+            return false;
+        }
+    }
+    return configure_cuda_mode(options, mode);
+}
+
+#ifdef SYMFT_CPP_ENABLE_CUDA
+symft::cuda::CudaSamplingOptions cpp_cuda_options_from_py(const PyCudaSamplingOptions& py_options) {
+    symft::cuda::CudaSamplingOptions options;
+    options.postselect_detectors = py_options.postselect_detectors;
+    options.sample_exogenous_on_device = py_options.sample_exogenous_on_device;
+    options.gpu_presample_expressions = py_options.gpu_presample_expressions;
+    options.lazy_exogenous_on_device = py_options.lazy_exogenous_on_device;
+    options.gpu_on_demand_expressions = py_options.gpu_on_demand_expressions;
+    options.shots_per_launch = py_options.shots_per_launch;
+    options.threads_per_block = py_options.threads_per_block;
+    return options;
+}
+#endif
 
 symft::FactoredInstructionProgram make_program_from_circuit(const symft::QuantumCircuit& circuit) {
     symft::CircuitSamplingOptions options;
@@ -360,7 +460,18 @@ PyObject* create_measurement_sampler(
 PyObject* create_counts_sampler(
     const symft::QuantumCircuit& circuit,
     int use_batch,
-    const symft::CircuitSamplingOptions& options) {
+    int use_cuda,
+    const symft::CircuitSamplingOptions& options,
+    const PyCudaSamplingOptions& cuda_options) {
+#ifndef SYMFT_CPP_ENABLE_CUDA
+    if (use_cuda) {
+        PyErr_SetString(
+            SymFTError,
+            "CUDA support was not compiled into symft._native; rebuild with SYMFT_PY_ENABLE_CUDA=1");
+        return nullptr;
+    }
+#endif
+
     auto* self = reinterpret_cast<PyCompiledCountsSampler*>(
         CompiledCountsSamplerType.tp_alloc(&CompiledCountsSamplerType, 0));
     if (self == nullptr) {
@@ -368,7 +479,11 @@ PyObject* create_counts_sampler(
     }
     self->single = nullptr;
     self->batch = nullptr;
+#ifdef SYMFT_CPP_ENABLE_CUDA
+    self->cuda = nullptr;
+#endif
     self->use_batch = use_batch;
+    self->use_cuda = use_cuda;
     self->lock = PyThread_allocate_lock();
     if (self->lock == nullptr) {
         Py_DECREF(reinterpret_cast<PyObject*>(self));
@@ -378,7 +493,15 @@ PyObject* create_counts_sampler(
     try {
         AllowThreads allow;
         symft::CircuitSamplingInput input = symft::make_stim_circuit_sampling_input(circuit, options);
-        if (use_batch) {
+        if (use_cuda) {
+#ifdef SYMFT_CPP_ENABLE_CUDA
+            self->cuda = new symft::cuda::PreparedCircuitCudaSampler(
+                std::move(input),
+                cpp_cuda_options_from_py(cuda_options));
+#else
+            (void)input;
+#endif
+        } else if (use_batch) {
             self->batch = new symft::PreparedCircuitBatchSampler(std::move(input), options);
         } else {
             self->single = new symft::PreparedCircuitSingleShotSampler(std::move(input), options);
@@ -497,6 +620,10 @@ PyObject* Circuit_compile_counts_sampler(PyCircuit* self, PyObject* args, PyObje
     long long sample_chunk_value = 0;
     long long threads_value = 1;
     long long threshold_value = 2;
+    int use_cuda = 0;
+    PyObject* cuda_mode_object = Py_None;
+    long long shots_per_launch_value = 0;
+    long long threads_per_block_value = 0;
     static const char* kwlist[] = {
         "batch",
         "observable",
@@ -505,11 +632,15 @@ PyObject* Circuit_compile_counts_sampler(PyCircuit* self, PyObject* args, PyObje
         "sample_chunk_shots",
         "threads",
         "batch_mask_threshold_denominator",
+        "cuda",
+        "cuda_mode",
+        "shots_per_launch",
+        "threads_per_block",
         nullptr};
     if (!PyArg_ParseTupleAndKeywords(
             args,
             kwargs,
-            "|pLpLLLL:compile_counts_sampler",
+            "|pLpLLLLpOLL:compile_counts_sampler",
             const_cast<char**>(kwlist),
             &use_batch,
             &observable_value,
@@ -517,7 +648,11 @@ PyObject* Circuit_compile_counts_sampler(PyCircuit* self, PyObject* args, PyObje
             &batch_size_value,
             &sample_chunk_value,
             &threads_value,
-            &threshold_value)) {
+            &threshold_value,
+            &use_cuda,
+            &cuda_mode_object,
+            &shots_per_launch_value,
+            &threads_per_block_value)) {
         return nullptr;
     }
 
@@ -526,11 +661,25 @@ PyObject* Circuit_compile_counts_sampler(PyCircuit* self, PyObject* args, PyObje
     int sample_chunk_shots = 0;
     int threads = 1;
     int threshold = 2;
+    int shots_per_launch = 0;
+    int threads_per_block = 0;
     if (!parse_nonnegative_int_arg(observable_value, observable, "observable") ||
         !parse_nonnegative_int_arg(batch_size_value, batch_size, "batch_size") ||
         !parse_nonnegative_int_arg(sample_chunk_value, sample_chunk_shots, "sample_chunk_shots") ||
         !parse_nonnegative_int_arg(threads_value, threads, "threads") ||
-        !parse_nonnegative_int_arg(threshold_value, threshold, "batch_mask_threshold_denominator")) {
+        !parse_nonnegative_int_arg(threshold_value, threshold, "batch_mask_threshold_denominator") ||
+        !parse_nonnegative_int_arg(shots_per_launch_value, shots_per_launch, "shots_per_launch") ||
+        !parse_nonnegative_int_arg(threads_per_block_value, threads_per_block, "threads_per_block")) {
+        return nullptr;
+    }
+
+    PyCudaSamplingOptions cuda_options;
+    if (!make_py_cuda_options(
+            postselect_detectors,
+            shots_per_launch,
+            threads_per_block,
+            cuda_mode_object,
+            cuda_options)) {
         return nullptr;
     }
 
@@ -541,7 +690,7 @@ PyObject* Circuit_compile_counts_sampler(PyCircuit* self, PyObject* args, PyObje
         batch_size,
         threshold,
         threads);
-    return create_counts_sampler(*self->circuit, use_batch, options);
+    return create_counts_sampler(*self->circuit, use_batch, use_cuda, options, cuda_options);
 }
 
 PyObject* Circuit_sample(PyCircuit* self, PyObject* args, PyObject* kwargs) {
@@ -611,6 +760,10 @@ PyObject* Circuit_sample_counts(PyCircuit* self, PyObject* args, PyObject* kwarg
     long long sample_chunk_value = 0;
     long long threads_value = 1;
     long long threshold_value = 2;
+    int use_cuda = 0;
+    PyObject* cuda_mode_object = Py_None;
+    long long shots_per_launch_value = 0;
+    long long threads_per_block_value = 0;
     static const char* kwlist[] = {
         "shots",
         "seed",
@@ -621,11 +774,15 @@ PyObject* Circuit_sample_counts(PyCircuit* self, PyObject* args, PyObject* kwarg
         "sample_chunk_shots",
         "threads",
         "batch_mask_threshold_denominator",
+        "cuda",
+        "cuda_mode",
+        "shots_per_launch",
+        "threads_per_block",
         nullptr};
     if (!PyArg_ParseTupleAndKeywords(
             args,
             kwargs,
-            "|LKpLpLLLL:sample_counts",
+            "|LKpLpLLLLpOLL:sample_counts",
             const_cast<char**>(kwlist),
             &shots_value,
             &seed,
@@ -635,7 +792,11 @@ PyObject* Circuit_sample_counts(PyCircuit* self, PyObject* args, PyObject* kwarg
             &batch_size_value,
             &sample_chunk_value,
             &threads_value,
-            &threshold_value)) {
+            &threshold_value,
+            &use_cuda,
+            &cuda_mode_object,
+            &shots_per_launch_value,
+            &threads_per_block_value)) {
         return nullptr;
     }
 
@@ -645,12 +806,26 @@ PyObject* Circuit_sample_counts(PyCircuit* self, PyObject* args, PyObject* kwarg
     int sample_chunk_shots = 0;
     int threads = 1;
     int threshold = 2;
+    int shots_per_launch = 0;
+    int threads_per_block = 0;
     if (!parse_nonnegative_int_arg(shots_value, shots, "shots") ||
         !parse_nonnegative_int_arg(observable_value, observable, "observable") ||
         !parse_nonnegative_int_arg(batch_size_value, batch_size, "batch_size") ||
         !parse_nonnegative_int_arg(sample_chunk_value, sample_chunk_shots, "sample_chunk_shots") ||
         !parse_nonnegative_int_arg(threads_value, threads, "threads") ||
-        !parse_nonnegative_int_arg(threshold_value, threshold, "batch_mask_threshold_denominator")) {
+        !parse_nonnegative_int_arg(threshold_value, threshold, "batch_mask_threshold_denominator") ||
+        !parse_nonnegative_int_arg(shots_per_launch_value, shots_per_launch, "shots_per_launch") ||
+        !parse_nonnegative_int_arg(threads_per_block_value, threads_per_block, "threads_per_block")) {
+        return nullptr;
+    }
+
+    PyCudaSamplingOptions cuda_options;
+    if (!make_py_cuda_options(
+            postselect_detectors,
+            shots_per_launch,
+            threads_per_block,
+            cuda_mode_object,
+            cuda_options)) {
         return nullptr;
     }
 
@@ -661,7 +836,7 @@ PyObject* Circuit_sample_counts(PyCircuit* self, PyObject* args, PyObject* kwarg
         batch_size,
         threshold,
         threads);
-    PyObject* sampler_object = create_counts_sampler(*self->circuit, use_batch, options);
+    PyObject* sampler_object = create_counts_sampler(*self->circuit, use_batch, use_cuda, options, cuda_options);
     if (sampler_object == nullptr) {
         return nullptr;
     }
@@ -669,7 +844,11 @@ PyObject* Circuit_sample_counts(PyCircuit* self, PyObject* args, PyObject* kwarg
     symft::CircuitSamplingRunResult result;
     try {
         AllowThreads allow;
-        if (sampler->use_batch) {
+        if (sampler->use_cuda) {
+#ifdef SYMFT_CPP_ENABLE_CUDA
+            result = sampler->cuda->sample(static_cast<std::uint64_t>(shots), seed);
+#endif
+        } else if (sampler->use_batch) {
             result = sampler->batch->sample(static_cast<std::uint64_t>(shots), seed);
         } else {
             result = sampler->single->sample(static_cast<std::uint64_t>(shots), seed);
@@ -924,21 +1103,52 @@ PyObject* CompiledMeasurementSampler_get_max_active_qubits(PyCompiledMeasurement
 void CompiledCountsSampler_dealloc(PyCompiledCountsSampler* self) {
     delete self->single;
     delete self->batch;
+#ifdef SYMFT_CPP_ENABLE_CUDA
+    delete self->cuda;
+#endif
     if (self->lock != nullptr) {
         PyThread_free_lock(self->lock);
     }
     Py_TYPE(self)->tp_free(reinterpret_cast<PyObject*>(self));
 }
 
+const symft::CircuitSamplingInfo& CompiledCountsSampler_info_ref(PyCompiledCountsSampler* self) {
+#ifdef SYMFT_CPP_ENABLE_CUDA
+    if (self->use_cuda) {
+        return self->cuda->info();
+    }
+#endif
+    return self->use_batch ? self->batch->info() : self->single->info();
+}
+
+const symft::CircuitSamplingTiming& CompiledCountsSampler_preprocessing_timing_ref(
+    PyCompiledCountsSampler* self) {
+#ifdef SYMFT_CPP_ENABLE_CUDA
+    if (self->use_cuda) {
+        return self->cuda->preprocessing_timing();
+    }
+#endif
+    return self->use_batch
+               ? self->batch->preprocessing_timing()
+               : self->single->preprocessing_timing();
+}
+
+const char* CompiledCountsSampler_backend_name(PyCompiledCountsSampler* self) {
+    if (self->use_cuda) {
+        return "cuda";
+    }
+    return self->use_batch ? "batch" : "single";
+}
+
 PyObject* CompiledCountsSampler_repr(PyCompiledCountsSampler* self) {
-    const auto& info = self->use_batch ? self->batch->info() : self->single->info();
+    const auto& info = CompiledCountsSampler_info_ref(self);
     return PyUnicode_FromFormat(
-        "<symft.CompiledCountsSampler qubits=%d measurements=%d detectors=%d max_active_qubits=%d batch=%s>",
+        "<symft.CompiledCountsSampler qubits=%d measurements=%d detectors=%d max_active_qubits=%d backend=%s>",
         info.n,
         info.records,
         info.detectors,
         info.max_k,
-        self->use_batch ? "True" : "False");
+        CompiledCountsSampler_backend_name(self));
 }
 
 PyObject* CompiledCountsSampler_sample(PyCompiledCountsSampler* self, PyObject* args, PyObject* kwargs) {
@@ -972,7 +1182,13 @@ PyObject* CompiledCountsSampler_sample(PyCompiledCountsSampler* self, PyObject* 
     symft::CircuitSamplingRunResult result;
     try {
         AllowThreadsWithLock allow(self->lock);
-        if (self->use_batch) {
+        if (self->use_cuda) {
+#ifdef SYMFT_CPP_ENABLE_CUDA
+            result = has_stream_id
+                         ? self->cuda->sample(static_cast<std::uint64_t>(shots), stream_id)
+                         : self->cuda->sample(static_cast<std::uint64_t>(shots));
+#endif
+        } else if (self->use_batch) {
             result = has_stream_id
                          ? self->batch->sample(static_cast<std::uint64_t>(shots), stream_id)
                          : self->batch->sample(static_cast<std::uint64_t>(shots));
@@ -988,14 +1204,19 @@ PyObject* CompiledCountsSampler_sample(PyCompiledCountsSampler* self, PyObject* 
 }
 
 PyObject* CompiledCountsSampler_get_info(PyCompiledCountsSampler* self, void*) {
-    return info_to_dict(self->use_batch ? self->batch->info() : self->single->info());
+    PyObject* dict = info_to_dict(CompiledCountsSampler_info_ref(self));
+    if (dict == nullptr) {
+        return nullptr;
+    }
+    if (!dict_set_owned(dict, "backend", PyUnicode_FromString(CompiledCountsSampler_backend_name(self)))) {
+        Py_DECREF(dict);
+        return nullptr;
+    }
+    return dict;
 }
 
 PyObject* CompiledCountsSampler_get_preprocessing_timing(PyCompiledCountsSampler* self, void*) {
-    return timing_to_dict(
-        self->use_batch
-            ? self->batch->preprocessing_timing()
-            : self->single->preprocessing_timing());
+    return timing_to_dict(CompiledCountsSampler_preprocessing_timing_ref(self));
 }
 
 PyObject* module_active_simd_backend(PyObject*, PyObject*) {
@@ -1012,6 +1233,26 @@ PyObject* module_active_batch_backend(PyObject*, PyObject*) {
     } catch (...) {
         return set_cpp_exception_null();
     }
+}
+
+PyObject* module_cuda_enabled(PyObject*, PyObject*) {
+#ifdef SYMFT_CPP_ENABLE_CUDA
+    Py_RETURN_TRUE;
+#else
+    Py_RETURN_FALSE;
+#endif
+}
+
+PyObject* module_active_cuda_backend(PyObject*, PyObject*) {
+#ifdef SYMFT_CPP_ENABLE_CUDA
+    try {
+        return PyUnicode_FromString(symft::cuda::cuda_sampler_backend_name());
+    } catch (...) {
+        return set_cpp_exception_null();
+    }
+#else
+    return PyUnicode_FromString("unavailable");
+#endif
 }
 
 PyMethodDef Circuit_methods[] = {
@@ -1031,11 +1272,13 @@ PyMethodDef Circuit_methods[] = {
         METH_VARARGS | METH_KEYWORDS,
         "compile_counts_sampler($self, /, batch=True, observable=0, "
         "postselect_detectors=False, batch_size=0, sample_chunk_shots=0, "
-        "threads=1, batch_mask_threshold_denominator=2)\n"
+        "threads=1, batch_mask_threshold_denominator=2, cuda=False, "
+        "cuda_mode='gpu', shots_per_launch=0, threads_per_block=0)\n"
         "--\n\n"
         "Compile a reusable detector/logical-error counts sampler.\n\n"
-        "Use stream_id when sampling the result to select a reproducible "
-        "random stream.",
+        "Set cuda=True to use the CUDA counts backend when this extension was "
+        "built with CUDA support. Use stream_id when sampling the result to "
+        "select a reproducible random stream.",
     },
     {
         "sample",
@@ -1054,11 +1297,13 @@ PyMethodDef Circuit_methods[] = {
         METH_VARARGS | METH_KEYWORDS,
         "sample_counts($self, /, shots=1, seed=1, batch=True, observable=0, "
         "postselect_detectors=False, batch_size=0, sample_chunk_shots=0, "
-        "threads=1, batch_mask_threshold_denominator=2)\n"
+        "threads=1, batch_mask_threshold_denominator=2, cuda=False, "
+        "cuda_mode='gpu', shots_per_launch=0, threads_per_block=0)\n"
         "--\n\n"
         "Sample detector and logical-observable summary counts.\n\n"
-        "Returns a dict containing shots, discarded, accepted, logical_errors, "
-        "rates, active_threads, and timing.",
+        "Set cuda=True to use the CUDA counts backend when available. Returns "
+        "a dict containing shots, discarded, accepted, logical_errors, rates, "
+        "active_threads, and timing.",
     },
     {
         "sample_detectors",
@@ -1192,6 +1437,18 @@ PyMethodDef module_methods[] = {
         reinterpret_cast<PyCFunction>(module_active_batch_backend),
         METH_NOARGS,
         "Return the batch active-vector backend selected by the C++ runtime.",
+    },
+    {
+        "cuda_enabled",
+        reinterpret_cast<PyCFunction>(module_cuda_enabled),
+        METH_NOARGS,
+        "Return whether this extension was built with CUDA sampler support.",
+    },
+    {
+        "active_cuda_backend",
+        reinterpret_cast<PyCFunction>(module_active_cuda_backend),
+        METH_NOARGS,
+        "Return the CUDA sampler backend name, or 'unavailable' when CUDA support is not built.",
     },
     {nullptr, nullptr, 0, nullptr},
 };

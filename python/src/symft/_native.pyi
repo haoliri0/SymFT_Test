@@ -52,6 +52,7 @@ class CountsSamplerInfo(TypedDict):
     threads: int
     detector_postselection: bool
     batch_mask_threshold_denominator: int
+    backend: str
 
 
 class SymFTError(RuntimeError): ...
@@ -92,6 +93,10 @@ class Circuit:
         sample_chunk_shots: int = ...,
         threads: int = ...,
         batch_mask_threshold_denominator: int = ...,
+        cuda: bool = ...,
+        cuda_mode: str = ...,
+        shots_per_launch: int = ...,
+        threads_per_block: int = ...,
     ) -> CompiledCountsSampler: ...
     def sample(
         self,
@@ -113,6 +118,10 @@ class Circuit:
         sample_chunk_shots: int = ...,
         threads: int = ...,
         batch_mask_threshold_denominator: int = ...,
+        cuda: bool = ...,
+        cuda_mode: str = ...,
+        shots_per_launch: int = ...,
+        threads_per_block: int = ...,
     ) -> CountsResult: ...
     def sample_detectors(
         self,
@@ -155,3 +164,5 @@ class CompiledCountsSampler:
 
 def active_simd_backend() -> str: ...
 def active_batch_backend() -> str: ...
+def cuda_enabled() -> bool: ...
+def active_cuda_backend() -> str: ...

@@ -85,6 +85,7 @@ class CountsSamplingTest(unittest.TestCase):
         self.assertEqual(sampler.info["batch_size"], 2)
         self.assertEqual(sampler.info["sample_chunk_shots"], 4)
         self.assertEqual(sampler.info["threads"], 1)
+        self.assertEqual(sampler.info["backend"], "batch")
         self.assertIn("sample_s", sampler.preprocessing_timing)
 
     def test_stream_id_reproducibility(self):
@@ -119,6 +120,13 @@ class CountsSamplingTest(unittest.TestCase):
 
         self.assertEqual(results[0]["discarded"], results[1]["discarded"])
         self.assertEqual(results[0]["logical_errors"], results[1]["logical_errors"])
+
+    def test_invalid_cuda_mode_is_rejected(self):
+        circuit = symft.Circuit("M 0\n")
+
+        with self.assertRaisesRegex(ValueError, "cuda_mode"):
+            circuit.compile_counts_sampler(cuda_mode="unknown")
+
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ simulator for sampling noisy Stim-style Clifford+T circuits. It supports:
   materializing large per-shot result arrays;
 - compiling and reusing samplers, with batching and multithreaded counts
   sampling;
+- optionally using the C++ CUDA counts sampler when built with CUDA support;
 - returning either regular boolean NumPy arrays or bit-packed arrays.
 
 Package version `0.1.0` requires Python 3.9+, NumPy 1.20+, and a C++20-capable
@@ -60,7 +61,21 @@ python setup.py build_ext --inplace
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
-Check the installation and SIMD backends:
+CUDA support is opt-in so CPU-only environments keep building normally. To build
+the CUDA counts backend, install a CUDA toolkit with `nvcc` available and run:
+
+```bash
+SYMFT_PY_ENABLE_CUDA=1 python setup.py build_ext --inplace
+```
+
+`CUDA_HOME` or `CUDA_PATH` may be set explicitly when `nvcc` is not on `PATH`.
+Set `SYMFT_PY_CUDA_REAL_DOUBLE=1` as well to compile CUDA active-state arithmetic
+in double precision. If the CUDA toolkit is newer than the installed driver, set
+`SYMFT_PY_CUDA_ARCH`, for example `SYMFT_PY_CUDA_ARCH=sm_120`, so NVCC emits
+device-specific code instead of relying on PTX JIT. Extra NVCC flags can be
+passed with `SYMFT_PY_CUDA_NVCC_FLAGS`.
+
+Check the installation and backends:
 
 ```python
 import symft
@@ -68,10 +83,14 @@ import symft
 print(symft.__version__)
 print(symft.active_simd_backend())
 print(symft.active_batch_backend())
+print(symft.cuda_enabled())
+print(symft.active_cuda_backend())
 ```
 
 Backend names depend on the compilation target and runtime machine. Application
-logic should not depend on a particular backend name.
+logic should not depend on a particular backend name. `cuda_enabled()` reports
+whether the extension was compiled with CUDA support; it does not guarantee that
+a runtime CUDA device is present.
 
 ## Quick Start
 
@@ -265,6 +284,10 @@ circuit.sample_counts(
     sample_chunk_shots=0,
     threads=1,
     batch_mask_threshold_denominator=2,
+    cuda=False,
+    cuda_mode="gpu",
+    shots_per_launch=0,
+    threads_per_block=0,
 )
 ```
 
@@ -288,6 +311,22 @@ Returned dictionary:
 
 When a denominator is 0, the corresponding rate is `nan`.
 `accepted + discarded == shots` always holds.
+
+### CUDA Counts Backend
+
+When the extension is built with `SYMFT_PY_ENABLE_CUDA=1`, counts sampling can use
+the C++ CUDA sampler:
+
+```python
+result = circuit.sample_counts(shots=1_000_000, cuda=True)
+sampler = circuit.compile_counts_sampler(cuda=True, cuda_mode="gpu")
+```
+
+`cuda_mode` selects how exogenous noise and expression bits are prepared:
+`"gpu"` (default), `"cpu_presampled"`, `"gpu_presample_expressions"`,
+`"gpu_on_demand_expressions"`, or `"gpu_lazy"`. `shots_per_launch=0` and
+`threads_per_block=0` use the CUDA backend defaults. If CUDA support was not
+compiled in, `cuda=True` raises `SymFTError`.
 
 ```python
 import math
@@ -362,7 +401,8 @@ normalized configuration:
 - `num_observable_includes`, `observable`;
 - `max_active_qubits`;
 - final `batch_size`, `sample_chunk_shots`, and `threads`;
-- `detector_postselection` and `batch_mask_threshold_denominator`.
+- `detector_postselection` and `batch_mask_threshold_denominator`;
+- `backend`, one of `"single"`, `"batch"`, or `"cuda"`.
 
 The same `CompiledCountsSampler` can be called from multiple Python threads.
 The wrapper serializes these calls to protect mutable internal runtime state.
@@ -474,6 +514,8 @@ symft.read_stim_file(path) -> Circuit
 symft.sample(circuit, shots=1, **kwargs) -> numpy.ndarray
 symft.active_simd_backend() -> str
 symft.active_batch_backend() -> str
+symft.cuda_enabled() -> bool
+symft.active_cuda_backend() -> str
 ```
 
 ### `Circuit`
@@ -493,6 +535,10 @@ Circuit.compile_counts_sampler(
     sample_chunk_shots=0,
     threads=1,
     batch_mask_threshold_denominator=2,
+    cuda=False,
+    cuda_mode="gpu",
+    shots_per_launch=0,
+    threads_per_block=0,
 ) -> CompiledCountsSampler
 
 Circuit.sample(
@@ -514,6 +560,10 @@ Circuit.sample_counts(
     sample_chunk_shots=0,
     threads=1,
     batch_mask_threshold_denominator=2,
+    cuda=False,
+    cuda_mode="gpu",
+    shots_per_launch=0,
+    threads_per_block=0,
 ) -> dict
 
 Circuit.sample_detectors(
