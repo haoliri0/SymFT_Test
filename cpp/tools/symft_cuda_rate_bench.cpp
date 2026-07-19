@@ -14,7 +14,7 @@
 namespace {
 
 struct Options {
-    std::string path = "d5.stim";
+    std::string path = "benchmarks/d5.stim";
     std::uint64_t shots = 1000000ULL;
     int repeats = 1;
     int observable = 0;
@@ -69,7 +69,7 @@ std::string require_value(const std::string& option, const std::string& inline_v
 
 void print_usage(const char* argv0) {
     std::cerr
-        << "usage: " << argv0 << " --circuit d5.stim --shots 1000000 [options]\n"
+        << "usage: " << argv0 << " --circuit benchmarks/d5.stim --shots 1000000 [options]\n"
         << "  --postselect-detectors / --no-postselect-detectors\n"
         << "  --shots-per-launch N\n"
         << "  --threads-per-block N\n"

@@ -238,7 +238,7 @@ int main(int argc, char** argv) {
 
         std::vector<std::string> fixtures;
         if (fixture_arg == "all") {
-            fixtures = {"d3.stim", "d5.stim"};
+            fixtures = {"benchmarks/d3.stim", "benchmarks/d5.stim"};
         } else {
             fixtures = {fixture_arg};
         }

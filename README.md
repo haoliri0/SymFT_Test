@@ -1,256 +1,359 @@
-# SymFT.jl
+# SymFT
 
-SymFT is a correctness-first, frame-factored Clifford+T sampler for noisy
-Stim-style circuits with Pauli measurements, Pauli noise, `T`/`T_DAG` gates,
-detectors, observables, and measurement-record-controlled Pauli feedback.
+SymFT is a high-throughput simulator for noisy, Clifford-dominated
+fault-tolerant quantum circuits containing non-Clifford Pauli rotations. It
+supports mid-circuit Pauli measurements, stochastic Pauli noise,
+measurement-record-controlled Pauli feedback, detectors, observables, and
+postselection through a Stim-style circuit frontend.
 
-The production samplers never allocate a full physical `2^n` state vector.
-The only dense quantum vector is the active subsystem vector `alpha` of length
-`2^k`, where `k` is the number of active virtual qubits needed by the current
-factored update plan.
+The simulator is implemented in C++20 and exposed through a typed Python
+extension. It compiles each circuit once into a compact sampling program and
+then reuses that program across shots. The only dense quantum state allocated
+for a shot is an active vector of size $2^k$, where $k$ is the number of
+active non-stabilizer coordinates—not the number of physical qubits.
 
-## State Model
+- [Paper: *SymFT: Universal Fault-Tolerant Quantum Circuit Simulation via
+  Stabilizer Coordinates and Symbolic Clifford–Pauli Frames*](main.pdf)
+- [Detailed Python interface documentation](python/README.md)
 
-The simulator maintains the state up to shot-global phase in factored form:
+## How SymFT works
+
+SymFT combines symbolic Clifford–Pauli frame factorization with adaptive
+stabilizer-coordinate planning.
+
+### 1. Symbolic frame factorization
+
+For a fixed stochastic-noise assignment $s$ and measurement record $m$, the
+branch operator is factorized, up to global phase, as
+
+$$
+K(s,m) \doteq C\,E(s,m)\,O(s,m).
+$$
+
+Here $C$ is a concrete Clifford frame, $E(s,m)$ is a symbolic Pauli frame,
+and $O(s,m)$ is the ordered sequence of Pauli rotations and measurement
+projectors pulled back through those frames. Because $C E(s,m)$ is unitary,
+the branch probability depends only on the pulled-back program:
+
+$$
+\Pr(m\mid s)=\lVert O(s,m)\lvert 0^n\rangle\rVert^2.
+$$
+
+Clifford gates, Pauli noise, and Pauli feedback therefore do not have to be
+replayed for every shot. Their remaining effects are encoded as symbolic signs
+on the pulled-back rotations and measurements.
+
+### 2. Adaptive stabilizer coordinates
+
+A one-time planner tracks a stabilizer–destabilizer tableau that defines a
+shared virtual basis. The first $k$ generator pairs are active coordinates,
+and a dense coefficient vector represents the state in that active subspace:
+
+$$
+\lvert\psi\rangle =
+\sum_{x\in\mathbb{F}_2^k}\alpha_x
+\overline{X}_1^{x_1}\cdots\overline{X}_k^{x_k}\lvert\overline{0}\rangle.
+$$
+
+Dormant effects are absorbed into tableau updates and symbolic corrections.
+Active effects become specialized diagonal or paired-amplitude instructions.
+Multi-coordinate Pauli operations are executed directly; SymFT does not add a
+runtime Clifford-localization pass over the dense vector.
+
+### 3. Compile once, sample many times
+
+The sampler executes only the emitted instruction stream. It samples
+independent symbols, evaluates causal parity expressions, updates the active
+vector, projects active measurements, records measurement outcomes, and
+accumulates detector and observable parities. It does not reconstruct the
+planning tableau or traverse the original circuit.
+
+The method avoids a full $2^n$ physical state vector, but its worst-case cost
+is still exponential in the peak active width $k_{\max}$. CPU active-state
+arithmetic uses double precision.
+
+## Supported circuit model
+
+The frontend accepts a substantial Stim-style subset:
+
+- Clifford gates, including single-qubit axis variants, controlled Pauli
+  gates, `SWAP`, `ISWAP`, and `SQRT_XX`/`SQRT_YY`/`SQRT_ZZ` variants;
+- non-Clifford gates and rotations including `T`, `T_DAG`, `R_X`/`R_Y`/`R_Z`,
+  `R_XX`/`R_YY`/`R_ZZ`, `R_PAULI`, `U`/`U3`, and `SPP`/`SPP_DAG`;
+- `M`/`MX`/`MY`, reset and measure-reset operations, `MPP`,
+  `MXX`/`MYY`/`MZZ`, inverted measurement targets, and `MPAD`;
+- `X_ERROR`/`Y_ERROR`/`Z_ERROR`, depolarizing and Pauli channels up to three
+  qubits, correlated-error chains, heralded erasure, and heralded Pauli noise;
+- measurement-record-controlled Pauli feedback;
+- `REPEAT`, coordinates, `DETECTOR`, and `OBSERVABLE_INCLUDE`.
+
+This is not a drop-in parser for the complete Stim language. In particular,
+sweep-controlled operations are rejected. Unsupported instructions or invalid
+target and parameter combinations raise an error with source-line context.
+
+## Python installation
+
+Requirements:
+
+- Python 3.9 or newer;
+- NumPy 1.20 or newer;
+- a C++20 compiler.
+
+From the repository root:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ./python
+```
+
+The Python build compiles the C++ sources directly; CMake is not required for
+the extension.
+
+## Python quick start
+
+Construct a circuit from text and return per-shot measurement records:
+
+```python
+import symft
+
+circuit = symft.Circuit("""
+H 0
+T 0
+M 0
+OBSERVABLE_INCLUDE(0) rec[-1]
+""")
+
+samples = circuit.sample(shots=1_000, seed=123, batch=True)
+print(samples.shape)  # (1000, 1)
+print(samples.dtype)  # bool
+```
+
+Load a `.stim` file:
+
+```python
+circuit = symft.Circuit(path="benchmarks/d3.stim")
+# Equivalent:
+circuit = symft.read_stim_file("benchmarks/d3.stim")
+```
+
+Compile a reusable sampler when the same circuit will be sampled repeatedly:
+
+```python
+sampler = circuit.compile_sampler(batch=True)
+
+first = sampler.sample(shots=10_000, seed=1)
+second = sampler.sample(shots=10_000, seed=2)
+
+print(sampler.max_active_qubits)
+```
+
+`sample` returns a two-dimensional `numpy.bool_` array with shape
+`(shots, num_measurements)`. With `bit_packed=True`, it instead returns
+`numpy.uint8` with shape `(shots, ceil(num_measurements / 8))`; record zero is
+the least-significant bit of byte zero.
+
+## Detectors and logical-error counts
+
+Use `sample_detectors` when every detector bit is needed:
+
+```python
+detectors = circuit.sample_detectors(shots=1_000, seed=1)
+print(detectors.shape)  # (1000, circuit.num_detectors)
+```
+
+Use `sample_counts` for high-throughput aggregation without materializing all
+per-shot records:
+
+```python
+result = circuit.sample_counts(
+    shots=1_000_000,
+    seed=1,
+    observable=0,
+    batch=True,
+    threads=4,
+    postselect_detectors=True,
+)
+
+print(result["discard_rate"])
+print(result["logical_error_rate"])
+print(result["active_threads"])
+print(result["timing"])
+```
+
+A shot is discarded if any detector fires. The selected
+`OBSERVABLE_INCLUDE` records are combined by parity, and an accepted shot with
+observable parity one is counted as a logical error. Consequently,
+`accepted + discarded == shots`, `discard_rate == discarded / shots`, and
+`logical_error_rate == logical_errors / accepted`. A rate is `nan` when its
+denominator is zero.
+
+For repeated counts jobs, reuse the prepared program and worker storage:
+
+```python
+sampler = circuit.compile_counts_sampler(
+    batch=True,
+    observable=0,
+    postselect_detectors=True,
+    threads=4,
+)
+
+run_a = sampler.sample(shots=1_000_000, stream_id=10)
+run_b = sampler.sample(shots=1_000_000, stream_id=11)
+print(sampler.info)
+```
+
+An explicit `seed` or `stream_id` makes a given execution path reproducible.
+Single-shot and batch paths use different random-number partitioning, so they
+should be compared statistically rather than expected to produce identical
+bit streams.
+
+The complete API, metadata schema, batching controls, error behavior, and type
+signatures are documented in the [Python interface guide](python/README.md).
+The installed package also includes `py.typed` and `.pyi` files.
+
+## Execution backends
+
+The C++ implementation provides:
+
+- a single-shot CPU sampler;
+- a batch CPU sampler with packed symbol, measurement, and detector columns;
+- multithreaded chunk execution for batch counts;
+- exact early detector postselection and live-shot compaction;
+- scalar kernels and CMake-built AVX2/AVX-512 kernels with runtime dispatch;
+- an optional CUDA counts backend.
+
+The batch sampler stores each shot's active vector contiguously:
+`active_re[shot * active_stride + basis]` and the corresponding imaginary
+array. The automatic batch size is limited by the prepared program's peak
+active width to control the dense-vector cache footprint.
+
+Inspect the active backends from Python:
+
+```python
+print(symft.active_simd_backend())
+print(symft.active_batch_backend())
+print(symft.cuda_enabled())
+print(symft.active_cuda_backend())
+```
+
+Backend names depend on the build and host. `cuda_enabled()` reports whether
+CUDA support was compiled into the extension; it does not guarantee that a
+compatible device is available at runtime.
+
+### Optional CUDA Python build
+
+With a CUDA toolkit and `nvcc` available:
+
+```bash
+SYMFT_PY_ENABLE_CUDA=1 python -m pip install -e ./python
+```
+
+Then select the CUDA counts sampler with `cuda=True`:
+
+```python
+result = circuit.sample_counts(shots=1_000_000, cuda=True)
+sampler = circuit.compile_counts_sampler(cuda=True)
+```
+
+Set `CUDA_HOME` or `CUDA_PATH` when the toolkit is not discoverable. Optional
+build controls include `SYMFT_PY_CUDA_ARCH`, `SYMFT_PY_CUDA_NVCC_FLAGS`, and
+`SYMFT_PY_CUDA_REAL_DOUBLE=1`. See the
+[Python interface guide](python/README.md#cuda-counts-backend) for CUDA
+execution modes.
+
+## C++ build
+
+CMake 3.20 or newer and a C++20 compiler are required:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DSYMFT_CPP_BUILD_TESTS=ON
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+Run the simple circuit summary tool:
+
+```bash
+./build/cpp/symft_cli benchmarks/d3.stim 1000
+```
+
+Run the configurable single-shot/batch rate harness:
+
+```bash
+./build/cpp/symft_rate_bench \
+  --sampler both \
+  --circuit benchmarks/d3.stim \
+  --shots 1000000 \
+  --batch-size auto \
+  --threads 1
+```
+
+The library target is `symft_cpp`, and its public source-tree headers are under
+`cpp/src`. The prepared counts API can be used directly:
+
+```cpp
+#include "frontend/stim_prepared_sampler.hpp"
+
+#include <cstdint>
+#include <iostream>
+
+int main() {
+    symft::CircuitSamplingOptions options;
+    options.observable = 0;
+    options.threads = 4;
+    options.postselect_detectors = true;
+
+    auto sampler =
+        symft::prepare_batch_sampler_from_stim_file(
+            "benchmarks/d3.stim", options);
+    auto run = sampler.sample(1'000'000, std::uint64_t{1});
+
+    std::cout << run.counts.discarded << '\n';
+    std::cout << run.counts.logical_errors << '\n';
+}
+```
+
+Enable the C++ CUDA target with:
+
+```bash
+cmake -S . -B build-cuda \
+  -DSYMFT_CPP_ENABLE_CUDA=ON \
+  -DSYMFT_CPP_CUDA_REAL_DOUBLE=OFF
+cmake --build build-cuda -j
+```
+
+## Development
+
+Run the C++ tests:
+
+```bash
+cmake -S . -B build -DSYMFT_CPP_BUILD_TESTS=ON
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+Run the Python tests:
+
+```bash
+cd python
+python setup.py build_ext --inplace
+PYTHONPATH=src python -m unittest discover -s tests -v
+```
+
+Repository layout:
 
 ```text
-|psi> ~= C ( E_A(s) |alpha>_A tensor |0>_D )
-```
-
-where:
-
-- `C` is the concrete Clifford frame.
-- `A` is the active virtual subsystem, represented by the dense vector
-  `alpha`.
-- `D` is the dormant subsystem, always in zeros.
-- `E_A(s)` is the symbolic Pauli frame on all qubits.
-
-Stim qubits are parsed as 0-based qubits. Julia arrays are still 1-based, so
-code that indexes arrays by qubit uses `q + 1` explicitly.
-
-## Method Highlight
-
-Pauli rotations and Pauli measurements are not handled by applying dense
-Clifford basis changes to the active vector. SymFT separates planning from
-sampling:
-
-- During parsing, `T`, `T_DAG`, Pauli measurements, Pauli noise, and feedback
-  become pending factored Pauli operations after conjugation through the current
-  concrete Clifford and symbolic Pauli frames.
-- During pending processing, the planner tracks the stabilizer-coordinate basis
-  of the active subsystem. When a reduction step changes that coordinate basis,
-  it rewrites the current and queued pending Paulis into the new coordinates.
-  The dense active vector `alpha` is not updated by those coordinate rewrites.
-- Active Pauli rotations emit precomputed pair-update instructions. Sampling
-  applies the exact in-place amplitude pair update for `exp(-im * theta * P)`,
-  with shot-dependent symbolic signs supplied by packed condition values.
-- Active Pauli measurements emit precomputed probability/projection kernels.
-  Sampling computes the branch probability from `alpha`, samples the branch,
-  projects and renormalizes `alpha`, and writes the measurement record. The
-  post-measurement stabilizer-coordinate update was already accounted for in
-  pending processing.
-- Batch active storage is shot-major in the performance-critical sense: the
-  logical shape is `shots x active_dim`, and Julia's column-major layout makes
-  the shot dimension contiguous for each active basis column. Batch rotation
-  and measurement kernels exploit this by SIMD/vectorizing across many shots
-  for the same active basis index or amplitude pair.
-- The C AVX2 kernels follow the same Julia memory layout. Although C arrays are
-  normally described in row-major terms, these kernels are passed the raw Julia
-  column-major buffer and index it with an explicit `leading_shots` stride. In
-  C pointer-order terms the layout is `active[basis][shot]`: `shot` is the
-  contiguous inner dimension, and `basis` advances by `leading_shots`.
-- Dormant non-diagonal support is handled by symbolic branch introduction,
-  dormant promotion, and sign pushback through the pending FIFO.
-
-In particular, there is no active Clifford localization runtime path for Pauli
-rotations or measurements, and these runtime updates do not rely on applying a
-Pauli operator to `alpha` as an intermediate state.
-
-## Workflow
-
-0. Initialise the package:
-
-```bash
-julia --project=. -e "using Pkg; Pkg.instantiate()"
-```
-
-In Julia, load the package first:
-
-```julia
-using SymFT
-```
-
-1. Parse the circuit.
-
-   ```julia
-   parsed = parse_stim_file("d5.stim")
-   ```
-
-   The parser builds a `FrameFactoredState`. Clifford operations update the
-   concrete frame. Noise, feedback, T gates, T_DAG gates, and Pauli
-   measurements become symbolic pending operations in the factored frame.
-
-2. Build the pending planner state.
-
-   ```julia
-   pending = PendingFactoredState(stim_state(parsed))
-   ```
-
-   Pending processing starts from the parsed frame state and drains a FIFO of
-   factored Pauli rotations and measurements.
-
-3. Lower pending operations.
-
-   ```julia
-   program = plan_factored_updates!(pending)
-   ```
-
-   The planner tracks the active stabilizer basis while it processes pending
-   operations. It rewrites pending Paulis into the current active basis and
-   emits a compact `FactoredInstructionProgram`. Runtime instructions only do
-   amplitude rotations, projections, symbolic branch assignments, and
-   measurement record writes.
-
-4. Sample the instruction program.
-
-   Single shot:
-
-   ```julia
-   record = sample_measurements(program)
-   ```
-
-   Standard batch:
-
-   ```julia
-   records = sample_measurements(program, 100_000; kernel_backend = :structarray)
-   ```
-
-   Shared-active batch:
-
-   ```julia
-   records = sample_measurements_shared_active(program, 100_000)
-   ```
-
-   Batch outputs are `shots x nrecords` `BitMatrix` values.
-
-5. Stream detector and observable statistics.
-
-   ```julia
-   summary = estimate_stim_logical_error_rate(parsed, 100_000)
-   discard_rate(summary)
-   logical_error_rate(summary)
-   ```
-
-   Detector postselection and observable parity are accumulated from packed
-   batch measurement records without materializing unnecessary per-shot data.
-
-## Samplers
-
-`FactoredExecutorState` executes one shot at a time. It is useful for exact
-debugging, deterministic RNG tests, and comparing against batch behavior.
-
-`BatchFactoredExecutorState` executes blocks of shots. Symbol assignments and
-measurement records are packed across shots. The active vectors are independent
-per shot.
-
-`SharedActiveBatchExecutorState` keeps identical active states in packets. It
-updates one active vector per packet until signs or measurement branches split
-the packet. If packets saturate the batch, it materializes into the standard
-batch representation.
-
-## Batch Kernel Backends
-
-The batch sampler supports three active-vector kernel backends:
-
-- `:structarray` or `:turbo`: stores real and imaginary parts separately using
-  `StructArray` and uses LoopVectorization kernels.
-- `:c` or `:avx2`: stores interleaved `ComplexF64` matrices and uses the C
-  AVX2 kernels when available.
-- `:scalar`: uses the generic Julia fallback kernels.
-
-The default backend is `:structarray`. It can be overridden with the
-`kernel_backend` keyword or with `SYMFT_BATCH_KERNEL_BACKEND`.
-
-Default batch size is chosen from the maximum active width:
-
-```text
-min(2048, 2^17 / 2^max_k)
-```
-
-This keeps the active memory footprint bounded while allowing large batches
-when the active subsystem is small.
-
-## Exactness Notes
-
-- `T` and `T_DAG` are handled exactly as Pauli rotations in the factored frame.
-- Measurements sample the correct active branch probabilities and project the
-  active vector in place or through runtime projection buffers as required.
-- Symbolic exogenous noise can be sampled per shot or presampled into packed
-  word tables.
-- Detector and observable processing uses the emitted measurement records.
-
-Approximate behavior should only be introduced behind an explicitly named
-approximate mode.
-
-## Useful Commands
-
-Run the test suite:
-
-```bash
-julia --project=. test/runtests.jl
-```
-
-Build and test the C++ port:
-
-```bash
-cmake -S . -B build/cpp -DSYMFT_CPP_BUILD_TESTS=ON
-cmake --build build/cpp -j
-ctest --test-dir build/cpp --output-on-failure
-```
-
-Run the C++ CLI on a Stim fixture:
-
-```bash
-./build/cpp/cpp/symft_cli d3.stim 1000
-```
-
-Benchmark d3 logical error and discard rates with the unified C++ rate bench
-and streaming presampled exogenous symbols:
-
-```bash
-./build/cpp/cpp/symft_rate_bench d3.stim 100000000
-./build/cpp/cpp/symft_rate_bench --sampler both --circuit d3.stim --shots 1000000 --batch-size auto --threads 1
-./build/cpp/cpp/symft_rate_bench --sampler single --circuit d3.stim --shots 1000000 --postselect-detectors
-```
-
-The C++ batch active layout stores real and imaginary arrays as
-`active[basis][shot]`, so shots are contiguous in memory for each active basis
-column.
-
-Benchmark the C++ batch sampler:
-
-```bash
-./build/cpp/cpp/symft_batch_bench 10000 auto 1
-```
-
-The C++ build compiles scalar kernels by default and, when the compiler
-supports the flags, target-specific AVX2 and AVX512 translation units. Runtime
-dispatch selects only SIMD instruction sets reported by the current CPU.
-
-Benchmark the standard batch sampler:
-
-```bash
-julia --project=. benchmarks/bench_batched_stim_sampling.jl 100000 auto 3 structarray
-```
-
-Profile the batch sampler:
-
-```bash
-julia --project=. benchmarks/profile_batched_stim_sampling.jl d5.stim 100000 auto true structarray
-```
-
-Benchmark the shared-active sampler:
-
-```bash
-julia --project=. benchmarks/bench_shared_active_batch_sampler.jl d5.stim 100000 auto structarray
+cpp/src/core/       Pauli algebra, symbolic expressions, and frames
+cpp/src/circuit/    Circuit IR and lowering
+cpp/src/factored/   Stabilizer-coordinate state and planner
+cpp/src/sampler/    Single-shot, batch, and prepared samplers
+cpp/src/frontend/   Stim-style parser and sampling frontend
+cpp/src/simd/       Scalar and CPU SIMD kernels
+cpp/src/cuda/       Optional CUDA sampler
+python/src/symft/   Native Python binding, type hints, and package API
+benchmarks/         Stim fixtures and benchmark inputs
+cpp/tests/          C++ correctness tests
+python/tests/       Python interface tests
 ```

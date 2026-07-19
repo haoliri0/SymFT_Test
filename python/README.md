@@ -147,7 +147,7 @@ directly:
 from pathlib import Path
 import symft
 
-path = Path("circuits/d5.stim")
+path = Path("benchmarks/d5.stim")
 circuit = symft.Circuit(path=path)
 
 # Equivalent convenience function
