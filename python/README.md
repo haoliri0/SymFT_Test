@@ -1,7 +1,12 @@
 # SymFT Python Interface
 
-The SymFT Python interface is a native extension wrapper around the C++ SymFT
-simulator for sampling noisy Stim-style Clifford+T circuits. It supports:
+The SymFT Python interface exposes the C++ implementation of the exact
+simulator described in the
+[draft paper](../main.pdf), *SymFT: Universal Fault-Tolerant Quantum Circuit
+Simulation via Symbolic Clifford–Pauli Frames and Stabilizer Coordinates*.
+It compiles noisy adaptive Clifford-plus-Pauli-rotation circuits into the
+paper's planned sampling instruction stream and reuses that plan across shots.
+It supports:
 
 - parsing circuits from text or `.stim` files;
 - returning per-shot measurement records or detector records;
@@ -450,8 +455,9 @@ min(2048, max(1, 32768 / 2^max_active_qubits))
 ```
 
 Increasing the batch can improve throughput, but it also increases memory usage
-according to active state size. Circuits with high `max_active_qubits` should
-prefer the automatic value. Explicit values must be non-negative integers.
+according to the dense active-state vector size. Circuits with high
+`max_active_qubits` should prefer the automatic value. Explicit values must be
+non-negative integers.
 
 ### `sample_chunk_shots`
 
@@ -503,6 +509,9 @@ for the full Stim grammar. Supported operations include:
 Operation parameters, target counts, and available control directions are still
 validated by the parser. Unsupported operations raise `SymFTError`; the error
 message includes the specific operation or violated constraint.
+Rotation parameters follow Clifft's half-turn convention. Multiply each angle
+parameter by pi to obtain radians; this applies to every parameter of `U` and
+`U3` as well as the Pauli rotation gates.
 
 ## Full API Reference
 

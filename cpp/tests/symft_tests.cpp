@@ -915,16 +915,34 @@ void test_stim_frontend_circuit_lowering() {
 void test_extended_stim_frontend() {
     using namespace symft;
     {
-        const auto parsed = parse_stim_text("R_X(0.5*pi) 0\n");
+        const auto parsed = parse_stim_text("R_X(0.5) 0\n");
         require(parsed.state.pending_operations.size() == 1, "R_X emits one pending rotation");
         const auto& rotation = std::get<PendingPauliRotation>(parsed.state.pending_operations[0]);
-        require(std::abs(rotation.kernel_angle - M_PI / 4.0) < 1e-12, "R_X radian angle conversion");
+        require(std::abs(rotation.kernel_angle - M_PI / 4.0) < 1e-12, "R_X half-turn angle conversion");
         require(rotation.pauli.pauli.same_body(pauli_x(1, 0)), "R_X rotation body");
     }
     {
         const auto parsed = parse_stim_text("R_Z(pi/pi) 0\n");
         const auto& rotation = std::get<PendingPauliRotation>(parsed.state.pending_operations[0]);
-        require(std::abs(rotation.kernel_angle - 0.5) < 1e-12, "rotation expression with pi parses as radians");
+        require(std::abs(rotation.kernel_angle - M_PI / 2.0) < 1e-12, "rotation expression is converted from half-turns");
+    }
+    {
+        const auto circuit = parse_stim_circuit_text(
+            "R_XX(0.25) 0 1\n"
+            "R_PAULI(-0.5) X0*Z1\n"
+            "U3(0.5,0.25,-0.5) 0\n");
+        require(circuit.instructions.size() == 5, "Pauli and U3 rotations emit expected instructions");
+        require(
+            std::abs(circuit.instructions[0].kernel_angle - M_PI / 8.0) < 1e-12,
+            "two-qubit rotation uses half-turns");
+        require(
+            std::abs(circuit.instructions[1].kernel_angle + M_PI / 4.0) < 1e-12,
+            "general Pauli rotation uses half-turns");
+        require(
+            std::abs(circuit.instructions[2].kernel_angle + M_PI / 4.0) < 1e-12 &&
+                std::abs(circuit.instructions[3].kernel_angle - M_PI / 4.0) < 1e-12 &&
+                std::abs(circuit.instructions[4].kernel_angle - M_PI / 8.0) < 1e-12,
+            "U3 rotations use half-turns");
     }
     {
         const auto circuit = parse_stim_circuit_text(
@@ -1010,8 +1028,8 @@ void test_extended_stim_frontend() {
             "ZCX 0 1\n"
             "SWAPCZ 0 1\n"
             "SQRT_YY_DAG 0 1\n"
-            "R_YY(0.25*pi) 0 1\n"
-            "R_PAULI(pi) X0*Z1\n"
+            "R_YY(0.25) 0 1\n"
+            "R_PAULI(1) X0*Z1\n"
             "M 0 1\n");
         PendingFactoredState pending(parsed.state);
         const auto program = plan_factored_updates(pending);

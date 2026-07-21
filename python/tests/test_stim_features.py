@@ -42,7 +42,7 @@ class StimFeatureSmokeTest(unittest.TestCase):
 
     def test_rotation_and_extended_noise_smoke(self):
         circuit = symft.Circuit(
-            "R_X(0.5*pi) 0\n"
+            "R_X(0.5) 0\n"
             "HERALDED_PAULI_CHANNEL_1(1, 0, 0, 0) 0\n"
             "M 0\n"
         )

@@ -1,76 +1,70 @@
 # SymFT
 
-SymFT is a high-throughput simulator for noisy, Clifford-dominated
-fault-tolerant quantum circuits containing non-Clifford Pauli rotations. It
-supports mid-circuit Pauli measurements, stochastic Pauli noise,
-measurement-record-controlled Pauli feedback, detectors, observables, and
-postselection through a Stim-style circuit frontend.
+SymFT is an exact, high-throughput simulator for noisy adaptive Clifford-dominated circuits.
+It supports Pauli rotations, stochastic Pauli noise, mid-circuit Pauli measurements, measurement-record-controlled Pauli feedback, detectors, observables, and postselection through a Stim-style circuit frontend.
 
-The simulator is implemented in C++20 and exposed through a typed Python
-extension. It compiles each circuit once into a compact sampling program and
-then reuses that program across shots. The only dense quantum state allocated
-for a shot is an active vector of size $2^k$, where $k$ is the number of
-active non-stabilizer coordinates—not the number of physical qubits.
+SymFT is the second-generation successor to SOFT. 
+It replaces per-shot sparse generalized-stabilizer evolution with symbolic Clifford–Pauli frame factorization shared across shots and adaptive stabilizer-coordinate planning.
+The implementation provides C++20 CPU and CUDA GPU backends and a typed Python package.
 
-- [Paper: *SymFT: Universal Fault-Tolerant Quantum Circuit Simulation via
-  Stabilizer Coordinates and Symbolic Clifford–Pauli Frames*](main.pdf)
+- [Draft paper: *SymFT: Universal Fault-Tolerant Quantum Circuit Simulation via Symbolic Clifford–Pauli Frames and Stabilizer Coordinates*]()
 - [Detailed Python interface documentation](python/README.md)
 
 ## How SymFT works
 
-SymFT combines symbolic Clifford–Pauli frame factorization with adaptive
-stabilizer-coordinate planning.
+SymFT combines symbolic Clifford–Pauli frame factorization with adaptive stabilizer-coordinate planning.
 
-### 1. Symbolic frame factorization
+### 1. Symbolic Clifford–Pauli frame factorization
 
-For a fixed stochastic-noise assignment $s$ and measurement record $m$, the
-branch operator is factorized, up to global phase, as
+For each noise assignment and measurement record, SymFT factorizes the branch operator, up to global phase, into a concrete Clifford frame, a symbolic Pauli frame, and an ordered sequence of pulled-back Pauli rotations and measurement projectors.
+The residual Clifford and Pauli frames are unitary, so they do not affect the branch probability.
 
-$$
-K(s,m) \doteq C\,E(s,m)\,O(s,m).
-$$
-
-Here $C$ is a concrete Clifford frame, $E(s,m)$ is a symbolic Pauli frame,
-and $O(s,m)$ is the ordered sequence of Pauli rotations and measurement
-projectors pulled back through those frames. Because $C E(s,m)$ is unitary,
-the branch probability depends only on the pulled-back program:
-
-$$
-\Pr(m\mid s)=\lVert O(s,m)\lvert 0^n\rangle\rVert^2.
-$$
-
-Clifford gates, Pauli noise, and Pauli feedback therefore do not have to be
-replayed for every shot. Their remaining effects are encoded as symbolic signs
-on the pulled-back rotations and measurements.
+Clifford gates, Pauli noise, and Pauli feedback therefore do not have to be replayed for every shot.
+Clifford conjugation is resolved once, while noise and feedback remain as affine symbolic signs on the pulled-back rotations and projectors.
 
 ### 2. Adaptive stabilizer coordinates
 
-A one-time planner tracks a stabilizer–destabilizer tableau that defines a
-shared virtual basis. The first $k$ generator pairs are active coordinates,
-and a dense coefficient vector represents the state in that active subspace:
+A one-time planner tracks a shared stabilizer–destabilizer tableau that defines the stabilizer-coordinate basis.
+Some coordinates are active and the rest are dormant.
+A dynamically sized dense active-state vector stores one coefficient for each active-basis state, so its size is controlled by the active width rather than directly by the number of physical qubits.
 
-$$
-\lvert\psi\rangle =
-\sum_{x\in\mathbb{F}_2^k}\alpha_x
-\overline{X}_1^{x_1}\cdots\overline{X}_k^{x_k}\lvert\overline{0}\rangle.
-$$
-
-Dormant effects are absorbed into tableau updates and symbolic corrections.
-Active effects become specialized diagonal or paired-amplitude instructions.
-Multi-coordinate Pauli operations are executed directly; SymFT does not add a
-runtime Clifford-localization pass over the dense vector.
+Dormant components are handled through tableau updates and symbolic Pauli corrections.
+Active components become specialized diagonal or paired-amplitude instructions.
+A non-Clifford rotation can promote a dormant coordinate, while an active measurement can move a coordinate to the dormant set.
+SymFT executes multi-coordinate Pauli operations directly and does not add a runtime Clifford-localization pass over the dense active-state vector.
 
 ### 3. Compile once, sample many times
 
-The sampler executes only the emitted instruction stream. It samples
-independent symbols, evaluates causal parity expressions, updates the active
-vector, projects active measurements, records measurement outcomes, and
-accumulates detector and observable parities. It does not reconstruct the
-planning tableau or traverse the original circuit.
+The sampler executes only the emitted instruction stream.
+It samples independent symbols, evaluates causal affine expressions, updates the dense active-state vector, projects active measurements, records outcomes, and accumulates detector and observable parities.
+It does not revisit the original circuit, update Pauli frames, conjugate Pauli strings, or reconstruct the planning tableau.
 
-The method avoids a full $2^n$ physical state vector, but its worst-case cost
-is still exponential in the peak active width $k_{\max}$. CPU active-state
-arithmetic uses double precision.
+The method avoids a full physical state vector. 
+Its dominant exponential cost is controlled by the peak active width rather than the number of physical qubits, although the worst case remains exponential.
+
+## Results reported in the draft
+
+The draft reports attempted-shot throughput, including noise generation,
+quantum sampling, detector and observable evaluation, result readback, and
+detector postselection where applicable. Parsing and one-time preprocessing are
+excluded. CPU results use one pinned physical core; GPU results use a saturated
+NVIDIA GeForce RTX 4090. Each reported rate is the median of seven repetitions.
+
+| Workload | SymFT | Comparison | Speedup |
+| --- | ---: | ---: | ---: |
+| 118-qubit pure-Clifford QEC, CPU FP64 | 2.032 million shots/s | Stim: 748,700 shots/s | 2.715× |
+| Distance-3 cultivation, CPU FP64 | 1.881 million shots/s | Clifft FP64: 454,600 shots/s | 4.138× |
+| Distance-5 cultivation, CPU FP64 | 167,300 shots/s | Clifft FP64: 56,480 shots/s | 2.961× |
+| Distance-3 cultivation, CPU | 1.881 million shots/s | Tsim native: 41.0 shots/s | 45,876× |
+| Distance-3 cultivation, GPU FP32 | 81.72 million shots/s | Tsim native: 23,200 shots/s | 3,522× |
+| Distance-3 cultivation, GPU FP64 | 68.59 million shots/s | SOFT FP64: 336,600 shots/s | 203.8× |
+| Distance-5 cultivation, GPU FP64 | 2.777 million shots/s | SOFT FP64: 7,172 shots/s | 387.3× |
+
+These are public-interface comparisons, not kernel-only comparisons. Output
+contracts differ between implementations, and the Tsim native lane uses lower
+precision than SymFT's CPU FP64 lane. Tsim did not complete distance-5
+preprocessing within the draft's cutoff. See the paper for the full protocol,
+hardware details, precision lanes, output contracts, and outcome checks.
 
 ## Supported circuit model
 
@@ -90,6 +84,8 @@ The frontend accepts a substantial Stim-style subset:
 This is not a drop-in parser for the complete Stim language. In particular,
 sweep-controlled operations are rejected. Unsupported instructions or invalid
 target and parameter combinations raise an error with source-line context.
+Following Clifft, rotation angles are specified in half-turns. Multiply an
+angle parameter by $\pi$ to obtain radians.
 
 ## Python installation
 
@@ -224,10 +220,10 @@ The C++ implementation provides:
 - scalar kernels and CMake-built AVX2/AVX-512 kernels with runtime dispatch;
 - an optional CUDA counts backend.
 
-The batch sampler stores each shot's active vector contiguously:
+The batch sampler stores each shot's dense active-state vector contiguously:
 `active_re[shot * active_stride + basis]` and the corresponding imaginary
 array. The automatic batch size is limited by the prepared program's peak
-active width to control the dense-vector cache footprint.
+active width to control the active-state-vector cache footprint.
 
 Inspect the active backends from Python:
 

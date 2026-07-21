@@ -723,8 +723,9 @@ std::vector<CircuitPauliProduct> circuit_pair_measurement_products(int n, const 
     return out;
 }
 
-double pauli_rotation_kernel_angle(double physical_angle) {
-    return physical_angle / 2.0;
+double pauli_rotation_kernel_angle_from_half_turns(double half_turns) {
+    // Clifft parameters are physical half-turns, while the kernel applies exp(-i * angle * P).
+    return half_turns * kPi / 2.0;
 }
 
 void append_pauli_rotation_instruction(
@@ -744,7 +745,11 @@ void append_single_axis_rotation(StimCircuitBuilder& builder, const StimInstruct
     for (int q : stim_qubit_targets(inst)) {
         products.push_back(circuit_single_pauli_product(builder.circuit.nqubits, axis, q));
     }
-    append_pauli_rotation_instruction(builder, inst.line, pauli_rotation_kernel_angle(inst.parens[0]), std::move(products));
+    append_pauli_rotation_instruction(
+        builder,
+        inst.line,
+        pauli_rotation_kernel_angle_from_half_turns(inst.parens[0]),
+        std::move(products));
 }
 
 void append_two_axis_rotation(StimCircuitBuilder& builder, const StimInstruction& inst, char axis) {
@@ -757,7 +762,11 @@ void append_two_axis_rotation(StimCircuitBuilder& builder, const StimInstruction
     for (std::size_t i = 0; i < qubits.size(); i += 2) {
         products.push_back(circuit_pair_pauli_product(builder.circuit.nqubits, axis, qubits[i], qubits[i + 1]));
     }
-    append_pauli_rotation_instruction(builder, inst.line, pauli_rotation_kernel_angle(inst.parens[0]), std::move(products));
+    append_pauli_rotation_instruction(
+        builder,
+        inst.line,
+        pauli_rotation_kernel_angle_from_half_turns(inst.parens[0]),
+        std::move(products));
 }
 
 void append_u3_rotation(StimCircuitBuilder& builder, const StimInstruction& inst) {
@@ -771,9 +780,21 @@ void append_u3_rotation(StimCircuitBuilder& builder, const StimInstruction& inst
         y_theta.push_back(circuit_single_pauli_product(builder.circuit.nqubits, 'Y', q));
         z_phi.push_back(circuit_single_pauli_product(builder.circuit.nqubits, 'Z', q));
     }
-    append_pauli_rotation_instruction(builder, inst.line, pauli_rotation_kernel_angle(inst.parens[2]), std::move(z_lambda));
-    append_pauli_rotation_instruction(builder, inst.line, pauli_rotation_kernel_angle(inst.parens[0]), std::move(y_theta));
-    append_pauli_rotation_instruction(builder, inst.line, pauli_rotation_kernel_angle(inst.parens[1]), std::move(z_phi));
+    append_pauli_rotation_instruction(
+        builder,
+        inst.line,
+        pauli_rotation_kernel_angle_from_half_turns(inst.parens[2]),
+        std::move(z_lambda));
+    append_pauli_rotation_instruction(
+        builder,
+        inst.line,
+        pauli_rotation_kernel_angle_from_half_turns(inst.parens[0]),
+        std::move(y_theta));
+    append_pauli_rotation_instruction(
+        builder,
+        inst.line,
+        pauli_rotation_kernel_angle_from_half_turns(inst.parens[1]),
+        std::move(z_phi));
 }
 
 void append_feedback_pair(StimCircuitBuilder& builder, int line, CircuitInstructionKind kind, int record, int q) {
@@ -1146,7 +1167,7 @@ void append_instruction(StimCircuitBuilder& builder, const StimInstruction& inst
         append_pauli_rotation_instruction(
             builder,
             inst.line,
-            pauli_rotation_kernel_angle(inst.parens[0]),
+            pauli_rotation_kernel_angle_from_half_turns(inst.parens[0]),
             circuit_mpp_targets(builder.circuit.nqubits, inst));
     } else if (op == "M" || op == "MZ" || op == "MX" || op == "MY") {
         append_measurement_instruction(
