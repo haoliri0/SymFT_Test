@@ -30,10 +30,7 @@ A dynamically sized dense active-state vector stores one coefficient for each ac
 
 Dormant components are handled through tableau updates and symbolic Pauli corrections.
 Active components become specialized diagonal or paired-amplitude instructions.
-A planned instruction stores only compact Pauli masks, phase, pivot, and angle;
-basis-dependent coefficients and measurement source indices are derived during execution instead of being retained as per-instruction exponential tables.
-Consecutive active rotations execute shot by shot so each shot's dense active state remains cache-resident while the instruction sequence is applied.
-Non-diagonal active measurements use runtime-dispatched AVX2/AVX-512 kernels that derive coefficient signs from the compact Pauli masks directly in SIMD registers, without allocating a coefficient table.
+A planned instruction stores only compact Pauli masks, phase, pivot, and angle.
 A non-Clifford rotation can promote a dormant coordinate, while an active measurement can move a coordinate to the dormant set.
 SymFT executes multi-coordinate Pauli operations directly and does not add a runtime Clifford-localization pass over the dense active-state vector.
 
