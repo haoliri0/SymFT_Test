@@ -603,6 +603,10 @@ std::optional<FactoredInstruction> process_next_pending_operation(PendingFactore
 namespace {
 
 void process_pending_operations_in_place(PendingFactoredState& state) {
+    if (!state.pending_operations_optimized && state.instructions.empty() &&
+        state.pending_prefix_instruction_indices.empty()) {
+        optimize_pending_operations(state);
+    }
     while (has_pending_operations(state)) {
         process_next_pending_operation(state);
     }

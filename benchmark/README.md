@@ -122,10 +122,11 @@ cmake --build build --target symft_plan
 build/cpp/symft_plan benchmark/circuit/coherent_surface_d5_r5_p1e-3_rz0p02.stim
 ```
 
-`symft_plan` reports parse time, planning time, maximum active width, and peak
-resident memory. Use this tool—not `symft_bench` with zero shots—for
-large-width preprocessing checks, because benchmark executors allocate active
-state storage independently of the requested shot count.
+`symft_plan` reports parse time, planning time, maximum active width, pending
+operation counts before and after optimization, rotation fusions, measurement
+left-swaps, and peak resident memory. Use this tool—not `symft_bench` with zero
+shots—for large-width preprocessing checks, because benchmark executors
+allocate active state storage independently of the requested shot count.
 
 ## Benchmarking notes
 

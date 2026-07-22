@@ -36,9 +36,12 @@ add_library(symft_cpp
     src/sampler/exogenous_presample.cpp
     src/frontend/stim_parser.cpp
     src/frontend/stim_sampling.cpp
+    # Keep the batch caller before its callees. Static linkers can then extract
+    # the hot batch cluster in one archive scan instead of placing it after
+    # unrelated preprocessing objects during a rescan.
+    src/sampler/batch_runtime.cpp
     src/sampler/batch_symbols.cpp
     src/sampler/batch_active.cpp
-    src/sampler/batch_runtime.cpp
     src/simd/simd_dispatch.cpp
     src/simd/simd_scalar.cpp
     src/simd/batch_simd_scalar.cpp
@@ -95,6 +98,10 @@ if(SYMFT_CPP_ENABLE_AVX512)
         target_compile_definitions(symft_cpp PRIVATE SYMFT_COMPILED_AVX512=1)
     endif()
 endif()
+
+# Keep the cold pre-planning pass after the hot sampler and SIMD translation
+# units to minimize executable-layout perturbations from optimizer changes.
+target_sources(symft_cpp PRIVATE src/factored/pending_optimizer.cpp)
 
 add_executable(symft_cli tools/symft_cli.cpp)
 target_link_libraries(symft_cli PRIVATE symft_cpp)

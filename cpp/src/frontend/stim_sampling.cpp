@@ -109,10 +109,28 @@ std::vector<CircuitDetector> detectors_with_lowered_positions(
 
 FactoredInstructionProgram plan_stim_factored_program(const StimParseResult& parsed) {
     PendingFactoredState pending(parsed.state);
+    std::vector<int> detector_prefixes;
+    detector_prefixes.reserve(parsed.detectors.size());
+    for (const auto& detector : parsed.detectors) {
+        detector_prefixes.push_back(detector.after_pending_operation);
+    }
+    const PendingOptimizationStats optimization =
+        optimize_pending_operations(pending, detector_prefixes);
+    std::vector<CircuitDetector> detectors = parsed.detectors;
+    for (auto& detector : detectors) {
+        const int original_prefix = detector.after_pending_operation;
+        if (original_prefix < 0 ||
+            original_prefix >= static_cast<int>(optimization.prefix_remap.size()) ||
+            optimization.prefix_remap[static_cast<std::size_t>(original_prefix)] < 0) {
+            fail("detector pending-operation prefix was not preserved by optimization");
+        }
+        detector.after_pending_operation =
+            optimization.prefix_remap[static_cast<std::size_t>(original_prefix)];
+    }
     auto program = plan_factored_updates(std::move(pending));
     return insert_stim_detector_events(
         std::move(program),
-        parsed.detectors,
+        detectors,
         parsed.measurement_records);
 }
 

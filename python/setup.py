@@ -132,12 +132,13 @@ sources = [
     cpp_source("sampler/exogenous_presample.cpp"),
     cpp_source("frontend/stim_parser.cpp"),
     cpp_source("frontend/stim_sampling.cpp"),
+    cpp_source("sampler/batch_runtime.cpp"),
     cpp_source("sampler/batch_symbols.cpp"),
     cpp_source("sampler/batch_active.cpp"),
-    cpp_source("sampler/batch_runtime.cpp"),
     cpp_source("simd/simd_dispatch.cpp"),
     cpp_source("simd/simd_scalar.cpp"),
     cpp_source("simd/batch_simd_scalar.cpp"),
+    cpp_source("factored/pending_optimizer.cpp"),
 ]
 
 if ENABLE_CUDA:

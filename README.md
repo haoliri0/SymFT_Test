@@ -24,6 +24,11 @@ Clifford conjugation is resolved once, while noise and feedback remain as affine
 
 ### 2. Adaptive stabilizer coordinates
 
+Before coordinate planning, a conservative commutation-aware pass fuses same-axis Pauli rotations through intervening commuting operations.
+Within a detector-delimited segment that produced a fusion, it also moves commuting measurements earlier to shorten active-coordinate lifetimes.
+In segments without a fusion, measurement motion is limited to reaching a matching Pauli rotation, which can then collapse to a branch phase instead of merely changing the schedule.
+Detector positions are kept as hard barriers, preserving record order and detector/postselection timing.
+
 A one-time planner tracks a shared stabilizer–destabilizer tableau that defines the stabilizer-coordinate basis.
 Some coordinates are active and the rest are dormant.
 A dynamically sized dense active-state vector stores one coefficient for each active-basis state, so its size is controlled by the active width rather than directly by the number of physical qubits.

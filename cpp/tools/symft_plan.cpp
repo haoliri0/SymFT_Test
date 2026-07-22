@@ -3,6 +3,7 @@
 #include <chrono>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/resource.h>
@@ -28,6 +29,20 @@ int main(int argc, char** argv) {
         const auto parse_start = Clock::now();
         const auto parsed = symft::parse_stim_file(path);
         const auto parse_stop = Clock::now();
+
+        symft::PendingOptimizationStats optimization;
+        {
+            symft::PendingFactoredState pending_diagnostics(parsed.state);
+            std::vector<int> detector_prefixes;
+            detector_prefixes.reserve(parsed.detectors.size());
+            for (const auto& detector : parsed.detectors) {
+                detector_prefixes.push_back(detector.after_pending_operation);
+            }
+            optimization =
+                symft::optimize_pending_operations(pending_diagnostics, detector_prefixes);
+        }
+
+        const auto plan_start = Clock::now();
         const auto plan = symft::plan_stim_factored_program(parsed);
         const auto plan_stop = Clock::now();
 
@@ -36,8 +51,13 @@ int main(int argc, char** argv) {
         std::cout << "detectors " << plan.ndetectors << "\n";
         std::cout << "instructions " << plan.instructions.size() << "\n";
         std::cout << "max_active_qubits " << plan.max_k << "\n";
+        std::cout << "pending_operations_before " << optimization.input_operations << "\n";
+        std::cout << "pending_operations_after " << optimization.output_operations << "\n";
+        std::cout << "fused_rotations " << optimization.fused_rotations << "\n";
+        std::cout << "cancelled_rotations " << optimization.cancelled_rotations << "\n";
+        std::cout << "measurement_left_swaps " << optimization.measurement_left_swaps << "\n";
         std::cout << "parse_seconds " << seconds_between(parse_start, parse_stop) << "\n";
-        std::cout << "plan_seconds " << seconds_between(parse_stop, plan_stop) << "\n";
+        std::cout << "plan_seconds " << seconds_between(plan_start, plan_stop) << "\n";
 #if defined(__unix__) || defined(__APPLE__)
         rusage usage{};
         if (getrusage(RUSAGE_SELF, &usage) == 0) {

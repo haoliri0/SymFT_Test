@@ -6,8 +6,9 @@
 #include "sampler/single_shot.hpp"
 #include "simd/simd.hpp"
 
-#include <cmath>
+#include <algorithm>
 #include <bit>
+#include <cmath>
 #include <complex>
 #include <cstdio>
 #include <cstdlib>
@@ -668,6 +669,375 @@ void test_high_pivot_selection() {
     require(transformed == pauli_z(4, 0), "dormant promotion uses highest dormant pivot");
 }
 
+symft::FactoredInstructionProgram plan_without_pending_optimization(
+    symft::PendingFactoredState state) {
+    while (symft::has_pending_operations(state)) {
+        symft::process_next_pending_operation(state);
+    }
+    return symft::factored_instruction_program(std::move(state));
+}
+
+std::vector<int> pending_record_order(const symft::PendingFactoredState& state) {
+    std::vector<int> records;
+    for (const auto& operation : state.pending_operations) {
+        std::visit(
+            [&](const auto& typed) {
+                if constexpr (requires { typed.record; }) {
+                    if (typed.record) {
+                        records.push_back(*typed.record);
+                    }
+                }
+            },
+            operation);
+    }
+    return records;
+}
+
+void require_pending_record_conditions_are_causal(
+    const symft::PendingFactoredState& state,
+    const std::string& context) {
+    std::vector<std::pair<int, std::size_t>> producers;
+    for (std::size_t index = 0; index < state.pending_operations.size(); ++index) {
+        std::visit(
+            [&](const auto& typed) {
+                if constexpr (requires { typed.record_condition; }) {
+                    if (typed.record_condition) {
+                        producers.emplace_back(*typed.record_condition, index);
+                    }
+                }
+            },
+            state.pending_operations[index]);
+    }
+
+    auto require_expression_is_causal = [&](const symft::SymbolicBool& expression, std::size_t use_index) {
+        for (int condition : expression.conditions) {
+            for (const auto& [producer, producer_index] : producers) {
+                if (producer == condition) {
+                    require(producer_index < use_index,
+                            context + " does not use a measurement condition before assignment");
+                }
+            }
+        }
+    };
+    for (std::size_t index = 0; index < state.pending_operations.size(); ++index) {
+        std::visit(
+            [&](const auto& typed) {
+                using T = std::decay_t<decltype(typed)>;
+                if constexpr (std::is_same_v<T, symft::PendingClassicalRecord>) {
+                    require_expression_is_causal(typed.outcome, index);
+                } else {
+                    require_expression_is_causal(typed.pauli.sign, index);
+                }
+            },
+            state.pending_operations[index]);
+    }
+}
+
+void test_pending_operation_optimizer() {
+    using namespace symft;
+    {
+        PendingFactoredState pending(2, 0);
+        const SymbolicBool sign(false, {1});
+        pending.pending_operations.push_back(
+            PendingPauliRotation{0.1, SymbolicPauliString(pauli_x(2, 0), sign)});
+        pending.pending_operations.push_back(
+            PendingPauliRotation{0.2, SymbolicPauliString(pauli_z(2, 1))});
+        pending.pending_operations.push_back(
+            PendingPauliRotation{0.3, SymbolicPauliString(pauli_x(2, 0), sign)});
+        pending.pending_operations.push_back(
+            PendingPauliMeasurement{SymbolicPauliString(pauli_x(2, 0)), 1, 2});
+
+        const auto stats = optimize_pending_operations(pending);
+        require(stats.input_operations == 4 && stats.output_operations == 3,
+                "pending optimizer removes one fused rotation");
+        require(stats.fused_rotations == 1 && stats.cancelled_rotations == 0,
+                "pending optimizer reports commuting rotation fusion");
+        require(stats.measurement_left_swaps == 2,
+                "fusion enables earlier commuting measurement scheduling in its segment");
+        require(std::holds_alternative<PendingPauliMeasurement>(pending.pending_operations[0]),
+                "commuting measurement is scheduled before the fused rotation run");
+
+        bool found_fused = false;
+        for (const auto& operation : pending.pending_operations) {
+            if (const auto* rotation = std::get_if<PendingPauliRotation>(&operation);
+                rotation != nullptr && rotation->pauli.pauli.same_body(pauli_x(2, 0))) {
+                require(std::abs(rotation->kernel_angle - 0.4) < 1e-12,
+                        "commuting rotations add their angles");
+                require(rotation->pauli.sign == sign,
+                        "commuting rotation fusion preserves the symbolic sign");
+                found_fused = true;
+            }
+        }
+        require(found_fused, "pending optimizer retains the fused rotation");
+    }
+    {
+        PendingFactoredState pending(1, 0);
+        pending.pending_operations.push_back(
+            PendingPauliRotation{0.1, SymbolicPauliString(pauli_x(1, 0))});
+        pending.pending_operations.push_back(
+            PendingPauliRotation{0.2, SymbolicPauliString(pauli_z(1, 0))});
+        pending.pending_operations.push_back(
+            PendingPauliRotation{0.3, SymbolicPauliString(pauli_x(1, 0))});
+        const auto stats = optimize_pending_operations(pending);
+        require(stats.fused_rotations == 0 && pending.pending_operations.size() == 3,
+                "anti-commuting rotation blocks fusion");
+    }
+    {
+        PendingFactoredState pending(1, 0);
+        pending.pending_operations.push_back(PendingPauliRotation{
+            0.1,
+            SymbolicPauliString(pauli_x(1, 0), SymbolicBool(false, {1}))});
+        pending.pending_operations.push_back(PendingPauliRotation{
+            0.2,
+            SymbolicPauliString(pauli_x(1, 0), SymbolicBool(false, {2}))});
+        pending.pending_operations.push_back(
+            PendingPauliMeasurement{SymbolicPauliString(pauli_z(1, 0)), 1, 3});
+        const auto stats = optimize_pending_operations(pending);
+        require(stats.fused_rotations == 0,
+                "different symbolic rotation signs do not fuse");
+        require(stats.measurement_left_swaps == 0 &&
+                    std::holds_alternative<PendingPauliRotation>(pending.pending_operations[0]),
+                "anti-commuting measurement does not move left");
+    }
+    {
+        PendingFactoredState pending(2, 0);
+        pending.pending_operations.push_back(
+            PendingPauliRotation{0.1, SymbolicPauliString(pauli_x(2, 0))});
+        pending.pending_operations.push_back(
+            PendingPauliMeasurement{SymbolicPauliString(pauli_z(2, 1)), 1, 2});
+        const auto stats = optimize_pending_operations(pending);
+        require(stats.fused_rotations == 0 && stats.measurement_left_swaps == 0 &&
+                    std::holds_alternative<PendingPauliRotation>(pending.pending_operations[0]),
+                "unrelated commuting measurement does not cause pure schedule churn");
+    }
+    {
+        PendingFactoredState pending(1, 0);
+        const SymbolicBool sign(false, {1});
+        pending.pending_operations.push_back(
+            PendingPauliRotation{0.2, SymbolicPauliString(pauli_x(1, 0), sign)});
+        pending.pending_operations.push_back(
+            PendingPauliRotation{0.3, SymbolicPauliString(pauli_x(1, 0), !sign)});
+        const auto stats = optimize_pending_operations(pending);
+        require(stats.fused_rotations == 1 && pending.pending_operations.size() == 1,
+                "opposite symbolic signs still fuse");
+        const auto& fused = std::get<PendingPauliRotation>(pending.pending_operations[0]);
+        require(std::abs(fused.kernel_angle - 0.1) < 1e-12 && fused.pauli.sign == !sign,
+                "opposite symbolic signs subtract rotation angles");
+    }
+    {
+        PendingFactoredState pending(1, 0);
+        pending.pending_operations.push_back(
+            PendingPauliRotation{0.25, SymbolicPauliString(pauli_y(1, 0))});
+        pending.pending_operations.push_back(
+            PendingPauliRotation{-0.25, SymbolicPauliString(pauli_y(1, 0))});
+        const auto stats = optimize_pending_operations(pending);
+        require(stats.fused_rotations == 1 && stats.cancelled_rotations == 1 &&
+                    pending.pending_operations.empty(),
+                "exact inverse rotations cancel completely");
+    }
+    {
+        PendingFactoredState pending(1, 0);
+        pending.pending_operations.push_back(
+            PendingPauliRotation{0.1, SymbolicPauliString(pauli_x(1, 0))});
+        pending.pending_operations.push_back(
+            PendingPauliRotation{0.2, SymbolicPauliString(pauli_x(1, 0))});
+        const auto stats = optimize_pending_operations(pending, {1});
+        require(stats.fused_rotations == 0 && pending.pending_operations.size() == 2,
+                "preserved pending prefix blocks cross-detector fusion");
+        require(stats.prefix_remap[1] == 1 && stats.prefix_remap[2] == 2,
+                "preserved pending prefixes are remapped");
+    }
+    {
+        PendingFactoredState pending(1, 0);
+        pending.pending_operations.push_back(
+            PendingPauliRotation{0.1, SymbolicPauliString(pauli_x(1, 0))});
+        pending.pending_operations.push_back(
+            PendingPauliMeasurement{SymbolicPauliString(pauli_x(1, 0)), 1, 2});
+        const auto stats = optimize_pending_operations(pending, {1});
+        require(stats.measurement_left_swaps == 0 &&
+                    std::holds_alternative<PendingPauliRotation>(pending.pending_operations[0]),
+                "detector prefix prevents a measurement from moving across its time boundary");
+    }
+    {
+        PendingFactoredState pending(1, 0);
+        pending.pending_operations.push_back(
+            PendingPauliRotation{0.1, SymbolicPauliString(pauli_x(1, 0))});
+        pending.pending_operations.push_back(
+            PendingClassicalRecord{SymbolicBool(false), 1, std::nullopt});
+        pending.pending_operations.push_back(
+            PendingPauliMeasurement{SymbolicPauliString(pauli_x(1, 0)), 2, 3});
+        const auto stats = optimize_pending_operations(pending);
+        require(stats.measurement_left_swaps == 0 &&
+                    std::holds_alternative<PendingClassicalRecord>(pending.pending_operations[1]),
+                "measurement movement preserves classical record event ordering");
+    }
+}
+
+void test_pending_operation_optimizer_end_to_end() {
+    using namespace symft;
+    const std::string fused_circuit =
+        "H 0\n"
+        "R_Z(0.1) 0\n"
+        "R_Z(0.2) 0\n"
+        "H 0\n"
+        "M 0\n";
+    const auto reference_parsed = parse_stim_text(fused_circuit);
+    const auto optimized_parsed = parse_stim_text(fused_circuit);
+    const auto reference = plan_without_pending_optimization(PendingFactoredState(reference_parsed.state));
+    const auto optimized = plan_factored_updates(PendingFactoredState(optimized_parsed.state));
+    require(optimized.instructions.size() < reference.instructions.size(),
+            "end-to-end optimizer fuses repeated physical rotations");
+    require(sample_measurements(reference, 512, 811) == sample_measurements(optimized, 512, 811),
+            "fused pending program preserves sampled measurement records");
+
+    const std::string squeezed_circuit =
+        "H 0\n"
+        "R_Z(0.1) 0\n"
+        "M 0\n";
+    const auto squeezed_reference_parsed = parse_stim_text(squeezed_circuit);
+    const auto squeezed_optimized_parsed = parse_stim_text(squeezed_circuit);
+    const auto squeezed_reference =
+        plan_without_pending_optimization(PendingFactoredState(squeezed_reference_parsed.state));
+    const auto squeezed_optimized =
+        plan_factored_updates(PendingFactoredState(squeezed_optimized_parsed.state));
+    require(squeezed_reference.max_k == 1 && squeezed_optimized.max_k == 0,
+            "early commuting measurement removes an unnecessary active promotion");
+    require(
+        sample_measurements(squeezed_reference, 512, 821) ==
+            sample_measurements(squeezed_optimized, 512, 821),
+        "measurement squeezing preserves sampled measurement records");
+
+    const std::string feedback_circuit =
+        "H 0\n"
+        "R_Z(0.125) 0\n"
+        "M 0\n"
+        "CX rec[-1] 1\n"
+        "M 1\n";
+    const auto feedback_reference_parsed = parse_stim_text(feedback_circuit);
+    const auto feedback_optimized_parsed = parse_stim_text(feedback_circuit);
+    PendingFactoredState feedback_reference_pending(feedback_reference_parsed.state);
+    PendingFactoredState feedback_optimized_pending(feedback_optimized_parsed.state);
+    const auto feedback_record_order = pending_record_order(feedback_reference_pending);
+    require_pending_record_conditions_are_causal(
+        feedback_reference_pending,
+        "unoptimized feedback program");
+    const auto feedback_stats = optimize_pending_operations(feedback_optimized_pending);
+    require(feedback_stats.measurement_left_swaps > 0,
+            "feedback test moves its commuting measurement earlier");
+    require(pending_record_order(feedback_optimized_pending) == feedback_record_order,
+            "measurement movement preserves externally visible record order");
+    require_pending_record_conditions_are_causal(
+        feedback_optimized_pending,
+        "optimized feedback program");
+    const auto feedback_reference =
+        plan_without_pending_optimization(std::move(feedback_reference_pending));
+    const auto feedback_optimized = plan_factored_updates(std::move(feedback_optimized_pending));
+    require(
+        sample_measurements(feedback_reference, 1024, 827) ==
+            sample_measurements(feedback_optimized, 1024, 827),
+        "early measurement preserves measurement-conditioned feedback records");
+
+    const std::string multiqubit_circuit =
+        "H 0\n"
+        "R_XX(0.125) 0 1\n"
+        "MXX 0 1\n"
+        "CX rec[-1] 2\n"
+        "M 2\n";
+    const auto multiqubit_reference_parsed = parse_stim_text(multiqubit_circuit);
+    const auto multiqubit_optimized_parsed = parse_stim_text(multiqubit_circuit);
+    PendingFactoredState multiqubit_reference_pending(multiqubit_reference_parsed.state);
+    PendingFactoredState multiqubit_optimized_pending(multiqubit_optimized_parsed.state);
+    const auto multiqubit_stats = optimize_pending_operations(multiqubit_optimized_pending);
+    require(multiqubit_stats.measurement_left_swaps > 0,
+            "two-qubit measurement moves before its matching rotation");
+    require_pending_record_conditions_are_causal(
+        multiqubit_optimized_pending,
+        "optimized multi-qubit feedback program");
+    const auto multiqubit_reference =
+        plan_without_pending_optimization(std::move(multiqubit_reference_pending));
+    const auto multiqubit_optimized =
+        plan_factored_updates(std::move(multiqubit_optimized_pending));
+    require(
+        sample_measurements(multiqubit_reference, 1024, 829) ==
+            sample_measurements(multiqubit_optimized, 1024, 829),
+        "multi-qubit measurement movement preserves feedback records");
+
+    const std::string reset_circuit =
+        "H 0\n"
+        "R_Z(0.125) 0\n"
+        "R 0\n"
+        "H 0\n"
+        "M 0\n";
+    const auto reset_reference_parsed = parse_stim_text(reset_circuit);
+    const auto reset_optimized_parsed = parse_stim_text(reset_circuit);
+    PendingFactoredState reset_reference_pending(reset_reference_parsed.state);
+    PendingFactoredState reset_optimized_pending(reset_optimized_parsed.state);
+    const auto reset_stats = optimize_pending_operations(reset_optimized_pending);
+    require(reset_stats.measurement_left_swaps > 0,
+            "reset test moves its internal commuting measurement earlier");
+    require_pending_record_conditions_are_causal(
+        reset_optimized_pending,
+        "optimized reset program");
+    const auto reset_reference =
+        plan_without_pending_optimization(std::move(reset_reference_pending));
+    const auto reset_optimized = plan_factored_updates(std::move(reset_optimized_pending));
+    require(
+        sample_measurements(reset_reference, 1024, 831) ==
+            sample_measurements(reset_optimized, 1024, 831),
+        "early internal reset measurement preserves later output records");
+
+    const std::string sign_guard_circuit =
+        "R_Z(0.1) 0\n"
+        "H 1\n"
+        "M 1\n"
+        "CX rec[-1] 0\n"
+        "R_Z(0.2) 0\n"
+        "M 0\n";
+    const auto sign_guard_parsed = parse_stim_text(sign_guard_circuit);
+    PendingFactoredState sign_guard_pending(sign_guard_parsed.state);
+    const auto sign_guard_records = pending_record_order(sign_guard_pending);
+    const auto sign_guard_stats = optimize_pending_operations(sign_guard_pending);
+    require(sign_guard_stats.fused_rotations == 0,
+            "measurement-conditioned Pauli feedback prevents unsafe rotation fusion");
+    require(pending_record_order(sign_guard_pending) == sign_guard_records,
+            "feedback sign guard preserves record ordering");
+    require_pending_record_conditions_are_causal(
+        sign_guard_pending,
+        "optimized feedback sign-guard program");
+
+    const std::string detector_boundary_circuit =
+        "M 2\n"
+        "H 0\n"
+        "R_Z(0.125) 0\n"
+        "DETECTOR rec[-1]\n"
+        "M 0\n";
+    const auto detector_program =
+        plan_stim_factored_program(parse_stim_text(detector_boundary_circuit));
+    std::size_t rotation_index = detector_program.instructions.size();
+    std::size_t detector_index = detector_program.instructions.size();
+    std::size_t second_record_index = detector_program.instructions.size();
+    for (std::size_t index = 0; index < detector_program.instructions.size(); ++index) {
+        std::visit(
+            [&](const auto& instruction) {
+                using T = std::decay_t<decltype(instruction)>;
+                if constexpr (std::is_same_v<T, ApplyPrecomputedActivePauliRotation> ||
+                              std::is_same_v<T, PromoteDormantRotation>) {
+                    rotation_index = std::min(rotation_index, index);
+                } else if constexpr (std::is_same_v<T, RecordDetector>) {
+                    detector_index = std::min(detector_index, index);
+                }
+                if constexpr (requires { instruction.record; }) {
+                    if (instruction.record && *instruction.record == 2) {
+                        second_record_index = std::min(second_record_index, index);
+                    }
+                }
+            },
+            detector_program.instructions[index]);
+    }
+    require(rotation_index < detector_index && detector_index < second_record_index,
+            "detector remains between the original rotation prefix and later measurement");
+}
+
 void test_high_pivot_rotation_kernels() {
     using namespace symft;
     const int small_k = 6;
@@ -1128,7 +1498,7 @@ void test_extended_stim_frontend() {
 
 void test_t_gate_exact_rotation() {
     using namespace symft;
-    const auto parsed = parse_stim_text("H 0\nT 0\nM 0\n");
+    const auto parsed = parse_stim_text("H 0\nT 0\nH 0\nM 0\n");
     PendingFactoredState pending(parsed.state);
     const auto program = plan_factored_updates(pending);
     require(program.max_k == 1, "T promotes one active qubit");
@@ -1137,7 +1507,7 @@ void test_t_gate_exact_rotation() {
     for (const auto& shot : records) {
         ones += packed_bit(shot, 0) ? 1 : 0;
     }
-    require(ones > 50 && ones < 150, "T then MX produces non-deterministic X measurement");
+    require(ones > 10 && ones < 50, "T then MX produces the expected non-deterministic measurement");
 }
 
 void test_presampled_exogenous() {
@@ -1477,6 +1847,8 @@ int main() {
     test_extended_clifford_frame_images();
     test_active_rotation();
     test_high_pivot_selection();
+    test_pending_operation_optimizer();
+    test_pending_operation_optimizer_end_to_end();
     test_high_pivot_rotation_kernels();
     test_high_pivot_measurement_kernels();
     test_d5_nondiagonal_measurement_simd_kernel();

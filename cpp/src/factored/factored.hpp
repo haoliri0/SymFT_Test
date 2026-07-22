@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <variant>
+#include <vector>
 
 namespace symft {
 
@@ -197,6 +198,7 @@ struct PendingFactoredState {
     std::vector<PendingOperation> pending_operations;
     std::vector<FactoredInstruction> instructions;
     std::vector<int> pending_prefix_instruction_indices;
+    bool pending_operations_optimized = false;
     int next_record = 1;
 
     PendingFactoredState() = default;
@@ -204,6 +206,21 @@ struct PendingFactoredState {
     PendingFactoredState(int n, int k = 0);
     PendingFactoredState(int n, int k, std::shared_ptr<SymbolicContext> context);
 };
+
+struct PendingOptimizationStats {
+    int input_operations = 0;
+    int output_operations = 0;
+    int fused_rotations = 0;
+    int cancelled_rotations = 0;
+    int measurement_left_swaps = 0;
+    // Entries are populated for prefix 0, the end of the operation list,
+    // and every preserved prefix requested by the caller. Other entries are -1.
+    std::vector<int> prefix_remap;
+};
+
+PendingOptimizationStats optimize_pending_operations(
+    PendingFactoredState& state,
+    const std::vector<int>& preserved_prefixes = {});
 
 bool has_pending_operations(const PendingFactoredState& state);
 std::optional<FactoredInstruction> process_next_pending_operation(PendingFactoredState& state);
