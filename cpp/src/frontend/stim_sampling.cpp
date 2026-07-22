@@ -109,7 +109,7 @@ std::vector<CircuitDetector> detectors_with_lowered_positions(
 
 FactoredInstructionProgram plan_stim_factored_program(const StimParseResult& parsed) {
     PendingFactoredState pending(parsed.state);
-    auto program = plan_factored_updates(pending);
+    auto program = plan_factored_updates(std::move(pending));
     return insert_stim_detector_events(
         std::move(program),
         parsed.detectors,

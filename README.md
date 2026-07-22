@@ -30,6 +30,10 @@ A dynamically sized dense active-state vector stores one coefficient for each ac
 
 Dormant components are handled through tableau updates and symbolic Pauli corrections.
 Active components become specialized diagonal or paired-amplitude instructions.
+A planned instruction stores only compact Pauli masks, phase, pivot, and angle;
+basis-dependent coefficients and measurement source indices are derived during execution instead of being retained as per-instruction exponential tables.
+Consecutive active rotations execute shot by shot so each shot's dense active state remains cache-resident while the instruction sequence is applied.
+Non-diagonal active measurements use runtime-dispatched AVX2/AVX-512 kernels that derive coefficient signs from the compact Pauli masks directly in SIMD registers, without allocating a coefficient table.
 A non-Clifford rotation can promote a dormant coordinate, while an active measurement can move a coordinate to the dormant set.
 SymFT executes multi-coordinate Pauli operations directly and does not add a runtime Clifford-localization pass over the dense active-state vector.
 
@@ -129,9 +133,9 @@ print(samples.dtype)  # bool
 Load a `.stim` file:
 
 ```python
-circuit = symft.Circuit(path="benchmarks/d3.stim")
+circuit = symft.Circuit(path="benchmark/circuit/msc_d3_inject_cultivate_p1e-3.stim")
 # Equivalent:
-circuit = symft.read_stim_file("benchmarks/d3.stim")
+circuit = symft.read_stim_file("benchmark/circuit/msc_d3_inject_cultivate_p1e-3.stim")
 ```
 
 Compile a reusable sampler when the same circuit will be sampled repeatedly:
@@ -272,7 +276,7 @@ ctest --test-dir build --output-on-failure
 Run the simple circuit summary tool:
 
 ```bash
-./build/cpp/symft_cli benchmarks/d3.stim 1000
+./build/cpp/symft_cli benchmark/circuit/msc_d3_inject_cultivate_p1e-3.stim 1000
 ```
 
 Run the configurable single-shot/batch rate harness:
@@ -280,7 +284,7 @@ Run the configurable single-shot/batch rate harness:
 ```bash
 ./build/cpp/symft_rate_bench \
   --sampler both \
-  --circuit benchmarks/d3.stim \
+  --circuit benchmark/circuit/msc_d3_inject_cultivate_p1e-3.stim \
   --shots 1000000 \
   --batch-size auto \
   --threads 1
@@ -303,7 +307,7 @@ int main() {
 
     auto sampler =
         symft::prepare_batch_sampler_from_stim_file(
-            "benchmarks/d3.stim", options);
+            "benchmark/circuit/msc_d3_inject_cultivate_p1e-3.stim", options);
     auto run = sampler.sample(1'000'000, std::uint64_t{1});
 
     std::cout << run.counts.discarded << '\n';
@@ -349,7 +353,7 @@ cpp/src/frontend/   Stim-style parser and sampling frontend
 cpp/src/simd/       Scalar and CPU SIMD kernels
 cpp/src/cuda/       Optional CUDA sampler
 python/src/symft/   Native Python binding, type hints, and package API
-benchmarks/         Stim fixtures and benchmark inputs
+benchmark/          Stim fixtures and benchmark inputs
 cpp/tests/          C++ correctness tests
 python/tests/       Python interface tests
 ```

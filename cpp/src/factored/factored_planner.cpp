@@ -26,8 +26,8 @@ void set_planning_active_count(PendingFactoredState& state, int k) {
 
 FactoredInstruction push_instruction(PendingFactoredState& state, FactoredInstruction instruction) {
     state.context->bump_next_condition(max_condition(instruction));
-    state.instructions.push_back(instruction);
-    return instruction;
+    state.instructions.push_back(std::move(instruction));
+    return state.instructions.back();
 }
 
 std::optional<int> measurement_record(PendingFactoredState& state, const PendingPauliMeasurement& measurement) {
@@ -326,7 +326,7 @@ std::optional<FactoredInstruction> process_nondiagonal_dormant_rotation(
     }
     const SymbolicBool sign = rotation_sign_from_pauli(current.pauli);
     PromoteDormantRotation instruction{current.kernel_angle, sign, SymbolicBoolEvaluationPlan(sign)};
-    FactoredInstruction pushed = push_instruction(state, instruction);
+    FactoredInstruction pushed = push_instruction(state, std::move(instruction));
     set_planning_active_count(state, old_k + 1);
     return pushed;
 }
@@ -500,7 +500,7 @@ std::optional<FactoredInstruction> measure_active_pauli_branches(
     if (!pauli_squares_to_identity(active_body)) {
         fail("active measurement Pauli must square to identity");
     }
-    const PrecomputedActivePauliMeasurementKernel kernel(active_body);
+    PrecomputedActivePauliMeasurementKernel kernel(active_body);
     const CliffordFrame frame = active_measurement_coordinate_frame(state, active_body, kernel);
     transform_pending_operations_by_frame(state, frame);
     const int branch = state.context->fresh_condition();
@@ -513,14 +513,14 @@ std::optional<FactoredInstruction> measure_active_pauli_branches(
     const SymbolicBool outcome = xor_bool(base_outcome, branch_bit);
     MeasurePrecomputedActivePauli instruction{
         active_body,
-        kernel,
+        std::move(kernel),
         branch,
         outcome,
         measurement_record(state, current),
         current.record_condition,
         SymbolicBoolEvaluationPlan(outcome),
     };
-    FactoredInstruction pushed = push_instruction(state, instruction);
+    FactoredInstruction pushed = push_instruction(state, std::move(instruction));
     reduce_pending_signs_by_measurement_relation(
         state,
         queued_first ? 2 : 1,
@@ -600,12 +600,22 @@ std::optional<FactoredInstruction> process_next_pending_operation(PendingFactore
     return state.instructions.back();
 }
 
-std::vector<FactoredInstruction> process_pending_operations(PendingFactoredState& state) {
-    const std::size_t start = state.instructions.size();
+namespace {
+
+void process_pending_operations_in_place(PendingFactoredState& state) {
     while (has_pending_operations(state)) {
         process_next_pending_operation(state);
     }
-    return std::vector<FactoredInstruction>(state.instructions.begin() + static_cast<std::ptrdiff_t>(start), state.instructions.end());
+}
+
+} // namespace
+
+std::vector<FactoredInstruction> process_pending_operations(PendingFactoredState& state) {
+    const std::size_t start = state.instructions.size();
+    process_pending_operations_in_place(state);
+    return std::vector<FactoredInstruction>(
+        state.instructions.begin() + static_cast<std::ptrdiff_t>(start),
+        state.instructions.end());
 }
 
 namespace {
@@ -830,9 +840,24 @@ FactoredInstructionProgram factored_instruction_program(const PendingFactoredSta
         state.pending_prefix_instruction_indices);
 }
 
+FactoredInstructionProgram factored_instruction_program(PendingFactoredState&& state) {
+    return FactoredInstructionProgram(
+        state.n,
+        state.initial_k,
+        std::move(state.instructions),
+        state.max_k,
+        *state.context,
+        std::move(state.pending_prefix_instruction_indices));
+}
+
 FactoredInstructionProgram plan_factored_updates(PendingFactoredState& state) {
-    process_pending_operations(state);
+    process_pending_operations_in_place(state);
     return factored_instruction_program(state);
+}
+
+FactoredInstructionProgram plan_factored_updates(PendingFactoredState&& state) {
+    process_pending_operations_in_place(state);
+    return factored_instruction_program(std::move(state));
 }
 
 } // namespace symft

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -61,7 +62,7 @@ int main(int argc, char** argv) {
 
             const auto plan_start = Clock::now();
             symft::PendingFactoredState pending(parsed.state);
-            auto program = symft::plan_factored_updates(pending);
+            auto program = symft::plan_factored_updates(std::move(pending));
             const auto plan_stop = Clock::now();
 
             n = parsed.state.n;

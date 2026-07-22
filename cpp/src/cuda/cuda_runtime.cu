@@ -894,6 +894,16 @@ __device__ __noinline__ bool eval_expression_bit_lazy(
         expression_index);
 }
 
+__device__ __forceinline__ CudaComplex compact_rotation_coefficient(
+    const CudaRotationKernel& kernel,
+    std::size_t source,
+    bool sign) {
+    const bool odd = (__popcll(static_cast<unsigned long long>(source & kernel.zmask)) & 1) != 0;
+    const CudaReal direction = sign != odd ? static_cast<CudaReal>(-1.0) : static_cast<CudaReal>(1.0);
+    return CudaComplex{direction * kernel.minus_even_re, direction * kernel.minus_even_im};
+}
+
+
 __device__ void apply_rotation_index(
     const DeviceProgramView& program,
     int rotation_index,
@@ -906,11 +916,10 @@ __device__ void apply_rotation_index(
     const int dim = 1 << k;
     const CudaReal c = kernel.cos_angle;
     if (kernel.kind == CudaRotationKernelKind::Diagonal) {
-        const int coeff_offset = sign ? kernel.diagonal_plus_offset : kernel.diagonal_minus_offset;
         for (int basis = tid; basis < dim; basis += blockDim.x) {
-            const auto coeff = program.complex_table[coeff_offset + basis];
-            const CudaReal fr = c + coeff.re;
-            const CudaReal fi = coeff.im;
+            const CudaComplex coefficient = compact_rotation_coefficient(kernel, static_cast<std::size_t>(basis), sign);
+            const CudaReal fr = c + coefficient.re;
+            const CudaReal fi = coefficient.im;
             const CudaReal r = active_re[basis];
             const CudaReal im = active_im[basis];
             active_re[basis] = fr * r - fi * im;
@@ -919,61 +928,45 @@ __device__ void apply_rotation_index(
         sample_sync();
         return;
     }
-
     if (kernel.kind == CudaRotationKernelKind::UniformImagPairs) {
-        const int coeff_offset = sign ? kernel.left_plus_offset : kernel.left_minus_offset;
-        const CudaReal q = program.complex_table[coeff_offset].im;
+        const CudaReal q = compact_rotation_coefficient(kernel, 0, sign).im;
         for (int pair = tid; pair < kernel.pair_count; pair += blockDim.x) {
-            const std::size_t i0 = device_insert_zero_bit(static_cast<std::size_t>(pair), kernel.pair_bit);
-            const std::size_t i1 = i0 ^ static_cast<std::size_t>(kernel.xmask);
-            const CudaReal r0 = active_re[i0];
-            const CudaReal i0v = active_im[i0];
-            const CudaReal r1 = active_re[i1];
-            const CudaReal i1v = active_im[i1];
-            active_re[i0] = c * r0 - q * i1v;
-            active_im[i0] = c * i0v + q * r1;
-            active_re[i1] = c * r1 - q * i0v;
-            active_im[i1] = c * i1v + q * r0;
+            const std::size_t left = device_insert_zero_bit(static_cast<std::size_t>(pair), kernel.pair_bit);
+            const std::size_t right = left ^ static_cast<std::size_t>(kernel.xmask);
+            const CudaReal r0 = active_re[left];
+            const CudaReal i0 = active_im[left];
+            const CudaReal r1 = active_re[right];
+            const CudaReal i1 = active_im[right];
+            active_re[left] = c * r0 - q * i1;
+            active_im[left] = c * i0 + q * r1;
+            active_re[right] = c * r1 - q * i0;
+            active_im[right] = c * i1 + q * r0;
         }
         sample_sync();
         return;
     }
-
-    if (kernel.kind == CudaRotationKernelKind::RealPairFlip) {
-        const int coeff_offset = sign ? kernel.left_plus_offset : kernel.left_minus_offset;
-        const CudaReal base_coeff = program.complex_table[coeff_offset].re;
-        for (int pair = tid; pair < kernel.pair_count; pair += blockDim.x) {
-            const std::size_t i0 = device_insert_zero_bit(static_cast<std::size_t>(pair), kernel.pair_bit);
-            const std::size_t i1 = i0 ^ static_cast<std::size_t>(kernel.xmask);
-            const CudaReal q = program.real_table[kernel.real_pair_phase_offset + pair] * base_coeff;
-            const CudaReal r0 = active_re[i0];
-            const CudaReal i0v = active_im[i0];
-            const CudaReal r1 = active_re[i1];
-            const CudaReal i1v = active_im[i1];
-            active_re[i0] = c * r0 - q * r1;
-            active_im[i0] = c * i0v - q * i1v;
-            active_re[i1] = c * r1 + q * r0;
-            active_im[i1] = c * i1v + q * i0v;
-        }
-        sample_sync();
-        return;
-    }
-
-    const int left_offset = sign ? kernel.left_plus_offset : kernel.left_minus_offset;
-    const int right_offset = sign ? kernel.right_plus_offset : kernel.right_minus_offset;
     for (int pair = tid; pair < kernel.pair_count; pair += blockDim.x) {
-        const std::size_t i0 = device_insert_zero_bit(static_cast<std::size_t>(pair), kernel.pair_bit);
-        const std::size_t i1 = i0 ^ static_cast<std::size_t>(kernel.xmask);
-        const CudaReal r0 = active_re[i0];
-        const CudaReal i0v = active_im[i0];
-        const CudaReal r1 = active_re[i1];
-        const CudaReal i1v = active_im[i1];
-        const auto left = program.complex_table[left_offset + pair];
-        const auto right = program.complex_table[right_offset + pair];
-        active_re[i0] = c * r0 + right.re * r1 - right.im * i1v;
-        active_im[i0] = c * i0v + right.re * i1v + right.im * r1;
-        active_re[i1] = c * r1 + left.re * r0 - left.im * i0v;
-        active_im[i1] = c * i1v + left.re * i0v + left.im * r0;
+        const std::size_t left = device_insert_zero_bit(static_cast<std::size_t>(pair), kernel.pair_bit);
+        const std::size_t right = left ^ static_cast<std::size_t>(kernel.xmask);
+        const bool left_odd = (__popcll(static_cast<unsigned long long>(left & kernel.zmask)) & 1) != 0;
+        const CudaReal left_direction = sign != left_odd ? static_cast<CudaReal>(-1.0) : static_cast<CudaReal>(1.0);
+        const CudaReal right_direction = kernel.xz_overlap_odd != 0 ? -left_direction : left_direction;
+        const CudaComplex left_coefficient{
+            left_direction * kernel.minus_even_re,
+            left_direction * kernel.minus_even_im,
+        };
+        const CudaComplex right_coefficient{
+            right_direction * kernel.minus_even_re,
+            right_direction * kernel.minus_even_im,
+        };
+        const CudaReal r0 = active_re[left];
+        const CudaReal i0 = active_im[left];
+        const CudaReal r1 = active_re[right];
+        const CudaReal i1 = active_im[right];
+        active_re[left] = c * r0 + right_coefficient.re * r1 - right_coefficient.im * i1;
+        active_im[left] = c * i0 + right_coefficient.re * i1 + right_coefficient.im * r1;
+        active_re[right] = c * r1 + left_coefficient.re * r0 - left_coefficient.im * i0;
+        active_im[right] = c * i1 + left_coefficient.re * i0 + left_coefficient.im * r0;
     }
     sample_sync();
 }
@@ -996,8 +989,8 @@ __device__ void apply_diagonal_rotation_subrun(
             const int idx = first_run_index + local;
             const auto& item = program.rotation_run_items[instruction.rotation_run_offset + idx];
             const auto& kernel = program.rotations[item.rotation];
-            const int coeff_offset = run_signs[idx] != 0 ? kernel.diagonal_plus_offset : kernel.diagonal_minus_offset;
-            const auto coeff = program.complex_table[coeff_offset + basis];
+            const auto coeff = compact_rotation_coefficient(
+                kernel, static_cast<std::size_t>(basis), run_signs[idx] != 0);
             const CudaReal next_re = kernel.cos_angle + coeff.re;
             const CudaReal next_im = coeff.im;
             const CudaReal old_re = factor_re;
@@ -1181,6 +1174,7 @@ __device__ CudaReal measurement_true_probability(
     CudaReal* scratch_re,
     CudaReal* scratch_im,
     CudaReal* reduction) {
+    (void)program;
     const int tid = threadIdx.x;
     CudaReal partial = 0.0;
     if (kernel.is_diagonal != 0) {
@@ -1192,23 +1186,9 @@ __device__ CudaReal measurement_true_probability(
             scratch_im[idx] = im;
             partial += re * re + im * im;
         }
-    } else if (kernel.xmask != 0) {
-        for (int idx = tid; idx < kernel.out_dim; idx += blockDim.x) {
-            const CudaComplex value = nondiagonal_measurement_value(kernel, active_re, active_im, idx, true);
-            scratch_re[idx] = value.re;
-            scratch_im[idx] = value.im;
-            partial += value.re * value.re + value.im * value.im;
-        }
     } else {
         for (int idx = tid; idx < kernel.out_dim; idx += blockDim.x) {
-            const int source0 = program.source_table[kernel.source0_true_offset + idx];
-            const int source1 = program.source_table[kernel.source1_true_offset + idx];
-            const auto coeff0 = program.complex_table[kernel.coeff0_true_offset + idx];
-            const auto coeff1 = program.complex_table[kernel.coeff1_true_offset + idx];
-            CudaComplex value = cmul(coeff0, CudaComplex{active_re[source0], active_im[source0]});
-            if (source1 >= 0) {
-                value = cadd(value, cmul(coeff1, CudaComplex{active_re[source1], active_im[source1]}));
-            }
+            const CudaComplex value = nondiagonal_measurement_value(kernel, active_re, active_im, idx, true);
             scratch_re[idx] = value.re;
             scratch_im[idx] = value.im;
             partial += value.re * value.re + value.im * value.im;
@@ -1264,36 +1244,19 @@ __device__ void project_measurement_branch(
     CudaReal* active_im,
     CudaReal* scratch_re,
     CudaReal* scratch_im) {
+    (void)program;
     const int tid = threadIdx.x;
-    const int source0_offset = branch ? kernel.source0_true_offset : kernel.source0_false_offset;
-    const int source1_offset = branch ? kernel.source1_true_offset : kernel.source1_false_offset;
-    const int coeff0_offset = branch ? kernel.coeff0_true_offset : kernel.coeff0_false_offset;
-    const int coeff1_offset = branch ? kernel.coeff1_true_offset : kernel.coeff1_false_offset;
     if (kernel.is_diagonal != 0) {
         for (int idx = tid; idx < kernel.out_dim; idx += blockDim.x) {
             const int source = diagonal_measurement_source(kernel, idx, branch);
             scratch_re[idx] = active_re[source] * invnorm;
             scratch_im[idx] = active_im[source] * invnorm;
         }
-    } else if (kernel.xmask != 0) {
+    } else {
         for (int idx = tid; idx < kernel.out_dim; idx += blockDim.x) {
             const CudaComplex value = nondiagonal_measurement_value(kernel, active_re, active_im, idx, branch);
             scratch_re[idx] = value.re * invnorm;
             scratch_im[idx] = value.im * invnorm;
-        }
-    } else {
-        for (int idx = tid; idx < kernel.out_dim; idx += blockDim.x) {
-            const int source0 = program.source_table[source0_offset + idx];
-            const int source1 = program.source_table[source1_offset + idx];
-            const auto coeff0 = program.complex_table[coeff0_offset + idx];
-            const auto coeff1 = program.complex_table[coeff1_offset + idx];
-            CudaComplex value = cmul(coeff0, CudaComplex{active_re[source0], active_im[source0]});
-            if (source1 >= 0) {
-                value = cadd(value, cmul(coeff1, CudaComplex{active_re[source1], active_im[source1]}));
-            }
-            value = cscale(value, invnorm);
-            scratch_re[idx] = value.re;
-            scratch_im[idx] = value.im;
         }
     }
     sample_sync();
@@ -1465,6 +1428,7 @@ __device__ __forceinline__ bool scalar_eval_expression_bit_fast(
         expression_index);
 }
 
+
 __device__ void scalar_apply_rotation_index(
     const DeviceProgramView& program,
     int rotation_index,
@@ -1476,11 +1440,10 @@ __device__ void scalar_apply_rotation_index(
     const int dim = 1 << k;
     const CudaReal c = kernel.cos_angle;
     if (kernel.kind == CudaRotationKernelKind::Diagonal) {
-        const int coeff_offset = sign ? kernel.diagonal_plus_offset : kernel.diagonal_minus_offset;
         for (int basis = 0; basis < dim; ++basis) {
-            const auto coeff = program.complex_table[coeff_offset + basis];
-            const CudaReal fr = c + coeff.re;
-            const CudaReal fi = coeff.im;
+            const CudaComplex coefficient = compact_rotation_coefficient(kernel, static_cast<std::size_t>(basis), sign);
+            const CudaReal fr = c + coefficient.re;
+            const CudaReal fi = coefficient.im;
             const CudaReal r = active_re[basis];
             const CudaReal im = active_im[basis];
             active_re[basis] = fr * r - fi * im;
@@ -1488,59 +1451,44 @@ __device__ void scalar_apply_rotation_index(
         }
         return;
     }
-
     if (kernel.kind == CudaRotationKernelKind::UniformImagPairs) {
-        const int coeff_offset = sign ? kernel.left_plus_offset : kernel.left_minus_offset;
-        const CudaReal q = program.complex_table[coeff_offset].im;
+        const CudaReal q = compact_rotation_coefficient(kernel, 0, sign).im;
         for (int pair = 0; pair < kernel.pair_count; ++pair) {
-            const std::size_t i0 = device_insert_zero_bit(static_cast<std::size_t>(pair), kernel.pair_bit);
-            const std::size_t i1 = i0 ^ static_cast<std::size_t>(kernel.xmask);
-            const CudaReal r0 = active_re[i0];
-            const CudaReal i0v = active_im[i0];
-            const CudaReal r1 = active_re[i1];
-            const CudaReal i1v = active_im[i1];
-            active_re[i0] = c * r0 - q * i1v;
-            active_im[i0] = c * i0v + q * r1;
-            active_re[i1] = c * r1 - q * i0v;
-            active_im[i1] = c * i1v + q * r0;
+            const std::size_t left = device_insert_zero_bit(static_cast<std::size_t>(pair), kernel.pair_bit);
+            const std::size_t right = left ^ static_cast<std::size_t>(kernel.xmask);
+            const CudaReal r0 = active_re[left];
+            const CudaReal i0 = active_im[left];
+            const CudaReal r1 = active_re[right];
+            const CudaReal i1 = active_im[right];
+            active_re[left] = c * r0 - q * i1;
+            active_im[left] = c * i0 + q * r1;
+            active_re[right] = c * r1 - q * i0;
+            active_im[right] = c * i1 + q * r0;
         }
         return;
     }
-
-    if (kernel.kind == CudaRotationKernelKind::RealPairFlip) {
-        const int coeff_offset = sign ? kernel.left_plus_offset : kernel.left_minus_offset;
-        const CudaReal base_coeff = program.complex_table[coeff_offset].re;
-        for (int pair = 0; pair < kernel.pair_count; ++pair) {
-            const std::size_t i0 = device_insert_zero_bit(static_cast<std::size_t>(pair), kernel.pair_bit);
-            const std::size_t i1 = i0 ^ static_cast<std::size_t>(kernel.xmask);
-            const CudaReal q = program.real_table[kernel.real_pair_phase_offset + pair] * base_coeff;
-            const CudaReal r0 = active_re[i0];
-            const CudaReal i0v = active_im[i0];
-            const CudaReal r1 = active_re[i1];
-            const CudaReal i1v = active_im[i1];
-            active_re[i0] = c * r0 - q * r1;
-            active_im[i0] = c * i0v - q * i1v;
-            active_re[i1] = c * r1 + q * r0;
-            active_im[i1] = c * i1v + q * i0v;
-        }
-        return;
-    }
-
-    const int left_offset = sign ? kernel.left_plus_offset : kernel.left_minus_offset;
-    const int right_offset = sign ? kernel.right_plus_offset : kernel.right_minus_offset;
     for (int pair = 0; pair < kernel.pair_count; ++pair) {
-        const std::size_t i0 = device_insert_zero_bit(static_cast<std::size_t>(pair), kernel.pair_bit);
-        const std::size_t i1 = i0 ^ static_cast<std::size_t>(kernel.xmask);
-        const CudaReal r0 = active_re[i0];
-        const CudaReal i0v = active_im[i0];
-        const CudaReal r1 = active_re[i1];
-        const CudaReal i1v = active_im[i1];
-        const auto left = program.complex_table[left_offset + pair];
-        const auto right = program.complex_table[right_offset + pair];
-        active_re[i0] = c * r0 + right.re * r1 - right.im * i1v;
-        active_im[i0] = c * i0v + right.re * i1v + right.im * r1;
-        active_re[i1] = c * r1 + left.re * r0 - left.im * i0v;
-        active_im[i1] = c * i1v + left.re * i0v + left.im * r0;
+        const std::size_t left = device_insert_zero_bit(static_cast<std::size_t>(pair), kernel.pair_bit);
+        const std::size_t right = left ^ static_cast<std::size_t>(kernel.xmask);
+        const bool left_odd = (__popcll(static_cast<unsigned long long>(left & kernel.zmask)) & 1) != 0;
+        const CudaReal left_direction = sign != left_odd ? static_cast<CudaReal>(-1.0) : static_cast<CudaReal>(1.0);
+        const CudaReal right_direction = kernel.xz_overlap_odd != 0 ? -left_direction : left_direction;
+        const CudaComplex left_coefficient{
+            left_direction * kernel.minus_even_re,
+            left_direction * kernel.minus_even_im,
+        };
+        const CudaComplex right_coefficient{
+            right_direction * kernel.minus_even_re,
+            right_direction * kernel.minus_even_im,
+        };
+        const CudaReal r0 = active_re[left];
+        const CudaReal i0 = active_im[left];
+        const CudaReal r1 = active_re[right];
+        const CudaReal i1 = active_im[right];
+        active_re[left] = c * r0 + right_coefficient.re * r1 - right_coefficient.im * i1;
+        active_im[left] = c * i0 + right_coefficient.re * i1 + right_coefficient.im * r1;
+        active_re[right] = c * r1 + left_coefficient.re * r0 - left_coefficient.im * i0;
+        active_im[right] = c * i1 + left_coefficient.re * i0 + left_coefficient.im * r0;
     }
 }
 
@@ -1569,15 +1517,15 @@ __device__ CudaReal scalar_measurement_true_probability(
     const CudaMeasurementKernel& kernel,
     const CudaReal* active_re,
     const CudaReal* active_im) {
+    (void)program;
     CudaReal p = 0.0f;
     for (int idx = 0; idx < kernel.out_dim; ++idx) {
-        const int source0 = program.source_table[kernel.source0_true_offset + idx];
-        const int source1 = program.source_table[kernel.source1_true_offset + idx];
-        const auto coeff0 = program.complex_table[kernel.coeff0_true_offset + idx];
-        const auto coeff1 = program.complex_table[kernel.coeff1_true_offset + idx];
-        CudaComplex value = cmul(coeff0, CudaComplex{active_re[source0], active_im[source0]});
-        if (source1 >= 0) {
-            value = cadd(value, cmul(coeff1, CudaComplex{active_re[source1], active_im[source1]}));
+        CudaComplex value;
+        if (kernel.is_diagonal != 0) {
+            const int source = diagonal_measurement_source(kernel, idx, true);
+            value = CudaComplex{active_re[source], active_im[source]};
+        } else {
+            value = nondiagonal_measurement_value(kernel, active_re, active_im, idx, true);
         }
         p += value.re * value.re + value.im * value.im;
     }
@@ -1599,18 +1547,14 @@ __device__ void scalar_project_measurement_branch(
     CudaReal* active_im,
     CudaReal* scratch_re,
     CudaReal* scratch_im) {
-    const int source0_offset = branch ? kernel.source0_true_offset : kernel.source0_false_offset;
-    const int source1_offset = branch ? kernel.source1_true_offset : kernel.source1_false_offset;
-    const int coeff0_offset = branch ? kernel.coeff0_true_offset : kernel.coeff0_false_offset;
-    const int coeff1_offset = branch ? kernel.coeff1_true_offset : kernel.coeff1_false_offset;
+    (void)program;
     for (int idx = 0; idx < kernel.out_dim; ++idx) {
-        const int source0 = program.source_table[source0_offset + idx];
-        const int source1 = program.source_table[source1_offset + idx];
-        const auto coeff0 = program.complex_table[coeff0_offset + idx];
-        const auto coeff1 = program.complex_table[coeff1_offset + idx];
-        CudaComplex value = cmul(coeff0, CudaComplex{active_re[source0], active_im[source0]});
-        if (source1 >= 0) {
-            value = cadd(value, cmul(coeff1, CudaComplex{active_re[source1], active_im[source1]}));
+        CudaComplex value;
+        if (kernel.is_diagonal != 0) {
+            const int source = diagonal_measurement_source(kernel, idx, branch);
+            value = CudaComplex{active_re[source], active_im[source]};
+        } else {
+            value = nondiagonal_measurement_value(kernel, active_re, active_im, idx, branch);
         }
         value = cscale(value, invnorm);
         scratch_re[idx] = value.re;

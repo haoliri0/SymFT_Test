@@ -1467,8 +1467,8 @@ void reset_batch_executor(
         runtime.eval_scratch.resize(runtime.batch_words, 0);
     }
     std::fill(runtime.eval_scratch.begin(), runtime.eval_scratch.end(), 0);
-    if (runtime.rotation_coefficients.size() < static_cast<std::size_t>(runtime.active_pitch)) {
-        runtime.rotation_coefficients.resize(static_cast<std::size_t>(runtime.active_pitch), 0.0);
+    if (runtime.shot_coefficient_scalars.size() < static_cast<std::size_t>(runtime.active_pitch)) {
+        runtime.shot_coefficient_scalars.resize(static_cast<std::size_t>(runtime.active_pitch), 0.0);
     }
     if (runtime.branch_prob_true.size() < static_cast<std::size_t>(runtime.active_pitch)) {
         runtime.branch_prob_true.resize(static_cast<std::size_t>(runtime.active_pitch), 0.0);

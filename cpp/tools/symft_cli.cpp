@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <string>
+#include <utility>
 
 int main(int argc, char** argv) {
     if (argc < 2 || argc > 3) {
@@ -15,7 +16,7 @@ int main(int argc, char** argv) {
         const int shots = argc == 3 ? std::stoi(argv[2]) : 1000;
         const auto parsed = symft::parse_stim_file(path);
         symft::PendingFactoredState pending(parsed.state);
-        const auto program = symft::plan_factored_updates(pending);
+        const auto program = symft::plan_factored_updates(std::move(pending));
         const auto summary = symft::estimate_stim_logical_error_rate(parsed, shots);
         std::cout << "qubits " << parsed.state.n << "\n";
         std::cout << "records " << program.nrecords << "\n";

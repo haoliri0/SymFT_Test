@@ -22,37 +22,6 @@ std::int32_t checked_i32(std::size_t value, const char* what) {
     return static_cast<std::int32_t>(value);
 }
 
-std::int32_t append_complexes(CudaProgramData& out, const std::vector<Complex>& values) {
-    const std::int32_t offset = checked_i32(out.complex_table.size(), "complex table");
-    out.complex_table.reserve(out.complex_table.size() + values.size());
-    for (const auto& value : values) {
-        out.complex_table.push_back(CudaComplex{static_cast<CudaReal>(value.real()), static_cast<CudaReal>(value.imag())});
-    }
-    return offset;
-}
-
-std::int32_t append_reals(CudaProgramData& out, const std::vector<double>& values) {
-    const std::int32_t offset = checked_i32(out.real_table.size(), "real table");
-    out.real_table.reserve(out.real_table.size() + values.size());
-    for (double value : values) {
-        out.real_table.push_back(static_cast<CudaReal>(value));
-    }
-    return offset;
-}
-
-std::int32_t append_sources(CudaProgramData& out, const std::vector<std::size_t>& values) {
-    const std::int32_t offset = checked_i32(out.source_table.size(), "source table");
-    out.source_table.reserve(out.source_table.size() + values.size());
-    for (std::size_t value : values) {
-        if (value == detail::kNoSource) {
-            out.source_table.push_back(-1);
-        } else {
-            out.source_table.push_back(checked_i32(value, "source index"));
-        }
-    }
-    return offset;
-}
-
 std::int32_t append_records(CudaProgramData& out, const std::vector<int>& records) {
     const std::int32_t offset = checked_i32(out.record_table.size(), "record table");
     out.record_table.reserve(out.record_table.size() + records.size());
@@ -188,17 +157,14 @@ std::int32_t append_rotation(CudaProgramData& out, const PrecomputedActivePauliR
     gpu.is_diagonal = kernel.is_diagonal ? 1 : 0;
     gpu.uniform_imag_pairs = kernel.uniform_imag_pairs ? 1 : 0;
     gpu.real_pair_flip = kernel.real_pair_flip ? 1 : 0;
+    gpu.xz_overlap_odd = kernel.action.xz_overlap_odd ? 1 : 0;
     gpu.pair_bit = static_cast<std::int32_t>(kernel.pair_bit);
     gpu.pair_count = checked_i32(kernel.pair_count, "rotation pair count");
     gpu.xmask = kernel.action.xmask;
+    gpu.zmask = kernel.action.zmask;
+    gpu.minus_even_re = static_cast<CudaReal>(kernel.minus_even_coefficient.real());
+    gpu.minus_even_im = static_cast<CudaReal>(kernel.minus_even_coefficient.imag());
     gpu.cos_angle = kernel.cos_kernel_angle;
-    gpu.diagonal_minus_offset = append_complexes(out, kernel.diagonal_minus_coefficients);
-    gpu.diagonal_plus_offset = append_complexes(out, kernel.diagonal_plus_coefficients);
-    gpu.left_minus_offset = append_complexes(out, kernel.pair_left_minus_coefficients);
-    gpu.right_minus_offset = append_complexes(out, kernel.pair_right_minus_coefficients);
-    gpu.left_plus_offset = append_complexes(out, kernel.pair_left_plus_coefficients);
-    gpu.right_plus_offset = append_complexes(out, kernel.pair_right_plus_coefficients);
-    gpu.real_pair_phase_offset = append_reals(out, kernel.real_pair_flip_basis_phase_signs);
     out.rotations.push_back(gpu);
     return checked_i32(out.rotations.size() - 1, "rotation index");
 }
@@ -211,20 +177,8 @@ std::int32_t append_measurement(CudaProgramData& out, const PrecomputedActivePau
     gpu.zmask = kernel.action.zmask;
     gpu.even_phase_re = static_cast<CudaReal>(kernel.action.even_phase.real());
     gpu.even_phase_im = static_cast<CudaReal>(kernel.action.even_phase.imag());
-    if (kernel.is_diagonal) {
-        const bool negative_phase = std::abs(kernel.action.even_phase.real() + 1.0) < 1e-12 &&
-                                    std::abs(kernel.action.even_phase.imag()) < 1e-12;
-        gpu.diagonal_phase_bit = negative_phase ? 1 : 0;
-    }
-    gpu.out_dim = checked_i32(kernel.source0_false.size(), "measurement output dimension");
-    gpu.source0_false_offset = append_sources(out, kernel.source0_false);
-    gpu.source1_false_offset = append_sources(out, kernel.source1_false);
-    gpu.coeff0_false_offset = append_complexes(out, kernel.coeff0_false);
-    gpu.coeff1_false_offset = append_complexes(out, kernel.coeff1_false);
-    gpu.source0_true_offset = append_sources(out, kernel.source0_true);
-    gpu.source1_true_offset = append_sources(out, kernel.source1_true);
-    gpu.coeff0_true_offset = append_complexes(out, kernel.coeff0_true);
-    gpu.coeff1_true_offset = append_complexes(out, kernel.coeff1_true);
+    gpu.diagonal_phase_bit = kernel.diagonal_phase_bit;
+    gpu.out_dim = checked_i32(kernel.out_dim, "measurement output dimension");
     out.measurements.push_back(gpu);
     return checked_i32(out.measurements.size() - 1, "measurement index");
 }

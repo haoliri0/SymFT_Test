@@ -102,6 +102,9 @@ target_link_libraries(symft_cli PRIVATE symft_cpp)
 add_executable(symft_bench tools/symft_bench.cpp)
 target_link_libraries(symft_bench PRIVATE symft_cpp)
 
+add_executable(symft_plan tools/symft_plan.cpp)
+target_link_libraries(symft_plan PRIVATE symft_cpp)
+
 add_executable(symft_batch_bench tools/symft_batch_bench.cpp)
 target_link_libraries(symft_batch_bench PRIVATE symft_cpp)
 

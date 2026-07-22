@@ -1,4 +1,4 @@
-#include "active_kernels.hpp"
+#include "active_internal.hpp"
 
 #include "simd/simd.hpp"
 
@@ -53,115 +53,18 @@ PrecomputedActivePauliRotationKernel::PrecomputedActivePauliRotationKernel(
     : action(action_),
       is_diagonal(action.xmask == 0),
       kernel_angle(kernel_angle_),
-      cos_kernel_angle(std::cos(kernel_angle_)) {
-    const Complex minus_i_s(0.0, -std::sin(kernel_angle));
-    const Complex plus_i_s(0.0, std::sin(kernel_angle));
+      cos_kernel_angle(std::cos(kernel_angle_)),
+      sin_kernel_angle(std::sin(kernel_angle_)),
+      minus_even_coefficient(Complex(0.0, -sin_kernel_angle) * action.even_phase) {
     const std::size_t dim = active_length(action.nqubits);
     if (is_diagonal) {
-        diagonal_minus_coefficients.resize(dim);
-        diagonal_plus_coefficients.resize(dim);
-        for (std::size_t basis = 0; basis < dim; ++basis) {
-            const Complex phase = active_action_phase(action, basis);
-            diagonal_minus_coefficients[basis] = minus_i_s * phase;
-            diagonal_plus_coefficients[basis] = plus_i_s * phase;
-        }
         return;
     }
     uniform_imag_pairs = action.zmask == 0;
     real_pair_flip = can_rotate_real_pair_flip(action);
     pair_bit = static_cast<unsigned>(highest_set_bit64(action.xmask));
     pair_count = dim >> 1;
-    for (std::size_t pair_idx = 0; pair_idx < pair_count; ++pair_idx) {
-        const std::size_t left = insert_zero_bit(pair_idx, static_cast<int>(pair_bit));
-        const std::size_t right = left ^ action.xmask;
-        if (real_pair_flip) {
-            real_pair_flip_basis_phase_signs.push_back(
-                is_odd_popcount(static_cast<std::uint64_t>(left) & action.zmask) ? -1.0 : 1.0);
-        }
-        const Complex left_phase = active_action_phase(action, left);
-        const Complex right_phase = active_action_phase(action, right);
-        pair_left_minus_coefficients.push_back(minus_i_s * left_phase);
-        pair_right_minus_coefficients.push_back(minus_i_s * right_phase);
-        pair_left_plus_coefficients.push_back(plus_i_s * left_phase);
-        pair_right_plus_coefficients.push_back(plus_i_s * right_phase);
-    }
 }
-
-namespace {
-
-PrecomputedActivePauliMeasurementKernel precomputed_nondiagonal_measurement_kernel(const ActivePauliAction& action) {
-    PrecomputedActivePauliMeasurementKernel out;
-    out.action = action;
-    out.is_diagonal = false;
-    out.pivot = highest_set_bit64(action.xmask);
-    const std::size_t dim = active_length(action.nqubits);
-    const std::size_t out_dim = dim >> 1;
-    const double inv_sqrt2 = 1.0 / std::sqrt(2.0);
-    out.source0_false.reserve(out_dim);
-    out.source1_false.reserve(out_dim);
-    out.coeff0_false.reserve(out_dim);
-    out.coeff1_false.reserve(out_dim);
-    out.coeff1_false_real.reserve(out_dim);
-    out.coeff1_false_imag.reserve(out_dim);
-    out.source0_true.reserve(out_dim);
-    out.source1_true.reserve(out_dim);
-    out.coeff0_true.reserve(out_dim);
-    out.coeff1_true.reserve(out_dim);
-    for (std::size_t packed = 0; packed < out_dim; ++packed) {
-        const std::size_t x0 = insert_zero_bit(packed, out.pivot);
-        const std::size_t x1 = x0 ^ action.xmask;
-        const Complex eta = active_action_phase(action, x0);
-        const Complex coeff = (Complex(1.0, 0.0) / eta) * inv_sqrt2;
-        out.source0_false.push_back(x0);
-        out.source1_false.push_back(x1);
-        out.coeff0_false.push_back(Complex(inv_sqrt2, 0.0));
-        out.coeff1_false.push_back(coeff);
-        out.coeff1_false_real.push_back(coeff.real());
-        out.coeff1_false_imag.push_back(coeff.imag());
-        out.source0_true.push_back(x0);
-        out.source1_true.push_back(x1);
-        out.coeff0_true.push_back(Complex(inv_sqrt2, 0.0));
-        out.coeff1_true.push_back(-coeff);
-    }
-    return out;
-}
-
-PrecomputedActivePauliMeasurementKernel precomputed_diagonal_measurement_kernel(const ActivePauliAction& action) {
-    PrecomputedActivePauliMeasurementKernel out;
-    out.action = action;
-    out.is_diagonal = true;
-    out.pivot = highest_set_bit64(action.zmask);
-    const std::size_t dim = active_length(action.nqubits);
-    const std::size_t out_dim = dim >> 1;
-    const bool negative_phase = std::abs(action.even_phase.real() + 1.0) < 1e-12 &&
-                                std::abs(action.even_phase.imag()) < 1e-12;
-    const bool positive_phase = std::abs(action.even_phase.real() - 1.0) < 1e-12 &&
-                                std::abs(action.even_phase.imag()) < 1e-12;
-    if (!negative_phase && !positive_phase) {
-        fail("diagonal active measurement Pauli must have real eigenvalues");
-    }
-    const int phase_bit = negative_phase ? 1 : 0;
-    const std::uint64_t z_without_pivot = action.zmask & ~(std::uint64_t{1} << out.pivot);
-    out.source0_false.reserve(out_dim);
-    out.source0_true.reserve(out_dim);
-    out.coeff0_false.assign(out_dim, Complex(1.0, 0.0));
-    out.coeff1_false.assign(out_dim, Complex(0.0, 0.0));
-    out.coeff0_true.assign(out_dim, Complex(1.0, 0.0));
-    out.coeff1_true.assign(out_dim, Complex(0.0, 0.0));
-    out.source1_false.assign(out_dim, kNoSource);
-    out.source1_true.assign(out_dim, kNoSource);
-    for (std::size_t packed = 0; packed < out_dim; ++packed) {
-        const std::size_t x_without_pivot = insert_zero_bit(packed, out.pivot);
-        const int parity = popcount64(static_cast<std::uint64_t>(x_without_pivot) & z_without_pivot) & 1;
-        const int false_pivot = phase_bit ^ parity;
-        const int true_pivot = false_pivot ^ 1;
-        out.source0_false.push_back(x_without_pivot | (std::size_t(false_pivot) << out.pivot));
-        out.source0_true.push_back(x_without_pivot | (std::size_t(true_pivot) << out.pivot));
-    }
-    return out;
-}
-
-} // namespace
 
 PrecomputedActivePauliMeasurementKernel::PrecomputedActivePauliMeasurementKernel(const PauliString& pauli)
     : PrecomputedActivePauliMeasurementKernel(ActivePauliAction(pauli)) {}
@@ -170,10 +73,25 @@ PrecomputedActivePauliMeasurementKernel::PrecomputedActivePauliMeasurementKernel
     if (action_.nqubits <= 0) {
         fail("cannot build an active measurement kernel for k == 0");
     }
+    action = action_;
+    out_dim = active_length(action.nqubits) >> 1;
+    constexpr double inv_sqrt2 = 0.707106781186547524400844362104849039;
+    nondiagonal_coefficient1_even = std::conj(action.even_phase) * inv_sqrt2;
     if (action_.xmask != 0) {
-        *this = precomputed_nondiagonal_measurement_kernel(action_);
+        is_diagonal = false;
+        pivot = highest_set_bit64(action.xmask);
     } else if (action_.zmask != 0) {
-        *this = precomputed_diagonal_measurement_kernel(action_);
+        is_diagonal = true;
+        pivot = highest_set_bit64(action.zmask);
+        const bool negative_phase = std::abs(action.even_phase.real() + 1.0) < 1e-12 &&
+                                    std::abs(action.even_phase.imag()) < 1e-12;
+        const bool positive_phase = std::abs(action.even_phase.real() - 1.0) < 1e-12 &&
+                                    std::abs(action.even_phase.imag()) < 1e-12;
+        if (!negative_phase && !positive_phase) {
+            fail("diagonal active measurement Pauli must have real eigenvalues");
+        }
+        diagonal_phase_bit = negative_phase ? 1 : 0;
+        z_without_pivot = action.zmask & ~(std::uint64_t{1} << pivot);
     } else {
         fail("cannot build an active measurement kernel for identity Pauli");
     }
@@ -262,45 +180,7 @@ void rotate_pauli(ActiveState& state, const PrecomputedActivePauliRotationKernel
     if (kernel.action.nqubits != state.k) {
         fail("rotation kernel dimension does not match active state");
     }
-    const double c = kernel.cos_kernel_angle;
-    if (kernel.is_diagonal) {
-        const auto& coefficients = sign ? kernel.diagonal_plus_coefficients : kernel.diagonal_minus_coefficients;
-        simd::dispatch_table().mul_assign(state.alpha.data(), coefficients.data(), c, coefficients.size());
-        return;
-    }
-    if (kernel.uniform_imag_pairs) {
-        const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
-        rotate_uniform_imag_pairs_scalar(
-            state.alpha.data(),
-            kernel.action.xmask,
-            kernel.pair_bit,
-            kernel.pair_count,
-            c,
-            coefficient.imag());
-        return;
-    }
-    if (kernel.real_pair_flip) {
-        const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
-        rotate_real_pair_flip_scalar(
-            state.alpha.data(),
-            kernel.action.xmask,
-            kernel.pair_bit,
-            kernel.real_pair_flip_basis_phase_signs.data(),
-            kernel.pair_count,
-            c,
-            coefficient.real());
-        return;
-    }
-    const auto& left_coeff = sign ? kernel.pair_left_plus_coefficients : kernel.pair_left_minus_coefficients;
-    const auto& right_coeff = sign ? kernel.pair_right_plus_coefficients : kernel.pair_right_minus_coefficients;
-    for (std::size_t idx = 0; idx < kernel.pair_count; ++idx) {
-        const std::size_t i0 = insert_zero_bit(idx, static_cast<int>(kernel.pair_bit));
-        const std::size_t i1 = i0 ^ static_cast<std::size_t>(kernel.action.xmask);
-        const Complex a0 = state.alpha[i0];
-        const Complex a1 = state.alpha[i1];
-        state.alpha[i0] = c * a0 + right_coeff[idx] * a1;
-        state.alpha[i1] = c * a1 + left_coeff[idx] * a0;
-    }
+    rotate_pauli(state, kernel.action, sign ? -kernel.kernel_angle : kernel.kernel_angle);
 }
 
 std::string active_simd_backend() {

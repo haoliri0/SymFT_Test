@@ -251,6 +251,212 @@ double avx2_norm_sum_soa(const double* re, const double* im, const std::size_t* 
     return out;
 }
 
+__m256d nondiagonal_coefficient_sign_mask4(
+    std::size_t source0,
+    std::uint64_t zmask,
+    bool branch) {
+    __m256i parity = _mm256_and_si256(
+        _mm256_set_epi64x(
+            static_cast<long long>(source0 + 3),
+            static_cast<long long>(source0 + 2),
+            static_cast<long long>(source0 + 1),
+            static_cast<long long>(source0)),
+        _mm256_set1_epi64x(static_cast<long long>(zmask)));
+    parity = _mm256_xor_si256(parity, _mm256_srli_epi64(parity, 32));
+    parity = _mm256_xor_si256(parity, _mm256_srli_epi64(parity, 16));
+    parity = _mm256_xor_si256(parity, _mm256_srli_epi64(parity, 8));
+    parity = _mm256_xor_si256(parity, _mm256_srli_epi64(parity, 4));
+    parity = _mm256_xor_si256(parity, _mm256_srli_epi64(parity, 2));
+    parity = _mm256_xor_si256(parity, _mm256_srli_epi64(parity, 1));
+    parity = _mm256_and_si256(parity, _mm256_set1_epi64x(1));
+    if (branch) {
+        parity = _mm256_xor_si256(parity, _mm256_set1_epi64x(1));
+    }
+    return _mm256_castsi256_pd(_mm256_slli_epi64(parity, 63));
+}
+
+struct NondiagonalAmplitudes4 {
+    __m256d re;
+    __m256d im;
+};
+
+NondiagonalAmplitudes4 nondiagonal_amplitudes4(
+    __m256d r0,
+    __m256d im0,
+    __m256d r1,
+    __m256d im1,
+    __m256d coefficient_sign_mask,
+    __m256d coefficient1_even_re,
+    __m256d coefficient1_even_im) {
+    constexpr double inv_sqrt2 = 0.707106781186547524400844362104849039;
+    const __m256d c0 = _mm256_set1_pd(inv_sqrt2);
+    const __m256d c1r = _mm256_xor_pd(coefficient1_even_re, coefficient_sign_mask);
+    const __m256d c1i = _mm256_xor_pd(coefficient1_even_im, coefficient_sign_mask);
+    __m256d ar = _mm256_fmadd_pd(c1r, r1, _mm256_mul_pd(c0, r0));
+    ar = _mm256_fnmadd_pd(c1i, im1, ar);
+    __m256d ai = _mm256_fmadd_pd(c1r, im1, _mm256_mul_pd(c0, im0));
+    ai = _mm256_fmadd_pd(c1i, r1, ai);
+    return {ar, ai};
+}
+
+double horizontal_sum4(__m256d value) {
+    const __m128d lo = _mm256_castpd256_pd128(value);
+    const __m128d hi = _mm256_extractf128_pd(value, 1);
+    const __m128d pair = _mm_add_pd(lo, hi);
+    return _mm_cvtsd_f64(_mm_hadd_pd(pair, pair));
+}
+
+template <std::size_t LaneMask>
+double avx2_measure_nondiagonal_probability_partner_permute_soa(
+    const double* re,
+    const double* im,
+    std::size_t dim,
+    std::uint64_t xmask,
+    std::uint64_t zmask,
+    unsigned pivot,
+    Complex coefficient1_even,
+    bool branch) {
+    const std::size_t selector = std::size_t{1} << pivot;
+    const std::size_t step = selector << 1;
+    const std::size_t lower_mask = static_cast<std::size_t>(xmask) & (selector - 1);
+    const std::size_t chunk_mask = lower_mask & ~std::size_t{3};
+    const __m256d coefficient1_even_re = _mm256_set1_pd(coefficient1_even.real());
+    const __m256d coefficient1_even_im = _mm256_set1_pd(coefficient1_even.imag());
+    __m256d probability = _mm256_setzero_pd();
+    for (std::size_t block = 0; block < dim; block += step) {
+        for (std::size_t offset = 0; offset < selector; offset += 4) {
+            const std::size_t source0 = block + offset;
+            const std::size_t source1 = block + selector + (offset ^ chunk_mask);
+            const __m256d r0 = _mm256_loadu_pd(re + source0);
+            const __m256d im0 = _mm256_loadu_pd(im + source0);
+            const __m256d r1 = permute_lanes_xor2_const<LaneMask>(_mm256_loadu_pd(re + source1));
+            const __m256d im1 = permute_lanes_xor2_const<LaneMask>(_mm256_loadu_pd(im + source1));
+            const auto amplitudes = nondiagonal_amplitudes4(
+                r0,
+                im0,
+                r1,
+                im1,
+                nondiagonal_coefficient_sign_mask4(source0, zmask, branch),
+                coefficient1_even_re,
+                coefficient1_even_im);
+            probability = _mm256_fmadd_pd(amplitudes.re, amplitudes.re, probability);
+            probability = _mm256_fmadd_pd(amplitudes.im, amplitudes.im, probability);
+        }
+    }
+    return horizontal_sum4(probability);
+}
+
+double avx2_measure_nondiagonal_probability_soa(
+    const double* re,
+    const double* im,
+    std::size_t dim,
+    std::uint64_t xmask,
+    std::uint64_t zmask,
+    unsigned pivot,
+    Complex coefficient1_even,
+    bool branch) {
+    if (pivot < 2) {
+        return scalar_table().measure_nondiagonal_probability_soa(
+            re, im, dim, xmask, zmask, pivot, coefficient1_even, branch);
+    }
+    const std::size_t lane_mask = static_cast<std::size_t>(xmask) & std::size_t{3};
+    switch (lane_mask) {
+    case 0:
+        return avx2_measure_nondiagonal_probability_partner_permute_soa<0>(
+            re, im, dim, xmask, zmask, pivot, coefficient1_even, branch);
+    case 1:
+        return avx2_measure_nondiagonal_probability_partner_permute_soa<1>(
+            re, im, dim, xmask, zmask, pivot, coefficient1_even, branch);
+    case 2:
+        return avx2_measure_nondiagonal_probability_partner_permute_soa<2>(
+            re, im, dim, xmask, zmask, pivot, coefficient1_even, branch);
+    default:
+        return avx2_measure_nondiagonal_probability_partner_permute_soa<3>(
+            re, im, dim, xmask, zmask, pivot, coefficient1_even, branch);
+    }
+}
+
+template <std::size_t LaneMask>
+void avx2_project_nondiagonal_partner_permute_soa(
+    const double* re,
+    const double* im,
+    double* out_re,
+    double* out_im,
+    std::size_t dim,
+    std::uint64_t xmask,
+    std::uint64_t zmask,
+    unsigned pivot,
+    Complex coefficient1_even,
+    bool branch,
+    double invnorm) {
+    const std::size_t selector = std::size_t{1} << pivot;
+    const std::size_t step = selector << 1;
+    const std::size_t lower_mask = static_cast<std::size_t>(xmask) & (selector - 1);
+    const std::size_t chunk_mask = lower_mask & ~std::size_t{3};
+    const __m256d coefficient1_even_re = _mm256_set1_pd(coefficient1_even.real());
+    const __m256d coefficient1_even_im = _mm256_set1_pd(coefficient1_even.imag());
+    const __m256d vinvnorm = _mm256_set1_pd(invnorm);
+    for (std::size_t block = 0; block < dim; block += step) {
+        const std::size_t output_base = block >> 1;
+        for (std::size_t offset = 0; offset < selector; offset += 4) {
+            const std::size_t source0 = block + offset;
+            const std::size_t source1 = block + selector + (offset ^ chunk_mask);
+            const __m256d r0 = _mm256_loadu_pd(re + source0);
+            const __m256d im0 = _mm256_loadu_pd(im + source0);
+            const __m256d r1 = permute_lanes_xor2_const<LaneMask>(_mm256_loadu_pd(re + source1));
+            const __m256d im1 = permute_lanes_xor2_const<LaneMask>(_mm256_loadu_pd(im + source1));
+            const auto amplitudes = nondiagonal_amplitudes4(
+                r0,
+                im0,
+                r1,
+                im1,
+                nondiagonal_coefficient_sign_mask4(source0, zmask, branch),
+                coefficient1_even_re,
+                coefficient1_even_im);
+            _mm256_storeu_pd(out_re + output_base + offset, _mm256_mul_pd(amplitudes.re, vinvnorm));
+            _mm256_storeu_pd(out_im + output_base + offset, _mm256_mul_pd(amplitudes.im, vinvnorm));
+        }
+    }
+}
+
+void avx2_project_nondiagonal_soa(
+    const double* re,
+    const double* im,
+    double* out_re,
+    double* out_im,
+    std::size_t dim,
+    std::uint64_t xmask,
+    std::uint64_t zmask,
+    unsigned pivot,
+    Complex coefficient1_even,
+    bool branch,
+    double invnorm) {
+    if (pivot < 2) {
+        scalar_table().project_nondiagonal_soa(
+            re, im, out_re, out_im, dim, xmask, zmask, pivot, coefficient1_even, branch, invnorm);
+        return;
+    }
+    const std::size_t lane_mask = static_cast<std::size_t>(xmask) & std::size_t{3};
+    switch (lane_mask) {
+    case 0:
+        avx2_project_nondiagonal_partner_permute_soa<0>(
+            re, im, out_re, out_im, dim, xmask, zmask, pivot, coefficient1_even, branch, invnorm);
+        break;
+    case 1:
+        avx2_project_nondiagonal_partner_permute_soa<1>(
+            re, im, out_re, out_im, dim, xmask, zmask, pivot, coefficient1_even, branch, invnorm);
+        break;
+    case 2:
+        avx2_project_nondiagonal_partner_permute_soa<2>(
+            re, im, out_re, out_im, dim, xmask, zmask, pivot, coefficient1_even, branch, invnorm);
+        break;
+    default:
+        avx2_project_nondiagonal_partner_permute_soa<3>(
+            re, im, out_re, out_im, dim, xmask, zmask, pivot, coefficient1_even, branch, invnorm);
+        break;
+    }
+}
+
 void avx2_rotate_uniform_imag_pairs_soa(
     double* re,
     double* im,
@@ -766,6 +972,8 @@ const KernelTable table = {
     avx2_norm_sum,
     avx2_mul_assign_soa,
     avx2_norm_sum_soa,
+    avx2_measure_nondiagonal_probability_soa,
+    avx2_project_nondiagonal_soa,
     avx2_rotate_uniform_imag_pairs_soa,
     avx2_rotate_real_pair_flip_soa,
     avx2_rotate_general_pairs_soa,

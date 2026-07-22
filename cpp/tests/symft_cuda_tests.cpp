@@ -113,7 +113,7 @@ void test_deterministic_postselection() {
 
 void test_fixture_discard_rates() {
     {
-        const std::string path = fixture_path("benchmarks/d3.stim");
+        const std::string path = fixture_path("benchmark/circuit/msc_d3_inject_cultivate_p1e-3.stim");
         const auto cpu = run_cpu_batch_file(path, 20000);
         const auto gpu = run_cuda_file(path, 20000);
         const auto gpu_presample = run_cuda_file(path, 20000, true, CudaMode::GpuPresampleExpressions);
@@ -133,7 +133,7 @@ void test_fixture_discard_rates() {
         require_close(discard_rate(gpu_lazy), discard_rate(cpu), 0.02, "CUDA d3 lazy discard rate matches CPU");
     }
     {
-        const std::string path = fixture_path("benchmarks/d5.stim");
+        const std::string path = fixture_path("benchmark/circuit/msc_d5_inject_cultivate_p1e-3.stim");
         const auto cpu = run_cpu_batch_file(path, 30000);
         const auto gpu = run_cuda_file(path, 30000);
         const auto gpu_presample = run_cuda_file(path, 30000, true, CudaMode::GpuPresampleExpressions);

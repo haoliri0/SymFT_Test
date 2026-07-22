@@ -1,5 +1,6 @@
 #include "simd/batch_simd.hpp"
 #include "sampler/active.hpp"
+#include "sampler/active_internal.hpp"
 #include "sampler/batch_sampler.hpp"
 
 #include <algorithm>
@@ -154,141 +155,52 @@ double checksum(const BatchState& state) {
     return out;
 }
 
+
 void apply_case(BatchState& state, const BenchCase& bench_case, int shots, SignPattern pattern) {
-    const auto& table = symft::batch_simd::scalar_table();
     const auto& kernel = bench_case.kernel;
-    const std::size_t dim = state.re.size() / static_cast<std::size_t>(shots);
     const auto bits = sign_bits(shots, pattern);
+    const std::size_t pitch = static_cast<std::size_t>(shots);
+    const std::size_t dim = state.re.size() / pitch;
+    const auto sign_at = [&](int shot) {
+        return (bits[static_cast<std::size_t>(shot >> 6)] & (std::uint64_t{1} << (shot & 63))) != 0;
+    };
+    const double c = kernel.cos_kernel_angle;
     if (kernel.is_diagonal) {
-        if (pattern == SignPattern::AllMinus) {
-            table.rotate_diagonal_const(
-                state.re.data(), state.im.data(), static_cast<std::size_t>(shots), shots, dim, kernel.diagonal_minus_coefficients.data(), kernel.cos_kernel_angle);
-        } else if (pattern == SignPattern::AllPlus) {
-            table.rotate_diagonal_const(
-                state.re.data(), state.im.data(), static_cast<std::size_t>(shots), shots, dim, kernel.diagonal_plus_coefficients.data(), kernel.cos_kernel_angle);
-        } else {
-            table.rotate_diagonal_mixed(
-                state.re.data(),
-                state.im.data(),
-                static_cast<std::size_t>(shots),
-                shots,
-                dim,
-                kernel.diagonal_minus_coefficients.data(),
-                kernel.diagonal_plus_coefficients.data(),
-                bits.data(),
-                kernel.cos_kernel_angle);
+        for (std::size_t basis = 0; basis < dim; ++basis) {
+            const Complex minus_coefficient = symft::detail::compact_rotation_coefficient(kernel, basis, false);
+            const std::size_t base = basis * pitch;
+            for (int shot = 0; shot < shots; ++shot) {
+                const std::size_t lane = static_cast<std::size_t>(shot);
+                const Complex coefficient = sign_at(shot) ? -minus_coefficient : minus_coefficient;
+                const double fr = c + coefficient.real();
+                const double fi = coefficient.imag();
+                const double r = state.re[base + lane];
+                const double i = state.im[base + lane];
+                state.re[base + lane] = fr * r - fi * i;
+                state.im[base + lane] = fr * i + fi * r;
+            }
         }
         return;
     }
-    if (kernel.uniform_imag_pairs) {
-        if (pattern == SignPattern::Mixed) {
-            const auto q = q_by_shot(
-                shots,
-                bits,
-                kernel.pair_left_minus_coefficients.front().imag(),
-                kernel.pair_left_plus_coefficients.front().imag());
-            table.rotate_uniform_imag_xmask(
-                state.re.data(),
-                state.im.data(),
-                static_cast<std::size_t>(shots),
-                shots,
-                kernel.action.xmask,
-                kernel.pair_bit,
-                kernel.pair_count,
-                kernel.cos_kernel_angle,
-                q.data());
-        } else {
-            const double q = pattern == SignPattern::AllPlus
-                                 ? kernel.pair_left_plus_coefficients.front().imag()
-                                 : kernel.pair_left_minus_coefficients.front().imag();
-            table.rotate_uniform_imag_xmask_const(
-                state.re.data(),
-                state.im.data(),
-                static_cast<std::size_t>(shots),
-                shots,
-                kernel.action.xmask,
-                kernel.pair_bit,
-                kernel.pair_count,
-                kernel.cos_kernel_angle,
-                q);
+    for (std::size_t pair = 0; pair < kernel.pair_count; ++pair) {
+        const std::size_t left = symft::detail::insert_zero_bit(pair, static_cast<int>(kernel.pair_bit));
+        const std::size_t right = left ^ static_cast<std::size_t>(kernel.action.xmask);
+        const Complex left_minus = symft::detail::compact_rotation_coefficient(kernel, left, false);
+        const Complex right_minus = symft::detail::compact_rotation_coefficient(kernel, right, false);
+        const std::size_t left_base = left * pitch;
+        const std::size_t right_base = right * pitch;
+        for (int shot = 0; shot < shots; ++shot) {
+            const std::size_t lane = static_cast<std::size_t>(shot);
+            const double direction = sign_at(shot) ? -1.0 : 1.0;
+            const Complex a0(state.re[left_base + lane], state.im[left_base + lane]);
+            const Complex a1(state.re[right_base + lane], state.im[right_base + lane]);
+            const Complex out0 = c * a0 + direction * right_minus * a1;
+            const Complex out1 = c * a1 + direction * left_minus * a0;
+            state.re[left_base + lane] = out0.real();
+            state.im[left_base + lane] = out0.imag();
+            state.re[right_base + lane] = out1.real();
+            state.im[right_base + lane] = out1.imag();
         }
-        return;
-    }
-    if (kernel.real_pair_flip) {
-        if (pattern == SignPattern::Mixed) {
-            const auto q = q_by_shot(
-                shots,
-                bits,
-                kernel.pair_left_minus_coefficients.front().real(),
-                kernel.pair_left_plus_coefficients.front().real());
-            table.rotate_real_pair_flip_xmask(
-                state.re.data(),
-                state.im.data(),
-                static_cast<std::size_t>(shots),
-                shots,
-                kernel.action.xmask,
-                kernel.pair_bit,
-                kernel.real_pair_flip_basis_phase_signs.data(),
-                kernel.pair_count,
-                kernel.cos_kernel_angle,
-                q.data());
-        } else {
-            const double q = pattern == SignPattern::AllPlus
-                                 ? kernel.pair_left_plus_coefficients.front().real()
-                                 : kernel.pair_left_minus_coefficients.front().real();
-            table.rotate_real_pair_flip_xmask_const(
-                state.re.data(),
-                state.im.data(),
-                static_cast<std::size_t>(shots),
-                shots,
-                kernel.action.xmask,
-                kernel.pair_bit,
-                kernel.real_pair_flip_basis_phase_signs.data(),
-                kernel.pair_count,
-                kernel.cos_kernel_angle,
-                q);
-        }
-        return;
-    }
-    if (pattern == SignPattern::AllMinus) {
-        table.rotate_general_xmask_const(
-            state.re.data(),
-            state.im.data(),
-            static_cast<std::size_t>(shots),
-            shots,
-            kernel.action.xmask,
-            kernel.pair_bit,
-            kernel.pair_count,
-            kernel.pair_left_minus_coefficients.data(),
-            kernel.pair_right_minus_coefficients.data(),
-            kernel.cos_kernel_angle);
-    } else if (pattern == SignPattern::AllPlus) {
-        table.rotate_general_xmask_const(
-            state.re.data(),
-            state.im.data(),
-            static_cast<std::size_t>(shots),
-            shots,
-            kernel.action.xmask,
-            kernel.pair_bit,
-            kernel.pair_count,
-            kernel.pair_left_plus_coefficients.data(),
-            kernel.pair_right_plus_coefficients.data(),
-            kernel.cos_kernel_angle);
-    } else {
-        table.rotate_general_xmask_mixed(
-            state.re.data(),
-            state.im.data(),
-            static_cast<std::size_t>(shots),
-            shots,
-            kernel.action.xmask,
-            kernel.pair_bit,
-            kernel.pair_count,
-            kernel.pair_left_minus_coefficients.data(),
-            kernel.pair_right_minus_coefficients.data(),
-            kernel.pair_left_plus_coefficients.data(),
-            kernel.pair_right_plus_coefficients.data(),
-            bits.data(),
-            kernel.cos_kernel_angle);
     }
 }
 

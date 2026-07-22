@@ -4,14 +4,14 @@
 
 namespace symft {
 
-const std::vector<double>& fill_rotation_coefficients(
+const std::vector<double>& fill_shot_coefficient_scalars(
     BatchFactoredExecutorState& runtime,
     const std::vector<std::uint64_t>& sign_bits,
     double minus_coeff,
     double plus_coeff) {
     const int lanes = runtime.active_pitch;
-    if (runtime.rotation_coefficients.size() < static_cast<std::size_t>(lanes)) {
-        runtime.rotation_coefficients.resize(static_cast<std::size_t>(lanes), 0.0);
+    if (runtime.shot_coefficient_scalars.size() < static_cast<std::size_t>(lanes)) {
+        runtime.shot_coefficient_scalars.resize(static_cast<std::size_t>(lanes), 0.0);
     }
     const std::size_t nwords = runtime_batch_word_count(runtime);
     for (std::size_t word = 0; word < nwords; ++word) {
@@ -20,11 +20,11 @@ const std::vector<double>& fill_rotation_coefficients(
         const int live = std::min(64, runtime.active_shots - base_shot);
         SYMFT_BATCH_SIMD_LOOP
         for (int bit = 0; bit < live; ++bit) {
-            runtime.rotation_coefficients[static_cast<std::size_t>(base_shot + bit)] =
+            runtime.shot_coefficient_scalars[static_cast<std::size_t>(base_shot + bit)] =
                 ((bits >> bit) & 1ULL) != 0 ? plus_coeff : minus_coeff;
         }
     }
-    return runtime.rotation_coefficients;
+    return runtime.shot_coefficient_scalars;
 }
 
 BatchSignMode batch_sign_mode(const BatchFactoredExecutorState& runtime, const std::vector<std::uint64_t>& sign_bits) {
@@ -55,73 +55,50 @@ void rotate_contiguous_active(
     const PrecomputedActivePauliRotationKernel& kernel,
     bool sign) {
     const double c = kernel.cos_kernel_angle;
-    const auto& simd_table = simd::dispatch_table();
     if (kernel.is_diagonal) {
-        const auto& coefficients = sign ? kernel.diagonal_plus_coefficients : kernel.diagonal_minus_coefficients;
-        if (dim < detail::kSimdPairRotationThreshold) {
-            detail::mul_assign_soa_inline(re, im, coefficients.data(), c, dim);
-        } else {
-            simd_table.mul_assign_soa(re, im, coefficients.data(), c, dim);
+        SYMFT_SINGLE_SIMD_LOOP
+        for (std::size_t basis = 0; basis < dim; ++basis) {
+            const Complex coefficient =
+                detail::compact_rotation_coefficient(kernel, basis, sign);
+            const double fr = c + coefficient.real();
+            const double fi = coefficient.imag();
+            const double r = re[basis];
+            const double i = im[basis];
+            re[basis] = fr * r - fi * i;
+            im[basis] = fr * i + fi * r;
         }
         return;
     }
     const std::size_t npairs = kernel.pair_count;
     if (kernel.uniform_imag_pairs) {
-        const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
+        const Complex coefficient = detail::compact_rotation_coefficient(kernel, 0, sign);
         if (npairs < detail::kSimdPairRotationThreshold) {
             detail::rotate_uniform_imag_pairs_soa_inline(re, im, dim, kernel.action.xmask, kernel.pair_bit, c, coefficient.imag());
         } else {
-            simd_table.rotate_uniform_imag_pairs_soa(re, im, dim, kernel.action.xmask, kernel.pair_bit, c, coefficient.imag());
+            simd::dispatch_table().rotate_uniform_imag_pairs_soa(
+                re, im, dim, kernel.action.xmask, kernel.pair_bit, c, coefficient.imag());
         }
         return;
     }
-    if (kernel.real_pair_flip) {
-        const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
-        if (npairs < detail::kSimdPairRotationThreshold) {
-            detail::rotate_real_pair_flip_soa_inline(
-                re,
-                im,
-                dim,
-                kernel.action.xmask,
-                kernel.pair_bit,
-                kernel.real_pair_flip_basis_phase_signs.data(),
-                c,
-                coefficient.real());
-        } else {
-            simd_table.rotate_real_pair_flip_soa(
-                re,
-                im,
-                dim,
-                kernel.action.xmask,
-                kernel.pair_bit,
-                kernel.real_pair_flip_basis_phase_signs.data(),
-                c,
-                coefficient.real());
-        }
-        return;
-    }
-    const auto& left_coeff = sign ? kernel.pair_left_plus_coefficients : kernel.pair_left_minus_coefficients;
-    const auto& right_coeff = sign ? kernel.pair_right_plus_coefficients : kernel.pair_right_minus_coefficients;
-    if (npairs < detail::kSimdPairRotationThreshold) {
-        detail::rotate_general_pairs_soa_inline(
-            re,
-            im,
-            dim,
-            kernel.action.xmask,
-            kernel.pair_bit,
-            left_coeff.data(),
-            right_coeff.data(),
-            c);
-    } else {
-        simd_table.rotate_general_pairs_soa(
-            re,
-            im,
-            dim,
-            kernel.action.xmask,
-            kernel.pair_bit,
-            left_coeff.data(),
-            right_coeff.data(),
-            c);
+    SYMFT_SINGLE_SIMD_LOOP
+    for (std::size_t idx = 0; idx < npairs; ++idx) {
+        const std::size_t left = detail::insert_zero_bit(idx, static_cast<int>(kernel.pair_bit));
+        const std::size_t right = left ^ static_cast<std::size_t>(kernel.action.xmask);
+        const bool left_odd = detail::active_action_phase_odd(kernel.action, left);
+        const double left_direction = sign != left_odd ? -1.0 : 1.0;
+        const double right_direction = kernel.action.xz_overlap_odd ? -left_direction : left_direction;
+        const double left_re = left_direction * kernel.minus_even_coefficient.real();
+        const double left_im = left_direction * kernel.minus_even_coefficient.imag();
+        const double right_re = right_direction * kernel.minus_even_coefficient.real();
+        const double right_im = right_direction * kernel.minus_even_coefficient.imag();
+        const double r0 = re[left];
+        const double i0 = im[left];
+        const double r1 = re[right];
+        const double i1 = im[right];
+        re[left] = c * r0 + right_re * r1 - right_im * i1;
+        im[left] = c * i0 + right_re * i1 + right_im * r1;
+        re[right] = c * r1 + left_re * r0 - left_im * i0;
+        im[right] = c * i1 + left_re * i0 + left_im * r0;
     }
 }
 
@@ -130,10 +107,13 @@ double diagonal_probability_contiguous(
     const double* im,
     const PrecomputedActivePauliMeasurementKernel& kernel,
     bool branch) {
-    const auto& sources = branch ? kernel.source0_true : kernel.source0_false;
-    const double probability = sources.size() < detail::kSimdPairRotationThreshold
-                                   ? detail::norm_sum_soa_inline(re, im, sources.data(), sources.size())
-                                   : simd::dispatch_table().norm_sum_soa(re, im, sources.data(), sources.size());
+    double probability = 0.0;
+    SYMFT_SINGLE_SIMD_LOOP
+    for (std::size_t idx = 0; idx < kernel.out_dim; ++idx) {
+        const std::size_t source =
+            detail::compact_diagonal_measurement_source(kernel, idx, branch);
+        probability += re[source] * re[source] + im[source] * im[source];
+    }
     return std::clamp(probability, 0.0, 1.0);
 }
 
@@ -142,38 +122,15 @@ double nondiagonal_probability_contiguous(
     const double* im,
     const PrecomputedActivePauliMeasurementKernel& kernel,
     bool branch) {
-    double fast_probability = 0.0;
-    if (detail::active_measurement_branch_probability_partner_permute_soa_inline(
-            fast_probability,
-            re,
-            im,
-            kernel,
-            branch)) {
-        return std::clamp(fast_probability, 0.0, 1.0);
-    }
-    const auto& sources0 = branch ? kernel.source0_true : kernel.source0_false;
-    const auto& sources1 = branch ? kernel.source1_true : kernel.source1_false;
-    const auto& coeffs0 = branch ? kernel.coeff0_true : kernel.coeff0_false;
-    const auto& coeffs1 = branch ? kernel.coeff1_true : kernel.coeff1_false;
-    const auto* coeff0 = reinterpret_cast<const double*>(coeffs0.data());
-    const auto* coeff1 = reinterpret_cast<const double*>(coeffs1.data());
-    double probability = 0.0;
-    SYMFT_SINGLE_SIMD_LOOP
-    for (std::size_t idx = 0; idx < sources0.size(); ++idx) {
-        const std::size_t source0 = sources0[idx];
-        const double c0r = coeff0[2 * idx];
-        const double c0i = coeff0[2 * idx + 1];
-        double ar = c0r * re[source0] - c0i * im[source0];
-        double ai = c0r * im[source0] + c0i * re[source0];
-        const std::size_t source1 = sources1[idx];
-        if (source1 != detail::kNoSource) {
-            const double c1r = coeff1[2 * idx];
-            const double c1i = coeff1[2 * idx + 1];
-            ar += c1r * re[source1] - c1i * im[source1];
-            ai += c1r * im[source1] + c1i * re[source1];
-        }
-        probability += ar * ar + ai * ai;
-    }
+    const double probability = simd::dispatch_table().measure_nondiagonal_probability_soa(
+        re,
+        im,
+        kernel.out_dim << 1,
+        kernel.action.xmask,
+        kernel.action.zmask,
+        static_cast<unsigned>(kernel.pivot),
+        kernel.nondiagonal_coefficient1_even,
+        branch);
     return std::clamp(probability, 0.0, 1.0);
 }
 
@@ -183,10 +140,10 @@ void project_diagonal_contiguous(
     const PrecomputedActivePauliMeasurementKernel& kernel,
     bool branch,
     double invnorm) {
-    const auto& sources = branch ? kernel.source0_true : kernel.source0_false;
     SYMFT_SINGLE_SIMD_LOOP
-    for (std::size_t idx = 0; idx < sources.size(); ++idx) {
-        const std::size_t source = sources[idx];
+    for (std::size_t idx = 0; idx < kernel.out_dim; ++idx) {
+        const std::size_t source =
+            detail::compact_diagonal_measurement_source(kernel, idx, branch);
         re[idx] = re[source] * invnorm;
         im[idx] = im[source] * invnorm;
     }
@@ -200,46 +157,21 @@ void project_nondiagonal_contiguous(
     const PrecomputedActivePauliMeasurementKernel& kernel,
     bool branch,
     double invnorm) {
-    if (detail::project_active_measurement_partner_permute_soa_inline(
-            re,
-            im,
-            re,
-            im,
-            kernel,
-            branch,
-            invnorm)) {
-        return;
-    }
-    const auto& sources0 = branch ? kernel.source0_true : kernel.source0_false;
-    const auto& sources1 = branch ? kernel.source1_true : kernel.source1_false;
-    const auto& coeffs0 = branch ? kernel.coeff0_true : kernel.coeff0_false;
-    const auto& coeffs1 = branch ? kernel.coeff1_true : kernel.coeff1_false;
-    const auto* coeff0 = reinterpret_cast<const double*>(coeffs0.data());
-    const auto* coeff1 = reinterpret_cast<const double*>(coeffs1.data());
-    const std::size_t out_dim = sources0.size();
-    SYMFT_SINGLE_SIMD_LOOP
-    for (std::size_t idx = 0; idx < out_dim; ++idx) {
-        const std::size_t source0 = sources0[idx];
-        const double c0r = coeff0[2 * idx];
-        const double c0i = coeff0[2 * idx + 1];
-        double ar = c0r * re[source0] - c0i * im[source0];
-        double ai = c0r * im[source0] + c0i * re[source0];
-        const std::size_t source1 = sources1[idx];
-        if (source1 != detail::kNoSource) {
-            const double c1r = coeff1[2 * idx];
-            const double c1i = coeff1[2 * idx + 1];
-            ar += c1r * re[source1] - c1i * im[source1];
-            ai += c1r * im[source1] + c1i * re[source1];
-        }
-        scratch_re[idx] = ar * invnorm;
-        scratch_im[idx] = ai * invnorm;
-    }
+    const std::size_t out_dim = kernel.out_dim;
+    simd::dispatch_table().project_nondiagonal_soa(
+        re,
+        im,
+        scratch_re,
+        scratch_im,
+        out_dim << 1,
+        kernel.action.xmask,
+        kernel.action.zmask,
+        static_cast<unsigned>(kernel.pivot),
+        kernel.nondiagonal_coefficient1_even,
+        branch,
+        invnorm);
     std::copy_n(scratch_re, out_dim, re);
     std::copy_n(scratch_im, out_dim, im);
-}
-
-bool can_use_nondiagonal_xmask_measurement(const PrecomputedActivePauliMeasurementKernel& kernel) {
-    return detail::highest_set_bit64(kernel.action.xmask) == kernel.pivot;
 }
 
 void finish_active_measurement_branch(
@@ -263,74 +195,63 @@ void copy_projected_active_prefix_from_scratch(BatchFactoredExecutorState& runti
 
 void measure_nondiagonal_true_prob_batch(
     BatchFactoredExecutorState& runtime,
-    const PrecomputedActivePauliMeasurementKernel& kernel,
-    std::size_t out_dim,
-    bool use_xmask_kernel) {
-    if (use_xmask_kernel) {
-        batch_simd::scalar_table().nondiagonal_xmask_measure_true_prob(
-            runtime.active_re.data(),
-            runtime.active_im.data(),
-            static_cast<std::size_t>(runtime.active_pitch),
-            runtime.active_shots,
-            kernel.action.xmask,
-            static_cast<unsigned>(kernel.pivot),
-            out_dim,
-            kernel.coeff1_false_real.data(),
-            kernel.coeff1_false_imag.data(),
-            runtime.branch_prob_true.data());
-        return;
+    const PrecomputedActivePauliMeasurementKernel& kernel) {
+    constexpr double inv_sqrt2 = 0.707106781186547524400844362104849039;
+    const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
+    std::fill_n(runtime.branch_prob_true.data(), runtime.active_shots, 0.0);
+    for (std::size_t idx = 0; idx < kernel.out_dim; ++idx) {
+        const std::size_t source0 = detail::compact_nondiagonal_measurement_source0(kernel, idx);
+        const std::size_t source1 = detail::compact_nondiagonal_measurement_source1(kernel, idx);
+        const Complex coefficient1 =
+            detail::compact_nondiagonal_measurement_coefficient1(kernel, idx, true);
+        const std::size_t base0 = source0 * pitch;
+        const std::size_t base1 = source1 * pitch;
+        SYMFT_BATCH_SIMD_LOOP
+        for (int shot = 0; shot < runtime.active_shots; ++shot) {
+            const std::size_t lane = static_cast<std::size_t>(shot);
+            const double ar = inv_sqrt2 * runtime.active_re[base0 + lane] +
+                              coefficient1.real() * runtime.active_re[base1 + lane] -
+                              coefficient1.imag() * runtime.active_im[base1 + lane];
+            const double ai = inv_sqrt2 * runtime.active_im[base0 + lane] +
+                              coefficient1.real() * runtime.active_im[base1 + lane] +
+                              coefficient1.imag() * runtime.active_re[base1 + lane];
+            runtime.branch_prob_true[lane] += ar * ar + ai * ai;
+        }
     }
-    batch_simd::scalar_table().nondiagonal_measure_true_prob(
-        runtime.active_re.data(),
-        runtime.active_im.data(),
-        static_cast<std::size_t>(runtime.active_pitch),
-        runtime.active_shots,
-        kernel.source0_false.data(),
-        kernel.source1_false.data(),
-        kernel.coeff1_false_real.data(),
-        kernel.coeff1_false_imag.data(),
-        out_dim,
-        runtime.branch_prob_true.data());
 }
 
-bool project_nondiagonal_batch(
+void project_nondiagonal_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
-    std::size_t out_dim,
-    bool use_xmask_kernel,
     const std::vector<std::uint64_t>& branch_bits) {
-    if (use_xmask_kernel) {
-        batch_simd::scalar_table().nondiagonal_xmask_project(
-            runtime.active_re.data(),
-            runtime.active_im.data(),
-            runtime.active_re.data(),
-            runtime.active_im.data(),
-            static_cast<std::size_t>(runtime.active_pitch),
-            runtime.active_shots,
-            kernel.action.xmask,
-            static_cast<unsigned>(kernel.pivot),
-            out_dim,
-            kernel.coeff1_false_real.data(),
-            kernel.coeff1_false_imag.data(),
-            branch_bits.data(),
-            runtime.branch_invnorms.data());
-        return true;
+    constexpr double inv_sqrt2 = 0.707106781186547524400844362104849039;
+    const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
+    const auto& branch_directions = fill_shot_coefficient_scalars(runtime, branch_bits, 1.0, -1.0);
+    for (std::size_t idx = 0; idx < kernel.out_dim; ++idx) {
+        const std::size_t source0 = detail::compact_nondiagonal_measurement_source0(kernel, idx);
+        const std::size_t source1 = detail::compact_nondiagonal_measurement_source1(kernel, idx);
+        const Complex false_coefficient1 =
+            detail::compact_nondiagonal_measurement_coefficient1(kernel, idx, false);
+        const Complex true_coefficient1 = -false_coefficient1;
+        const std::size_t base0 = source0 * pitch;
+        const std::size_t base1 = source1 * pitch;
+        const std::size_t out_base = idx * pitch;
+        SYMFT_BATCH_SIMD_LOOP
+        for (int shot = 0; shot < runtime.active_shots; ++shot) {
+            const std::size_t lane = static_cast<std::size_t>(shot);
+            const Complex coefficient1 =
+                branch_directions[lane] < 0.0 ? true_coefficient1 : false_coefficient1;
+            const double ar = inv_sqrt2 * runtime.active_re[base0 + lane] +
+                              coefficient1.real() * runtime.active_re[base1 + lane] -
+                              coefficient1.imag() * runtime.active_im[base1 + lane];
+            const double ai = inv_sqrt2 * runtime.active_im[base0 + lane] +
+                              coefficient1.real() * runtime.active_im[base1 + lane] +
+                              coefficient1.imag() * runtime.active_re[base1 + lane];
+            runtime.scratch_re[out_base + lane] = ar * runtime.branch_invnorms[lane];
+            runtime.scratch_im[out_base + lane] = ai * runtime.branch_invnorms[lane];
+        }
     }
-    batch_simd::scalar_table().nondiagonal_project(
-        runtime.active_re.data(),
-        runtime.active_im.data(),
-        runtime.scratch_re.data(),
-        runtime.scratch_im.data(),
-        static_cast<std::size_t>(runtime.active_pitch),
-        runtime.active_shots,
-        kernel.source0_false.data(),
-        kernel.source1_false.data(),
-        kernel.coeff1_false_real.data(),
-        kernel.coeff1_false_imag.data(),
-        out_dim,
-        branch_bits.data(),
-        runtime.branch_invnorms.data());
-    return false;
+    copy_projected_active_prefix_from_scratch(runtime, kernel.out_dim);
 }
 
 void rotate_uniform_imag_pairs_batch(
@@ -338,10 +259,10 @@ void rotate_uniform_imag_pairs_batch(
     const PrecomputedActivePauliRotationKernel& kernel,
     const std::vector<std::uint64_t>& sign_bits) {
     const BatchSignMode mode = batch_sign_mode(runtime, sign_bits);
+    const double minus_q = detail::compact_rotation_coefficient(kernel, 0, false).imag();
+    const double plus_q = detail::compact_rotation_coefficient(kernel, 0, true).imag();
     if (mode != BatchSignMode::Mixed) {
-        const double q = mode == BatchSignMode::AllPlus
-                             ? kernel.pair_left_plus_coefficients.front().imag()
-                             : kernel.pair_left_minus_coefficients.front().imag();
+        const double q = mode == BatchSignMode::AllPlus ? plus_q : minus_q;
         batch_simd::scalar_table().rotate_uniform_imag_xmask_const(
             runtime.active_re.data(),
             runtime.active_im.data(),
@@ -354,11 +275,11 @@ void rotate_uniform_imag_pairs_batch(
             q);
         return;
     }
-    const auto& coeffs = fill_rotation_coefficients(
+    const auto& coeffs = fill_shot_coefficient_scalars(
         runtime,
         sign_bits,
-        kernel.pair_left_minus_coefficients.front().imag(),
-        kernel.pair_left_plus_coefficients.front().imag());
+        minus_q,
+        plus_q);
     if (kernel.pair_count < kXmaskRotationPairThreshold && runtime.active_pitch != 2) {
         batch_simd::scalar_table().rotate_uniform_imag_pairs(
             runtime.active_re.data(),
@@ -384,58 +305,43 @@ void rotate_uniform_imag_pairs_batch(
         coeffs.data());
 }
 
-void rotate_real_pair_flip_batch(
+void rotate_compact_pairs_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliRotationKernel& kernel,
     const std::vector<std::uint64_t>& sign_bits) {
-    const BatchSignMode mode = batch_sign_mode(runtime, sign_bits);
-    if (mode != BatchSignMode::Mixed) {
-        const double q = mode == BatchSignMode::AllPlus
-                             ? kernel.pair_left_plus_coefficients.front().real()
-                             : kernel.pair_left_minus_coefficients.front().real();
-        batch_simd::scalar_table().rotate_real_pair_flip_xmask_const(
-            runtime.active_re.data(),
-            runtime.active_im.data(),
-            static_cast<std::size_t>(runtime.active_pitch),
-            runtime.active_shots,
-            kernel.action.xmask,
-            kernel.pair_bit,
-            kernel.real_pair_flip_basis_phase_signs.data(),
-            kernel.pair_count,
-            kernel.cos_kernel_angle,
-            q);
-        return;
+    const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
+    const double c = kernel.cos_kernel_angle;
+    const auto& directions = fill_shot_coefficient_scalars(runtime, sign_bits, 1.0, -1.0);
+    for (std::size_t idx = 0; idx < kernel.pair_count; ++idx) {
+        const std::size_t left = detail::insert_zero_bit(idx, static_cast<int>(kernel.pair_bit));
+        const std::size_t right = left ^ static_cast<std::size_t>(kernel.action.xmask);
+        const bool left_odd = detail::active_action_phase_odd(kernel.action, left);
+        const double left_parity = left_odd ? -1.0 : 1.0;
+        const double right_parity = kernel.action.xz_overlap_odd ? -left_parity : left_parity;
+        const double left_minus_re = left_parity * kernel.minus_even_coefficient.real();
+        const double left_minus_im = left_parity * kernel.minus_even_coefficient.imag();
+        const double right_minus_re = right_parity * kernel.minus_even_coefficient.real();
+        const double right_minus_im = right_parity * kernel.minus_even_coefficient.imag();
+        const std::size_t left_base = left * pitch;
+        const std::size_t right_base = right * pitch;
+        SYMFT_BATCH_SIMD_LOOP
+        for (int shot = 0; shot < runtime.active_shots; ++shot) {
+            const std::size_t lane = static_cast<std::size_t>(shot);
+            const double direction = directions[lane];
+            const double left_re = direction * left_minus_re;
+            const double left_im = direction * left_minus_im;
+            const double right_re = direction * right_minus_re;
+            const double right_im = direction * right_minus_im;
+            const double r0 = runtime.active_re[left_base + lane];
+            const double i0 = runtime.active_im[left_base + lane];
+            const double r1 = runtime.active_re[right_base + lane];
+            const double i1 = runtime.active_im[right_base + lane];
+            runtime.active_re[left_base + lane] = c * r0 + right_re * r1 - right_im * i1;
+            runtime.active_im[left_base + lane] = c * i0 + right_re * i1 + right_im * r1;
+            runtime.active_re[right_base + lane] = c * r1 + left_re * r0 - left_im * i0;
+            runtime.active_im[right_base + lane] = c * i1 + left_re * i0 + left_im * r0;
+        }
     }
-    const auto& coeffs = fill_rotation_coefficients(
-        runtime,
-        sign_bits,
-        kernel.pair_left_minus_coefficients.front().real(),
-        kernel.pair_left_plus_coefficients.front().real());
-    if (kernel.pair_count < kXmaskRotationPairThreshold) {
-        batch_simd::scalar_table().rotate_real_pair_flip(
-            runtime.active_re.data(),
-            runtime.active_im.data(),
-            static_cast<std::size_t>(runtime.active_pitch),
-            runtime.active_shots,
-            kernel.action.xmask,
-            kernel.pair_bit,
-            kernel.real_pair_flip_basis_phase_signs.data(),
-            kernel.pair_count,
-            kernel.cos_kernel_angle,
-            coeffs.data());
-        return;
-    }
-    batch_simd::scalar_table().rotate_real_pair_flip_xmask(
-        runtime.active_re.data(),
-        runtime.active_im.data(),
-        static_cast<std::size_t>(runtime.active_pitch),
-        runtime.active_shots,
-        kernel.action.xmask,
-        kernel.pair_bit,
-        kernel.real_pair_flip_basis_phase_signs.data(),
-        kernel.pair_count,
-        kernel.cos_kernel_angle,
-        coeffs.data());
 }
 
 void rotate_pauli_batch(
@@ -468,36 +374,22 @@ void rotate_pauli_batch(
     }
     const double c = kernel.cos_kernel_angle;
     if (kernel.is_diagonal) {
-        const BatchSignMode mode = batch_sign_mode(runtime, sign_bits);
-        if (mode == BatchSignMode::AllMinus) {
-            batch_simd::scalar_table().rotate_diagonal_const(
-                runtime.active_re.data(),
-                runtime.active_im.data(),
-                static_cast<std::size_t>(runtime.active_pitch),
-                runtime.active_shots,
-                dim,
-                kernel.diagonal_minus_coefficients.data(),
-                c);
-        } else if (mode == BatchSignMode::AllPlus) {
-            batch_simd::scalar_table().rotate_diagonal_const(
-                runtime.active_re.data(),
-                runtime.active_im.data(),
-                static_cast<std::size_t>(runtime.active_pitch),
-                runtime.active_shots,
-                dim,
-                kernel.diagonal_plus_coefficients.data(),
-                c);
-        } else {
-            batch_simd::scalar_table().rotate_diagonal_mixed(
-                runtime.active_re.data(),
-                runtime.active_im.data(),
-                static_cast<std::size_t>(runtime.active_pitch),
-                runtime.active_shots,
-                dim,
-                kernel.diagonal_minus_coefficients.data(),
-                kernel.diagonal_plus_coefficients.data(),
-                sign_bits.data(),
-                c);
+        const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
+        const auto& directions = fill_shot_coefficient_scalars(runtime, sign_bits, 1.0, -1.0);
+        for (std::size_t basis = 0; basis < dim; ++basis) {
+            const Complex minus_coefficient = detail::compact_rotation_coefficient(kernel, basis, false);
+            const std::size_t base = basis * pitch;
+            SYMFT_BATCH_SIMD_LOOP
+            for (int shot = 0; shot < runtime.active_shots; ++shot) {
+                const std::size_t lane = static_cast<std::size_t>(shot);
+                const Complex coefficient = directions[lane] * minus_coefficient;
+                const double fr = c + coefficient.real();
+                const double fi = coefficient.imag();
+                const double r = runtime.active_re[base + lane];
+                const double i = runtime.active_im[base + lane];
+                runtime.active_re[base + lane] = fr * r - fi * i;
+                runtime.active_im[base + lane] = fr * i + fi * r;
+            }
         }
         return;
     }
@@ -505,51 +397,7 @@ void rotate_pauli_batch(
         rotate_uniform_imag_pairs_batch(runtime, kernel, sign_bits);
         return;
     }
-    if (kernel.real_pair_flip) {
-        rotate_real_pair_flip_batch(runtime, kernel, sign_bits);
-        return;
-    }
-    const BatchSignMode mode = batch_sign_mode(runtime, sign_bits);
-    if (mode == BatchSignMode::AllMinus) {
-        batch_simd::scalar_table().rotate_general_xmask_const(
-            runtime.active_re.data(),
-            runtime.active_im.data(),
-            static_cast<std::size_t>(runtime.active_pitch),
-            runtime.active_shots,
-            kernel.action.xmask,
-            kernel.pair_bit,
-            kernel.pair_count,
-            kernel.pair_left_minus_coefficients.data(),
-            kernel.pair_right_minus_coefficients.data(),
-            c);
-    } else if (mode == BatchSignMode::AllPlus) {
-        batch_simd::scalar_table().rotate_general_xmask_const(
-            runtime.active_re.data(),
-            runtime.active_im.data(),
-            static_cast<std::size_t>(runtime.active_pitch),
-            runtime.active_shots,
-            kernel.action.xmask,
-            kernel.pair_bit,
-            kernel.pair_count,
-            kernel.pair_left_plus_coefficients.data(),
-            kernel.pair_right_plus_coefficients.data(),
-            c);
-    } else {
-        batch_simd::scalar_table().rotate_general_xmask_mixed(
-            runtime.active_re.data(),
-            runtime.active_im.data(),
-            static_cast<std::size_t>(runtime.active_pitch),
-            runtime.active_shots,
-            kernel.action.xmask,
-            kernel.pair_bit,
-            kernel.pair_count,
-            kernel.pair_left_minus_coefficients.data(),
-            kernel.pair_right_minus_coefficients.data(),
-            kernel.pair_left_plus_coefficients.data(),
-            kernel.pair_right_plus_coefficients.data(),
-            sign_bits.data(),
-            c);
-    }
+    rotate_compact_pairs_batch(runtime, kernel, sign_bits);
 }
 
 void promote_first_dormant_rotation_batch(
@@ -604,7 +452,7 @@ void promote_first_dormant_rotation_batch(
         --runtime.ndormant;
         return;
     }
-    const auto& coeffs = fill_rotation_coefficients(runtime, sign_bits, -s, s);
+    const auto& coeffs = fill_shot_coefficient_scalars(runtime, sign_bits, -s, s);
     batch_simd::scalar_table().promote_first_dormant_rotation(
         runtime.active_re.data(),
         runtime.active_im.data(),
@@ -692,9 +540,7 @@ void measure_diagonal_active_pauli_branch_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
     int branch_condition) {
-    const auto& source_false = kernel.source0_false;
-    const auto& source_true = kernel.source0_true;
-    const std::size_t out_dim = source_false.size();
+    const std::size_t out_dim = kernel.out_dim;
     if (runtime.dense_shot_major_active) {
         measure_shot_major_active_branch_batch(
             runtime,
@@ -728,30 +574,41 @@ void measure_diagonal_active_pauli_branch_batch(
         finish_active_measurement_branch(runtime, branch_condition, branch_bits);
         return;
     }
-    batch_simd::scalar_table().diagonal_measure_true_prob(
-        runtime.active_re.data(),
-        runtime.active_im.data(),
-        static_cast<std::size_t>(runtime.active_pitch),
-        runtime.active_shots,
-        source_true.data(),
-        out_dim,
-        runtime.branch_prob_true.data());
+    const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
+    std::fill_n(runtime.branch_prob_true.data(), runtime.active_shots, 0.0);
+    for (std::size_t idx = 0; idx < out_dim; ++idx) {
+        const std::size_t source =
+            detail::compact_diagonal_measurement_source(kernel, idx, true);
+        const std::size_t base = source * pitch;
+        SYMFT_BATCH_SIMD_LOOP
+        for (int shot = 0; shot < runtime.active_shots; ++shot) {
+            const std::size_t lane = static_cast<std::size_t>(shot);
+            const double r = runtime.active_re[base + lane];
+            const double i = runtime.active_im[base + lane];
+            runtime.branch_prob_true[lane] += r * r + i * i;
+        }
+    }
     sample_batch_measurement_branches_from_true(
         runtime,
         runtime.eval_scratch,
         runtime.branch_prob_true,
         runtime.branch_invnorms);
     const auto& branch_bits = runtime.eval_scratch;
-    batch_simd::scalar_table().diagonal_project(
-        runtime.active_re.data(),
-        runtime.active_im.data(),
-        static_cast<std::size_t>(runtime.active_pitch),
-        runtime.active_shots,
-        source_false.data(),
-        source_true.data(),
-        out_dim,
-        branch_bits.data(),
-        runtime.branch_invnorms.data());
+    const auto& branch_directions = fill_shot_coefficient_scalars(runtime, branch_bits, 1.0, -1.0);
+    for (std::size_t idx = 0; idx < out_dim; ++idx) {
+        const std::size_t out_base = idx * pitch;
+        SYMFT_BATCH_SIMD_LOOP
+        for (int shot = 0; shot < runtime.active_shots; ++shot) {
+            const std::size_t lane = static_cast<std::size_t>(shot);
+            const std::size_t source = detail::compact_diagonal_measurement_source(
+                kernel,
+                idx,
+                branch_directions[lane] < 0.0);
+            const std::size_t source_lane = source * pitch + lane;
+            runtime.active_re[out_base + lane] = runtime.active_re[source_lane] * runtime.branch_invnorms[lane];
+            runtime.active_im[out_base + lane] = runtime.active_im[source_lane] * runtime.branch_invnorms[lane];
+        }
+    }
     finish_active_measurement_branch(runtime, branch_condition, branch_bits);
 }
 
@@ -759,7 +616,6 @@ void measure_nondiagonal_active_pauli_branch_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
     int branch_condition) {
-    const std::size_t out_dim = kernel.source0_false.size();
     if (runtime.dense_shot_major_active) {
         measure_shot_major_active_branch_batch(
             runtime,
@@ -802,17 +658,14 @@ void measure_nondiagonal_active_pauli_branch_batch(
         finish_active_measurement_branch(runtime, branch_condition, branch_bits);
         return;
     }
-    const bool use_xmask_kernel = can_use_nondiagonal_xmask_measurement(kernel);
-    measure_nondiagonal_true_prob_batch(runtime, kernel, out_dim, use_xmask_kernel);
+    measure_nondiagonal_true_prob_batch(runtime, kernel);
     sample_batch_measurement_branches_from_true(
         runtime,
         runtime.eval_scratch,
         runtime.branch_prob_true,
         runtime.branch_invnorms);
     const auto& branch_bits = runtime.eval_scratch;
-    if (!project_nondiagonal_batch(runtime, kernel, out_dim, use_xmask_kernel, branch_bits)) {
-        copy_projected_active_prefix_from_scratch(runtime, out_dim);
-    }
+    project_nondiagonal_batch(runtime, kernel, branch_bits);
     finish_active_measurement_branch(runtime, branch_condition, branch_bits);
 }
 

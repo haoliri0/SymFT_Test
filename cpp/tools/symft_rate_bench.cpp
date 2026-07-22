@@ -112,7 +112,7 @@ SamplerMode parse_sampler_mode(const char* raw) {
 }
 
 struct Options {
-    std::string path = "benchmarks/d3.stim";
+    std::string path = "benchmark/circuit/msc_d3_inject_cultivate_p1e-3.stim";
     std::uint64_t shots = 100000000ULL;
     int batch_size = 0;
     int sample_chunk_shots = 0;
@@ -127,8 +127,8 @@ struct Options {
 void print_usage(const char* argv0) {
     std::cerr
         << "usage: " << argv0 << " --circuit PATH --shots N [options]\n"
-        << "       " << argv0 << " --sampler batch --circuit benchmarks/d5.stim --shots 1000000 --batch-size auto --postselect-detectors\n"
-        << "       " << argv0 << " --sampler both --circuit benchmarks/d5.stim --shots 1000000 --batch-size auto\n"
+        << "       " << argv0 << " --sampler batch --circuit benchmark/circuit/msc_d5_inject_cultivate_p1e-3.stim --shots 1000000 --batch-size auto --postselect-detectors\n"
+        << "       " << argv0 << " --sampler both --circuit benchmark/circuit/msc_d5_inject_cultivate_p1e-3.stim --shots 1000000 --batch-size auto\n"
         << "\n"
         << "common options:\n"
         << "  --circuit PATH, --file PATH        Stim circuit path\n"

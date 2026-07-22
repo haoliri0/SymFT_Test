@@ -67,7 +67,8 @@ struct BatchFactoredExecutorState {
     std::vector<std::uint64_t> detector_any_words;
     std::vector<std::uint64_t> eval_scratch;
     std::vector<std::uint64_t> rotation_run_sign_words;
-    std::vector<double> rotation_coefficients;
+    // Per-shot scalar directions; O(active_pitch), never O(2^k).
+    std::vector<double> shot_coefficient_scalars;
     std::vector<double> branch_prob_true;
     std::vector<double> branch_invnorms;
     std::uint64_t rng_state = 1;

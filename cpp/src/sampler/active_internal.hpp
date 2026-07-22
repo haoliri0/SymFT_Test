@@ -74,4 +74,43 @@ inline bool can_rotate_real_pair_flip(const ActivePauliAction& action) {
     return is_near_zero(action.even_phase.real()) && !is_near_zero(action.even_phase.imag());
 }
 
+inline Complex compact_rotation_coefficient(
+    const PrecomputedActivePauliRotationKernel& kernel,
+    std::size_t source,
+    bool sign) {
+    const bool odd = active_action_phase_odd(kernel.action, source);
+    return sign != odd ? -kernel.minus_even_coefficient : kernel.minus_even_coefficient;
+}
+
+inline std::size_t compact_diagonal_measurement_source(
+    const PrecomputedActivePauliMeasurementKernel& kernel,
+    std::size_t packed,
+    bool branch) {
+    const std::size_t without_pivot = insert_zero_bit(packed, kernel.pivot);
+    const int parity = popcount64(static_cast<std::uint64_t>(without_pivot) & kernel.z_without_pivot) & 1;
+    const int pivot_value = kernel.diagonal_phase_bit ^ parity ^ static_cast<int>(branch);
+    return without_pivot | (std::size_t{static_cast<unsigned>(pivot_value)} << kernel.pivot);
+}
+
+inline std::size_t compact_nondiagonal_measurement_source0(
+    const PrecomputedActivePauliMeasurementKernel& kernel,
+    std::size_t packed) {
+    return insert_zero_bit(packed, kernel.pivot);
+}
+
+inline std::size_t compact_nondiagonal_measurement_source1(
+    const PrecomputedActivePauliMeasurementKernel& kernel,
+    std::size_t packed) {
+    return compact_nondiagonal_measurement_source0(kernel, packed) ^ static_cast<std::size_t>(kernel.action.xmask);
+}
+
+inline Complex compact_nondiagonal_measurement_coefficient1(
+    const PrecomputedActivePauliMeasurementKernel& kernel,
+    std::size_t packed,
+    bool branch) {
+    const bool odd = active_action_phase_odd(
+        kernel.action, compact_nondiagonal_measurement_source0(kernel, packed));
+    return branch != odd ? -kernel.nondiagonal_coefficient1_even : kernel.nondiagonal_coefficient1_even;
+}
+
 } // namespace symft::detail

@@ -65,17 +65,14 @@ struct CudaRotationKernel {
     std::int32_t is_diagonal = 0;
     std::int32_t uniform_imag_pairs = 0;
     std::int32_t real_pair_flip = 0;
+    std::int32_t xz_overlap_odd = 0;
     std::int32_t pair_bit = 0;
     std::int32_t pair_count = 0;
     std::uint64_t xmask = 0;
+    std::uint64_t zmask = 0;
+    CudaReal minus_even_re = 0.0f;
+    CudaReal minus_even_im = 0.0f;
     CudaReal cos_angle = 1.0f;
-    std::int32_t diagonal_minus_offset = 0;
-    std::int32_t diagonal_plus_offset = 0;
-    std::int32_t left_minus_offset = 0;
-    std::int32_t right_minus_offset = 0;
-    std::int32_t left_plus_offset = 0;
-    std::int32_t right_plus_offset = 0;
-    std::int32_t real_pair_phase_offset = 0;
 };
 
 struct CudaMeasurementKernel {
@@ -87,14 +84,6 @@ struct CudaMeasurementKernel {
     std::uint64_t zmask = 0;
     CudaReal even_phase_re = 1.0f;
     CudaReal even_phase_im = 0.0f;
-    std::int32_t source0_false_offset = 0;
-    std::int32_t source1_false_offset = 0;
-    std::int32_t coeff0_false_offset = 0;
-    std::int32_t coeff1_false_offset = 0;
-    std::int32_t source0_true_offset = 0;
-    std::int32_t source1_true_offset = 0;
-    std::int32_t coeff0_true_offset = 0;
-    std::int32_t coeff1_true_offset = 0;
 };
 
 struct CudaInstruction {

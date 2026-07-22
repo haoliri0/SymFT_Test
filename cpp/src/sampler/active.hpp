@@ -33,6 +33,8 @@ struct ActivePauliAction {
     explicit ActivePauliAction(const PauliString& pauli);
 };
 
+// Legacy name retained for API compatibility. This is a compact descriptor;
+// basis-dependent coefficients are derived by the sampler instead of stored.
 struct PrecomputedActivePauliRotationKernel {
     ActivePauliAction action;
     bool is_diagonal = true;
@@ -43,37 +45,31 @@ struct PrecomputedActivePauliRotationKernel {
     // Internal angle phi for exp(-i phi P). Frontend R_P(theta) passes phi = theta/2.
     double kernel_angle = 0.0;
     double cos_kernel_angle = 1.0;
-    std::vector<Complex> diagonal_minus_coefficients;
-    std::vector<Complex> diagonal_plus_coefficients;
-    std::vector<double> real_pair_flip_basis_phase_signs;
-    std::vector<Complex> pair_left_minus_coefficients;
-    std::vector<Complex> pair_right_minus_coefficients;
-    std::vector<Complex> pair_left_plus_coefficients;
-    std::vector<Complex> pair_right_plus_coefficients;
+    double sin_kernel_angle = 0.0;
+    Complex minus_even_coefficient = Complex(0.0, 0.0);
 
     PrecomputedActivePauliRotationKernel() = default;
     PrecomputedActivePauliRotationKernel(const ActivePauliAction& action, double kernel_angle);
 };
 
+// Compact measurement mapping. Source indices and coefficients are derived
+// from these masks during execution and therefore consume O(1) plan memory.
 struct PrecomputedActivePauliMeasurementKernel {
     ActivePauliAction action;
     int pivot = 0;
     bool is_diagonal = true;
-    std::vector<std::size_t> source0_false;
-    std::vector<std::size_t> source1_false;
-    std::vector<Complex> coeff0_false;
-    std::vector<Complex> coeff1_false;
-    std::vector<double> coeff1_false_real;
-    std::vector<double> coeff1_false_imag;
-    std::vector<std::size_t> source0_true;
-    std::vector<std::size_t> source1_true;
-    std::vector<Complex> coeff0_true;
-    std::vector<Complex> coeff1_true;
+    int diagonal_phase_bit = 0;
+    std::uint64_t z_without_pivot = 0;
+    std::size_t out_dim = 0;
+    Complex nondiagonal_coefficient1_even = Complex(0.0, 0.0);
 
     PrecomputedActivePauliMeasurementKernel() = default;
     explicit PrecomputedActivePauliMeasurementKernel(const PauliString& pauli);
     explicit PrecomputedActivePauliMeasurementKernel(const ActivePauliAction& action);
 };
+
+static_assert(sizeof(PrecomputedActivePauliRotationKernel) <= 128);
+static_assert(sizeof(PrecomputedActivePauliMeasurementKernel) <= 128);
 
 void apply_pauli(std::vector<Complex>& out, const PauliString& pauli, const std::vector<Complex>& alpha);
 void apply_pauli(ActiveState& state, const PauliString& pauli);

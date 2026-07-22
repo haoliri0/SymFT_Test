@@ -4,8 +4,10 @@
 #include "sampler/batch_sampler.hpp"
 #include "sampler/exogenous.hpp"
 #include "sampler/single_shot.hpp"
+#include "simd/simd.hpp"
 
 #include <cmath>
+#include <bit>
 #include <complex>
 #include <cstdio>
 #include <cstdlib>
@@ -175,15 +177,26 @@ double reference_active_measurement_probability(
     const std::vector<symft::Complex>& alpha,
     const symft::PrecomputedActivePauliMeasurementKernel& kernel,
     bool branch) {
-    const auto& sources0 = branch ? kernel.source0_true : kernel.source0_false;
-    const auto& sources1 = branch ? kernel.source1_true : kernel.source1_false;
-    const auto& coeffs0 = branch ? kernel.coeff0_true : kernel.coeff0_false;
-    const auto& coeffs1 = branch ? kernel.coeff1_true : kernel.coeff1_false;
+    constexpr double inv_sqrt2 = 0.707106781186547524400844362104849039;
+    const auto insert_zero = [](std::size_t packed, int bit) {
+        const std::size_t low_mask = (std::size_t{1} << bit) - 1;
+        return (packed & low_mask) | ((packed & ~low_mask) << 1);
+    };
     double probability = 0.0;
-    for (std::size_t idx = 0; idx < sources0.size(); ++idx) {
-        symft::Complex value = coeffs0[idx] * alpha[sources0[idx]];
-        if (sources1[idx] < alpha.size()) {
-            value += coeffs1[idx] * alpha[sources1[idx]];
+    for (std::size_t idx = 0; idx < kernel.out_dim; ++idx) {
+        symft::Complex value;
+        const std::size_t source0 = insert_zero(idx, kernel.pivot);
+        if (kernel.is_diagonal) {
+            const int parity = std::popcount(static_cast<std::uint64_t>(source0) & kernel.z_without_pivot) & 1;
+            const int pivot_value = kernel.diagonal_phase_bit ^ parity ^ static_cast<int>(branch);
+            const std::size_t source = source0 | (std::size_t{static_cast<unsigned>(pivot_value)} << kernel.pivot);
+            value = alpha[source];
+        } else {
+            const std::size_t source1 = source0 ^ static_cast<std::size_t>(kernel.action.xmask);
+            const bool odd = (std::popcount(static_cast<std::uint64_t>(source0) & kernel.action.zmask) & 1) != 0;
+            const symft::Complex eta = odd ? kernel.action.odd_phase : kernel.action.even_phase;
+            const symft::Complex coefficient1 = (branch ? -1.0 : 1.0) * std::conj(eta) * inv_sqrt2;
+            value = inv_sqrt2 * alpha[source0] + coefficient1 * alpha[source1];
         }
         probability += std::norm(value);
     }
@@ -195,16 +208,27 @@ std::vector<symft::Complex> reference_active_measurement_projection(
     const symft::PrecomputedActivePauliMeasurementKernel& kernel,
     bool branch,
     double probability) {
-    const auto& sources0 = branch ? kernel.source0_true : kernel.source0_false;
-    const auto& sources1 = branch ? kernel.source1_true : kernel.source1_false;
-    const auto& coeffs0 = branch ? kernel.coeff0_true : kernel.coeff0_false;
-    const auto& coeffs1 = branch ? kernel.coeff1_true : kernel.coeff1_false;
+    constexpr double inv_sqrt2 = 0.707106781186547524400844362104849039;
+    const auto insert_zero = [](std::size_t packed, int bit) {
+        const std::size_t low_mask = (std::size_t{1} << bit) - 1;
+        return (packed & low_mask) | ((packed & ~low_mask) << 1);
+    };
     const double invnorm = 1.0 / std::sqrt(probability);
-    std::vector<symft::Complex> out(sources0.size());
-    for (std::size_t idx = 0; idx < sources0.size(); ++idx) {
-        symft::Complex value = coeffs0[idx] * alpha[sources0[idx]];
-        if (sources1[idx] < alpha.size()) {
-            value += coeffs1[idx] * alpha[sources1[idx]];
+    std::vector<symft::Complex> out(kernel.out_dim);
+    for (std::size_t idx = 0; idx < kernel.out_dim; ++idx) {
+        symft::Complex value;
+        const std::size_t source0 = insert_zero(idx, kernel.pivot);
+        if (kernel.is_diagonal) {
+            const int parity = std::popcount(static_cast<std::uint64_t>(source0) & kernel.z_without_pivot) & 1;
+            const int pivot_value = kernel.diagonal_phase_bit ^ parity ^ static_cast<int>(branch);
+            const std::size_t source = source0 | (std::size_t{static_cast<unsigned>(pivot_value)} << kernel.pivot);
+            value = alpha[source];
+        } else {
+            const std::size_t source1 = source0 ^ static_cast<std::size_t>(kernel.action.xmask);
+            const bool odd = (std::popcount(static_cast<std::uint64_t>(source0) & kernel.action.zmask) & 1) != 0;
+            const symft::Complex eta = odd ? kernel.action.odd_phase : kernel.action.even_phase;
+            const symft::Complex coefficient1 = (branch ? -1.0 : 1.0) * std::conj(eta) * inv_sqrt2;
+            value = inv_sqrt2 * alpha[source0] + coefficient1 * alpha[source1];
         }
         out[idx] = value * invnorm;
     }
@@ -705,6 +729,55 @@ void test_high_pivot_measurement_kernels() {
         check_batch_active_measurement_projection_kernel(uniform_xmask_pauli(k, k - 1, lower_mask), k, 1601 + lower_mask, 7, true);
         check_batch_active_measurement_projection_kernel(real_xmask_pauli(k, k - 1, lower_mask), k, 1701 + lower_mask, 7, true);
         check_batch_active_measurement_projection_kernel(general_xmask_pauli(k, k - 1, lower_mask), k, 1801 + lower_mask, 7, true);
+    }
+}
+
+void test_d5_nondiagonal_measurement_simd_kernel() {
+    using namespace symft;
+    constexpr int k = 10;
+    const PrecomputedActivePauliMeasurementKernel kernel(
+        pauli_x(k, 0) * pauli_x(k, 1) * pauli_y(k, 9));
+    require(!kernel.is_diagonal, "d5 SIMD fixture is nondiagonal");
+    require(kernel.action.xmask == 0x203 && kernel.action.zmask == 0x200,
+            "d5 SIMD fixture matches cultivation measurement masks");
+
+    const auto alpha = deterministic_alpha(k, 7);
+    std::vector<double> re(alpha.size());
+    std::vector<double> im(alpha.size());
+    for (std::size_t idx = 0; idx < alpha.size(); ++idx) {
+        re[idx] = alpha[idx].real();
+        im[idx] = alpha[idx].imag();
+    }
+    std::vector<double> scalar_re(kernel.out_dim);
+    std::vector<double> scalar_im(kernel.out_dim);
+    std::vector<double> selected_re(kernel.out_dim);
+    std::vector<double> selected_im(kernel.out_dim);
+    const auto& scalar = simd::scalar_table();
+    const auto& selected = simd::dispatch_table();
+    for (const bool branch : {false, true}) {
+        const double scalar_probability = scalar.measure_nondiagonal_probability_soa(
+            re.data(), im.data(), alpha.size(), kernel.action.xmask, kernel.action.zmask,
+            static_cast<unsigned>(kernel.pivot), kernel.nondiagonal_coefficient1_even, branch);
+        const double selected_probability = selected.measure_nondiagonal_probability_soa(
+            re.data(), im.data(), alpha.size(), kernel.action.xmask, kernel.action.zmask,
+            static_cast<unsigned>(kernel.pivot), kernel.nondiagonal_coefficient1_even, branch);
+        require(
+            std::abs(scalar_probability - selected_probability) < 1e-12,
+            "d5 nondiagonal SIMD probability matches scalar");
+        scalar.project_nondiagonal_soa(
+            re.data(), im.data(), scalar_re.data(), scalar_im.data(), alpha.size(),
+            kernel.action.xmask, kernel.action.zmask, static_cast<unsigned>(kernel.pivot),
+            kernel.nondiagonal_coefficient1_even, branch, 1.25);
+        selected.project_nondiagonal_soa(
+            re.data(), im.data(), selected_re.data(), selected_im.data(), alpha.size(),
+            kernel.action.xmask, kernel.action.zmask, static_cast<unsigned>(kernel.pivot),
+            kernel.nondiagonal_coefficient1_even, branch, 1.25);
+        for (std::size_t idx = 0; idx < kernel.out_dim; ++idx) {
+            require(
+                std::abs(scalar_re[idx] - selected_re[idx]) < 1e-12 &&
+                    std::abs(scalar_im[idx] - selected_im[idx]) < 1e-12,
+                "d5 nondiagonal SIMD projection matches scalar");
+        }
     }
 }
 
@@ -1406,6 +1479,7 @@ int main() {
     test_high_pivot_selection();
     test_high_pivot_rotation_kernels();
     test_high_pivot_measurement_kernels();
+    test_d5_nondiagonal_measurement_simd_kernel();
     test_active_h_rewrite_stays_virtual();
     test_dormant_measurement_tableau_reuse();
     test_dormant_measurement_sign_feeds_promotion();

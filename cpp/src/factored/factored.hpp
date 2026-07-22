@@ -238,6 +238,8 @@ struct FactoredInstructionProgram {
 };
 
 FactoredInstructionProgram factored_instruction_program(const PendingFactoredState& state);
+FactoredInstructionProgram factored_instruction_program(PendingFactoredState&& state);
 FactoredInstructionProgram plan_factored_updates(PendingFactoredState& state);
+FactoredInstructionProgram plan_factored_updates(PendingFactoredState&& state);
 
 } // namespace symft

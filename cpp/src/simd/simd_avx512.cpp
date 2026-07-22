@@ -57,6 +57,152 @@ double avx512_norm_sum_soa(const double* re, const double* im, const std::size_t
     return out;
 }
 
+__m512d permute_lanes_xor3(__m512d lanes, std::size_t mask);
+
+__m512d nondiagonal_coefficient_sign_mask8(
+    std::size_t source0,
+    std::uint64_t zmask,
+    bool branch) {
+    __m512i parity = _mm512_and_si512(
+        _mm512_set_epi64(
+            static_cast<long long>(source0 + 7),
+            static_cast<long long>(source0 + 6),
+            static_cast<long long>(source0 + 5),
+            static_cast<long long>(source0 + 4),
+            static_cast<long long>(source0 + 3),
+            static_cast<long long>(source0 + 2),
+            static_cast<long long>(source0 + 1),
+            static_cast<long long>(source0)),
+        _mm512_set1_epi64(static_cast<long long>(zmask)));
+    parity = _mm512_xor_si512(parity, _mm512_srli_epi64(parity, 32));
+    parity = _mm512_xor_si512(parity, _mm512_srli_epi64(parity, 16));
+    parity = _mm512_xor_si512(parity, _mm512_srli_epi64(parity, 8));
+    parity = _mm512_xor_si512(parity, _mm512_srli_epi64(parity, 4));
+    parity = _mm512_xor_si512(parity, _mm512_srli_epi64(parity, 2));
+    parity = _mm512_xor_si512(parity, _mm512_srli_epi64(parity, 1));
+    parity = _mm512_and_si512(parity, _mm512_set1_epi64(1));
+    if (branch) {
+        parity = _mm512_xor_si512(parity, _mm512_set1_epi64(1));
+    }
+    return _mm512_castsi512_pd(_mm512_slli_epi64(parity, 63));
+}
+
+struct NondiagonalAmplitudes8 {
+    __m512d re;
+    __m512d im;
+};
+
+NondiagonalAmplitudes8 nondiagonal_amplitudes8(
+    __m512d r0,
+    __m512d im0,
+    __m512d r1,
+    __m512d im1,
+    __m512d coefficient_sign_mask,
+    __m512d coefficient1_even_re,
+    __m512d coefficient1_even_im) {
+    constexpr double inv_sqrt2 = 0.707106781186547524400844362104849039;
+    const __m512d c0 = _mm512_set1_pd(inv_sqrt2);
+    const __m512d c1r = _mm512_xor_pd(coefficient1_even_re, coefficient_sign_mask);
+    const __m512d c1i = _mm512_xor_pd(coefficient1_even_im, coefficient_sign_mask);
+    __m512d ar = _mm512_fmadd_pd(c1r, r1, _mm512_mul_pd(c0, r0));
+    ar = _mm512_fnmadd_pd(c1i, im1, ar);
+    __m512d ai = _mm512_fmadd_pd(c1r, im1, _mm512_mul_pd(c0, im0));
+    ai = _mm512_fmadd_pd(c1i, r1, ai);
+    return {ar, ai};
+}
+
+double avx512_measure_nondiagonal_probability_soa(
+    const double* re,
+    const double* im,
+    std::size_t dim,
+    std::uint64_t xmask,
+    std::uint64_t zmask,
+    unsigned pivot,
+    Complex coefficient1_even,
+    bool branch) {
+    if (pivot < 3) {
+        return scalar_table().measure_nondiagonal_probability_soa(
+            re, im, dim, xmask, zmask, pivot, coefficient1_even, branch);
+    }
+    const std::size_t selector = std::size_t{1} << pivot;
+    const std::size_t step = selector << 1;
+    const std::size_t lower_mask = static_cast<std::size_t>(xmask) & (selector - 1);
+    const std::size_t lane_mask = lower_mask & std::size_t{7};
+    const std::size_t chunk_mask = lower_mask & ~std::size_t{7};
+    const __m512d coefficient1_even_re = _mm512_set1_pd(coefficient1_even.real());
+    const __m512d coefficient1_even_im = _mm512_set1_pd(coefficient1_even.imag());
+    __m512d probability = _mm512_setzero_pd();
+    for (std::size_t block = 0; block < dim; block += step) {
+        for (std::size_t offset = 0; offset < selector; offset += 8) {
+            const std::size_t source0 = block + offset;
+            const std::size_t source1 = block + selector + (offset ^ chunk_mask);
+            const __m512d r0 = _mm512_loadu_pd(re + source0);
+            const __m512d im0 = _mm512_loadu_pd(im + source0);
+            const __m512d r1 = permute_lanes_xor3(_mm512_loadu_pd(re + source1), lane_mask);
+            const __m512d im1 = permute_lanes_xor3(_mm512_loadu_pd(im + source1), lane_mask);
+            const auto amplitudes = nondiagonal_amplitudes8(
+                r0,
+                im0,
+                r1,
+                im1,
+                nondiagonal_coefficient_sign_mask8(source0, zmask, branch),
+                coefficient1_even_re,
+                coefficient1_even_im);
+            probability = _mm512_fmadd_pd(amplitudes.re, amplitudes.re, probability);
+            probability = _mm512_fmadd_pd(amplitudes.im, amplitudes.im, probability);
+        }
+    }
+    return _mm512_reduce_add_pd(probability);
+}
+
+void avx512_project_nondiagonal_soa(
+    const double* re,
+    const double* im,
+    double* out_re,
+    double* out_im,
+    std::size_t dim,
+    std::uint64_t xmask,
+    std::uint64_t zmask,
+    unsigned pivot,
+    Complex coefficient1_even,
+    bool branch,
+    double invnorm) {
+    if (pivot < 3) {
+        scalar_table().project_nondiagonal_soa(
+            re, im, out_re, out_im, dim, xmask, zmask, pivot, coefficient1_even, branch, invnorm);
+        return;
+    }
+    const std::size_t selector = std::size_t{1} << pivot;
+    const std::size_t step = selector << 1;
+    const std::size_t lower_mask = static_cast<std::size_t>(xmask) & (selector - 1);
+    const std::size_t lane_mask = lower_mask & std::size_t{7};
+    const std::size_t chunk_mask = lower_mask & ~std::size_t{7};
+    const __m512d coefficient1_even_re = _mm512_set1_pd(coefficient1_even.real());
+    const __m512d coefficient1_even_im = _mm512_set1_pd(coefficient1_even.imag());
+    const __m512d vinvnorm = _mm512_set1_pd(invnorm);
+    for (std::size_t block = 0; block < dim; block += step) {
+        const std::size_t output_base = block >> 1;
+        for (std::size_t offset = 0; offset < selector; offset += 8) {
+            const std::size_t source0 = block + offset;
+            const std::size_t source1 = block + selector + (offset ^ chunk_mask);
+            const __m512d r0 = _mm512_loadu_pd(re + source0);
+            const __m512d im0 = _mm512_loadu_pd(im + source0);
+            const __m512d r1 = permute_lanes_xor3(_mm512_loadu_pd(re + source1), lane_mask);
+            const __m512d im1 = permute_lanes_xor3(_mm512_loadu_pd(im + source1), lane_mask);
+            const auto amplitudes = nondiagonal_amplitudes8(
+                r0,
+                im0,
+                r1,
+                im1,
+                nondiagonal_coefficient_sign_mask8(source0, zmask, branch),
+                coefficient1_even_re,
+                coefficient1_even_im);
+            _mm512_storeu_pd(out_re + output_base + offset, _mm512_mul_pd(amplitudes.re, vinvnorm));
+            _mm512_storeu_pd(out_im + output_base + offset, _mm512_mul_pd(amplitudes.im, vinvnorm));
+        }
+    }
+}
+
 __m512i pair_indices8(std::size_t i0, std::uint64_t xmask) {
     const auto mask = static_cast<std::size_t>(xmask);
     return _mm512_set_epi64(
@@ -672,6 +818,8 @@ const KernelTable table = {
     avx512_norm_sum,
     avx512_mul_assign_soa,
     avx512_norm_sum_soa,
+    avx512_measure_nondiagonal_probability_soa,
+    avx512_project_nondiagonal_soa,
     avx512_rotate_uniform_imag_pairs_soa,
     avx512_rotate_real_pair_flip_soa,
     avx512_rotate_general_pairs_soa,

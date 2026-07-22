@@ -1,5 +1,6 @@
 #include "simd/simd.hpp"
 #include "sampler/active.hpp"
+#include "sampler/active_internal.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -160,237 +161,53 @@ double checksum_soa(const SoAState& state) {
     return out;
 }
 
+
 void apply_soa_block(SoAState& state, const symft::PrecomputedActivePauliRotationKernel& kernel, bool sign) {
     const double c = kernel.cos_kernel_angle;
-    double* re = state.re.data();
-    double* im = state.im.data();
-    const std::size_t dim = state.re.size();
     if (kernel.is_diagonal) {
-        const auto& coefficients = sign ? kernel.diagonal_plus_coefficients : kernel.diagonal_minus_coefficients;
-        const auto* coeff = reinterpret_cast<const double*>(coefficients.data());
         SYMFT_BENCH_SIMD_LOOP
-        for (std::size_t basis = 0; basis < coefficients.size(); ++basis) {
-            const double fr = c + coeff[2 * basis];
-            const double fi = coeff[2 * basis + 1];
-            const double r = re[basis];
-            const double v = im[basis];
-            re[basis] = fr * r - fi * v;
-            im[basis] = fr * v + fi * r;
+        for (std::size_t basis = 0; basis < state.re.size(); ++basis) {
+            const Complex coefficient = symft::detail::compact_rotation_coefficient(kernel, basis, sign);
+            const double fr = c + coefficient.real();
+            const double fi = coefficient.imag();
+            const double r = state.re[basis];
+            const double i = state.im[basis];
+            state.re[basis] = fr * r - fi * i;
+            state.im[basis] = fr * i + fi * r;
         }
         return;
     }
-    const std::size_t selector = std::size_t{1} << kernel.pair_bit;
-    const std::size_t step = selector << 1;
-    if (kernel.uniform_imag_pairs) {
-        const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
-        const double q = coefficient.imag();
-#if SYMFT_BENCH_INLINE_AVX2
-        if (selector == 1 && kernel.action.xmask == 1 && dim >= 4) {
-            const __m256d vc = _mm256_set1_pd(c);
-            const __m256d vq = _mm256_set1_pd(q);
-            std::size_t basis = 0;
-            for (; basis + 4 <= dim; basis += 4) {
-                const __m256d r = _mm256_loadu_pd(re + basis);
-                const __m256d v = _mm256_loadu_pd(im + basis);
-                const __m256d swapped_r = _mm256_permute_pd(r, 0b0101);
-                const __m256d swapped_v = _mm256_permute_pd(v, 0b0101);
-                _mm256_storeu_pd(re + basis, _mm256_fnmadd_pd(vq, swapped_v, _mm256_mul_pd(vc, r)));
-                _mm256_storeu_pd(im + basis, _mm256_fmadd_pd(vq, swapped_r, _mm256_mul_pd(vc, v)));
-            }
-            for (; basis < dim; basis += 2) {
-                const double r0 = re[basis];
-                const double im0 = im[basis];
-                const double r1 = re[basis + 1];
-                const double im1 = im[basis + 1];
-                re[basis] = c * r0 - q * im1;
-                im[basis] = c * im0 + q * r1;
-                re[basis + 1] = c * r1 - q * im0;
-                im[basis + 1] = c * im1 + q * r0;
-            }
-            return;
-        }
-#endif
-        for (std::size_t block = 0; block < dim; block += step) {
-            SYMFT_BENCH_SIMD_LOOP
-            for (std::size_t offset = 0; offset < selector; ++offset) {
-                const std::size_t i0 = block + offset;
-                const std::size_t i1 = i0 ^ static_cast<std::size_t>(kernel.action.xmask);
-                const double r0 = re[i0];
-                const double im0 = im[i0];
-                const double r1 = re[i1];
-                const double im1 = im[i1];
-                re[i0] = c * r0 - q * im1;
-                im[i0] = c * im0 + q * r1;
-                re[i1] = c * r1 - q * im0;
-                im[i1] = c * im1 + q * r0;
-            }
-        }
-        return;
-    }
-    if (kernel.real_pair_flip) {
-        const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
-        const double base_coeff = coefficient.real();
-#if SYMFT_BENCH_INLINE_AVX2
-        if (selector == 1 && kernel.action.xmask == 1 && dim >= 4) {
-            const __m256d vc = _mm256_set1_pd(c);
-            std::size_t basis = 0;
-            for (; basis + 4 <= dim; basis += 4) {
-                const double q0 = kernel.real_pair_flip_basis_phase_signs[basis >> 1] * base_coeff;
-                const double q1 = kernel.real_pair_flip_basis_phase_signs[(basis >> 1) + 1] * base_coeff;
-                const __m256d signed_q = _mm256_set_pd(q1, -q1, q0, -q0);
-                const __m256d r = _mm256_loadu_pd(re + basis);
-                const __m256d v = _mm256_loadu_pd(im + basis);
-                const __m256d swapped_r = _mm256_permute_pd(r, 0b0101);
-                const __m256d swapped_v = _mm256_permute_pd(v, 0b0101);
-                _mm256_storeu_pd(re + basis, _mm256_fmadd_pd(signed_q, swapped_r, _mm256_mul_pd(vc, r)));
-                _mm256_storeu_pd(im + basis, _mm256_fmadd_pd(signed_q, swapped_v, _mm256_mul_pd(vc, v)));
-            }
-            for (; basis < dim; basis += 2) {
-                const double q = kernel.real_pair_flip_basis_phase_signs[basis >> 1] * base_coeff;
-                const double r0 = re[basis];
-                const double im0 = im[basis];
-                const double r1 = re[basis + 1];
-                const double im1 = im[basis + 1];
-                re[basis] = c * r0 - q * r1;
-                im[basis] = c * im0 - q * im1;
-                re[basis + 1] = c * r1 + q * r0;
-                im[basis + 1] = c * im1 + q * im0;
-            }
-            return;
-        }
-#endif
-        std::size_t pair_idx = 0;
-        for (std::size_t block = 0; block < dim; block += step) {
-            SYMFT_BENCH_SIMD_LOOP
-            for (std::size_t offset = 0; offset < selector; ++offset) {
-                const std::size_t i0 = block + offset;
-                const std::size_t i1 = i0 ^ static_cast<std::size_t>(kernel.action.xmask);
-                const double q = kernel.real_pair_flip_basis_phase_signs[pair_idx++] * base_coeff;
-                const double r0 = re[i0];
-                const double im0 = im[i0];
-                const double r1 = re[i1];
-                const double im1 = im[i1];
-                re[i0] = c * r0 - q * r1;
-                im[i0] = c * im0 - q * im1;
-                re[i1] = c * r1 + q * r0;
-                im[i1] = c * im1 + q * im0;
-            }
-        }
-        return;
-    }
-    const auto& left_coeff = sign ? kernel.pair_left_plus_coefficients : kernel.pair_left_minus_coefficients;
-    const auto& right_coeff = sign ? kernel.pair_right_plus_coefficients : kernel.pair_right_minus_coefficients;
-    const auto* left = reinterpret_cast<const double*>(left_coeff.data());
-    const auto* right = reinterpret_cast<const double*>(right_coeff.data());
-#if SYMFT_BENCH_INLINE_AVX2
-    if (selector == 1 && kernel.action.xmask == 1 && dim >= 4) {
-        const __m256d vc = _mm256_set1_pd(c);
-        std::size_t basis = 0;
-        for (; basis + 4 <= dim; basis += 4) {
-            const std::size_t pair_idx = basis >> 1;
-            const __m256d coeff_r =
-                _mm256_set_pd(left[2 * (pair_idx + 1)], right[2 * (pair_idx + 1)], left[2 * pair_idx], right[2 * pair_idx]);
-            const __m256d coeff_i = _mm256_set_pd(
-                left[2 * (pair_idx + 1) + 1],
-                right[2 * (pair_idx + 1) + 1],
-                left[2 * pair_idx + 1],
-                right[2 * pair_idx + 1]);
-            const __m256d r = _mm256_loadu_pd(re + basis);
-            const __m256d v = _mm256_loadu_pd(im + basis);
-            const __m256d swapped_r = _mm256_permute_pd(r, 0b0101);
-            const __m256d swapped_v = _mm256_permute_pd(v, 0b0101);
-            __m256d out_r = _mm256_fmadd_pd(vc, r, _mm256_mul_pd(coeff_r, swapped_r));
-            out_r = _mm256_fnmadd_pd(coeff_i, swapped_v, out_r);
-            __m256d out_i = _mm256_fmadd_pd(vc, v, _mm256_mul_pd(coeff_r, swapped_v));
-            out_i = _mm256_fmadd_pd(coeff_i, swapped_r, out_i);
-            _mm256_storeu_pd(re + basis, out_r);
-            _mm256_storeu_pd(im + basis, out_i);
-        }
-        for (; basis < dim; basis += 2) {
-            const std::size_t pair_idx = basis >> 1;
-            const double r0 = re[basis];
-            const double im0 = im[basis];
-            const double r1 = re[basis + 1];
-            const double im1 = im[basis + 1];
-            const double lr = left[2 * pair_idx];
-            const double li = left[2 * pair_idx + 1];
-            const double rr = right[2 * pair_idx];
-            const double ri = right[2 * pair_idx + 1];
-            re[basis] = c * r0 + rr * r1 - ri * im1;
-            im[basis] = c * im0 + rr * im1 + ri * r1;
-            re[basis + 1] = c * r1 + lr * r0 - li * im0;
-            im[basis + 1] = c * im1 + lr * im0 + li * r0;
-        }
-        return;
-    }
-#endif
-    std::size_t pair_idx = 0;
-    for (std::size_t block = 0; block < dim; block += step) {
-        SYMFT_BENCH_SIMD_LOOP
-        for (std::size_t offset = 0; offset < selector; ++offset) {
-            const std::size_t i0 = block + offset;
-            const std::size_t i1 = i0 ^ static_cast<std::size_t>(kernel.action.xmask);
-            const double r0 = re[i0];
-            const double im0 = im[i0];
-            const double r1 = re[i1];
-            const double im1 = im[i1];
-            const double lr = left[2 * pair_idx];
-            const double li = left[2 * pair_idx + 1];
-            const double rr = right[2 * pair_idx];
-            const double ri = right[2 * pair_idx + 1];
-            re[i0] = c * r0 + rr * r1 - ri * im1;
-            im[i0] = c * im0 + rr * im1 + ri * r1;
-            re[i1] = c * r1 + lr * r0 - li * im0;
-            im[i1] = c * im1 + lr * im0 + li * r0;
-            ++pair_idx;
-        }
+    SYMFT_BENCH_SIMD_LOOP
+    for (std::size_t pair = 0; pair < kernel.pair_count; ++pair) {
+        const std::size_t left = symft::detail::insert_zero_bit(pair, static_cast<int>(kernel.pair_bit));
+        const std::size_t right = left ^ static_cast<std::size_t>(kernel.action.xmask);
+        const Complex left_coefficient = symft::detail::compact_rotation_coefficient(kernel, left, sign);
+        const Complex right_coefficient = symft::detail::compact_rotation_coefficient(kernel, right, sign);
+        const Complex a0(state.re[left], state.im[left]);
+        const Complex a1(state.re[right], state.im[right]);
+        const Complex out0 = c * a0 + right_coefficient * a1;
+        const Complex out1 = c * a1 + left_coefficient * a0;
+        state.re[left] = out0.real();
+        state.im[left] = out0.imag();
+        state.re[right] = out1.real();
+        state.im[right] = out1.imag();
     }
 }
 
 void apply_soa_dispatch(SoAState& state, const symft::PrecomputedActivePauliRotationKernel& kernel, bool sign) {
-    const auto& table = symft::simd::dispatch_table();
-    const double c = kernel.cos_kernel_angle;
-    if (kernel.is_diagonal) {
-        const auto& coefficients = sign ? kernel.diagonal_plus_coefficients : kernel.diagonal_minus_coefficients;
-        table.mul_assign_soa(state.re.data(), state.im.data(), coefficients.data(), c, coefficients.size());
+    if (!kernel.uniform_imag_pairs) {
+        apply_soa_block(state, kernel, sign);
         return;
     }
-    if (kernel.uniform_imag_pairs) {
-        const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
-        table.rotate_uniform_imag_pairs_soa(
-            state.re.data(),
-            state.im.data(),
-            state.re.size(),
-            kernel.action.xmask,
-            kernel.pair_bit,
-            c,
-            coefficient.imag());
-        return;
-    }
-    if (kernel.real_pair_flip) {
-        const Complex coefficient = sign ? kernel.pair_left_plus_coefficients.front() : kernel.pair_left_minus_coefficients.front();
-        table.rotate_real_pair_flip_soa(
-            state.re.data(),
-            state.im.data(),
-            state.re.size(),
-            kernel.action.xmask,
-            kernel.pair_bit,
-            kernel.real_pair_flip_basis_phase_signs.data(),
-            c,
-            coefficient.real());
-        return;
-    }
-    const auto& left_coeff = sign ? kernel.pair_left_plus_coefficients : kernel.pair_left_minus_coefficients;
-    const auto& right_coeff = sign ? kernel.pair_right_plus_coefficients : kernel.pair_right_minus_coefficients;
-    table.rotate_general_pairs_soa(
+    const Complex coefficient = symft::detail::compact_rotation_coefficient(kernel, 0, sign);
+    symft::simd::dispatch_table().rotate_uniform_imag_pairs_soa(
         state.re.data(),
         state.im.data(),
         state.re.size(),
         kernel.action.xmask,
         kernel.pair_bit,
-        left_coeff.data(),
-        right_coeff.data(),
-        c);
+        kernel.cos_kernel_angle,
+        coefficient.imag());
 }
 
 BenchResult bench_aos(
