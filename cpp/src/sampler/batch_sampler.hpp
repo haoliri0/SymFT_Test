@@ -12,6 +12,16 @@ namespace symft {
 struct PresampledExogenous;
 struct PackedPresampledExogenous;
 
+struct BatchActiveComponent {
+    int k = 0;
+    bool active = false;
+    std::size_t stride = 0;
+    std::vector<double> re;
+    std::vector<double> im;
+    std::vector<double> scratch_re;
+    std::vector<double> scratch_im;
+};
+
 struct BatchDetectorPostselectionScratch {
     std::vector<std::uint64_t> dead_bits;
     std::vector<std::uint64_t> keep_bits;
@@ -71,6 +81,8 @@ struct BatchFactoredExecutorState {
     std::vector<double> shot_coefficient_scalars;
     std::vector<double> branch_prob_true;
     std::vector<double> branch_invnorms;
+    bool active_components_enabled = false;
+    std::vector<BatchActiveComponent> active_components;
     std::uint64_t rng_state = 1;
 
     explicit BatchFactoredExecutorState(

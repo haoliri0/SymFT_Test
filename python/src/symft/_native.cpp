@@ -415,6 +415,7 @@ PyObject* info_to_dict(const symft::CircuitSamplingInfo& info) {
         !dict_set_owned(dict, "batch_size", PyLong_FromLong(info.batch_size)) ||
         !dict_set_owned(dict, "sample_chunk_shots", PyLong_FromLong(info.sample_chunk_shots)) ||
         !dict_set_owned(dict, "threads", PyLong_FromLong(info.threads)) ||
+        !dict_set_owned(dict, "active_components", PyBool_FromLong(info.active_components)) ||
         !dict_set_owned(dict, "detector_postselection", PyBool_FromLong(info.detector_postselection)) ||
         !dict_set_owned(
             dict,

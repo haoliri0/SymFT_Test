@@ -128,6 +128,42 @@ left-swaps, and peak resident memory. Use this tool—not `symft_bench` with zer
 shots—for large-width preprocessing checks, because benchmark executors
 allocate active state storage independently of the requested shot count.
 
+## Single-threaded Tsim rate harness
+
+`tsim_rate_bench.py` benchmarks Tsim's public detector sampler on its CPU
+backend while forcing Eigen, BLAS, OpenMP, and related library thread counts to
+one. It reports parsing, sampler construction, and fixed-shape JAX warmup
+separately from the measured repetitions. The `sample_s_*` timings include
+Tsim's full Boolean detector/observable output materialization and the
+host-side reduction to the same discarded, accepted, and logical-error counts
+reported by `symft_rate_bench`.
+
+For the paper's distance-three cultivation configuration:
+
+```bash
+.venv/bin/python benchmark/tsim_rate_bench.py \
+    --circuit benchmark/circuit/msc_d3_inject_cultivate_p1e-3.stim \
+    --shots 128 \
+    --batch-size 128 \
+    --warmups 1 \
+    --repeats 7 \
+    --postselect-detectors \
+    --cpu-affinity 0
+```
+
+Omit `--cpu-affinity` when logical CPU 0 is unavailable, or select a CPU from
+the process's allowed affinity set. `sample_shots_per_s` follows
+`symft_rate_bench` and uses the mean repetition time;
+`sample_shots_per_s_median` is the seven-repetition paper metric. The reported
+process-CPU/wall-time ratio should remain near one for a valid single-thread
+run.
+
+Tsim 0.1.4 does not expose in-sampler detector postselection. Consequently,
+`--postselect-detectors` performs the rejection/count reduction on the
+materialized output inside the timed region; it does not let Tsim skip rejected
+shots. The script labels this as `postselection_implementation
+host_output_reduction`.
+
 ## Benchmarking notes
 
 - Keep compilation/preprocessing time separate from steady-state sampling

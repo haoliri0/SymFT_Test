@@ -406,6 +406,8 @@ normalized configuration:
 - `num_observable_includes`, `observable`;
 - `max_active_qubits`;
 - final `batch_size`, `sample_chunk_shots`, and `threads`;
+- `active_components`, indicating whether the cost-gated product-component
+  active-state backend was selected;
 - `detector_postselection` and `batch_mask_threshold_denominator`;
 - `backend`, one of `"single"`, `"batch"`, or `"cuda"`.
 

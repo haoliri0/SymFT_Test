@@ -10,6 +10,8 @@
 
 namespace symft {
 
+struct ActiveComponentPlan;
+
 struct PendingPauliRotation {
     double kernel_angle = 0.0;
     SymbolicPauliString pauli;
@@ -243,6 +245,10 @@ struct FactoredInstructionProgram {
     std::vector<int> sampled_bernoulli_conditions;
     std::vector<double> sampled_bernoulli_probabilities;
     std::vector<BernoulliSampleGroup> sampled_low_probability_bernoulli_groups;
+    // The component plan is always safe to ignore. Automatic planning enables
+    // it only when its conservative cost model predicts a material win.
+    std::shared_ptr<const ActiveComponentPlan> active_component_plan;
+    bool use_active_components = false;
 
     FactoredInstructionProgram() = default;
     FactoredInstructionProgram(

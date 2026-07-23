@@ -50,6 +50,7 @@ class CountsSamplerInfo(TypedDict):
     batch_size: int
     sample_chunk_shots: int
     threads: int
+    active_components: bool
     detector_postselection: bool
     batch_mask_threshold_denominator: int
     backend: str

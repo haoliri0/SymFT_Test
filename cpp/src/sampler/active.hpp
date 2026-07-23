@@ -66,6 +66,7 @@ struct PrecomputedActivePauliMeasurementKernel {
     PrecomputedActivePauliMeasurementKernel() = default;
     explicit PrecomputedActivePauliMeasurementKernel(const PauliString& pauli);
     explicit PrecomputedActivePauliMeasurementKernel(const ActivePauliAction& action);
+    PrecomputedActivePauliMeasurementKernel(const ActivePauliAction& action, int pivot);
 };
 
 static_assert(sizeof(PrecomputedActivePauliRotationKernel) <= 128);

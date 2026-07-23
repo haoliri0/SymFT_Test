@@ -28,6 +28,7 @@ add_library(symft_cpp
     src/core/frames.cpp
     src/circuit/circuit_lowering.cpp
     src/sampler/active_state.cpp
+    src/sampler/component_plan.cpp
     src/factored/factored_state.cpp
     src/factored/factored_planner.cpp
     src/sampler/presampled_expression.cpp

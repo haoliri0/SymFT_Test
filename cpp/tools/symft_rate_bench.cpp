@@ -18,6 +18,12 @@ enum class SamplerMode {
     Both,
 };
 
+enum class ActiveComponentMode {
+    Auto,
+    Enabled,
+    Disabled,
+};
+
 struct BenchResult {
     std::string path;
     std::string sampler;
@@ -28,6 +34,7 @@ struct BenchResult {
     int repeats = 1;
     int threads = 1;
     int requested_threads = 1;
+    bool active_components = false;
     bool detector_postselection = false;
     int batch_mask_threshold_denominator = 0;
     symft::CircuitSamplingTiming timing;
@@ -111,6 +118,22 @@ SamplerMode parse_sampler_mode(const char* raw) {
     throw std::runtime_error(std::string("invalid sampler: ") + raw);
 }
 
+ActiveComponentMode parse_active_component_mode(const char* raw) {
+    const std::string value(raw);
+    if (value == "auto") {
+        return ActiveComponentMode::Auto;
+    }
+    if (value == "1" || value == "on" || value == "enabled") {
+        return ActiveComponentMode::Enabled;
+    }
+    if (value == "0" || value == "off" || value == "disabled" ||
+        value == "dense") {
+        return ActiveComponentMode::Disabled;
+    }
+    throw std::runtime_error(
+        std::string("invalid active-components mode: ") + raw);
+}
+
 struct Options {
     std::string path = "benchmark/circuit/msc_d3_inject_cultivate_p1e-3.stim";
     std::uint64_t shots = 100000000ULL;
@@ -122,6 +145,7 @@ struct Options {
     bool postselect_detectors = false;
     int batch_mask_threshold_denominator = 2;
     SamplerMode sampler = SamplerMode::Batch;
+    ActiveComponentMode active_components = ActiveComponentMode::Auto;
 };
 
 void print_usage(const char* argv0) {
@@ -140,6 +164,7 @@ void print_usage(const char* argv0) {
         << "  --postselect-detectors            Enable detector postselection inside the sampler\n"
         << "  --no-postselect-detectors         Disable detector postselection\n"
         << "  --threads N|auto                  Parallel worker threads over independent chunks\n"
+        << "  --active-components auto|on|off   Override automatic product-component selection\n"
         << "\n"
         << "batch-only options:\n"
         << "  --batch-size N|auto               Batch size; auto chooses the sampler default\n"
@@ -231,6 +256,11 @@ Options parse_options(int argc, char** argv) {
         } else if (name == "--threads") {
             const std::string raw = require_option_value(name, value, idx, argc, argv);
             options.threads = parse_threads(raw.c_str());
+        } else if (name == "--active-components") {
+            const std::string raw =
+                require_option_value(name, value, idx, argc, argv);
+            options.active_components =
+                parse_active_component_mode(raw.c_str());
         } else if (name == "--postselect-detectors") {
             options.postselect_detectors = value.empty() ? true : parse_bool_flag(value.c_str(), "postselect_detectors");
         } else if (name == "--no-postselect-detectors") {
@@ -257,6 +287,22 @@ symft::CircuitSamplingOptions make_sampler_options(const Options& options) {
     return out;
 }
 
+symft::CircuitSamplingInput make_benchmark_input(
+    const Options& options,
+    const symft::CircuitSamplingOptions& sampler_options) {
+    auto input =
+        symft::make_stim_circuit_sampling_input_from_file(
+            options.path,
+            sampler_options);
+    if (options.active_components == ActiveComponentMode::Enabled) {
+        input.program.use_active_components = true;
+    } else if (
+        options.active_components == ActiveComponentMode::Disabled) {
+        input.program.use_active_components = false;
+    }
+    return input;
+}
+
 BenchResult make_result_shell(
     const Options& options,
     const symft::CircuitSamplingInfo& info,
@@ -270,6 +316,7 @@ BenchResult make_result_shell(
     result.repeats = options.repeats;
     result.threads = info.threads;
     result.requested_threads = options.threads;
+    result.active_components = info.active_components;
     result.detector_postselection = info.detector_postselection;
     result.batch_mask_threshold_denominator = info.batch_mask_threshold_denominator;
     return result;
@@ -295,9 +342,10 @@ void average_repeated_timings(BenchResult& result) {
 
 BenchResult run_single_sampler(const Options& options) {
     const std::string sampler_name = options.postselect_detectors ? "single_postselected" : "single";
-    auto sampler = symft::prepare_single_shot_sampler_from_stim_file(
-        options.path,
-        make_sampler_options(options));
+    const auto sampler_options = make_sampler_options(options);
+    auto sampler = symft::PreparedCircuitSingleShotSampler(
+        make_benchmark_input(options, sampler_options),
+        sampler_options);
     BenchResult result = make_result_shell(
         options,
         sampler.info(),
@@ -312,9 +360,10 @@ BenchResult run_single_sampler(const Options& options) {
 
 BenchResult run_batch_sampler(const Options& options) {
     const std::string sampler_name = options.postselect_detectors ? "batch_postselected" : "batch";
-    auto sampler = symft::prepare_batch_sampler_from_stim_file(
-        options.path,
-        make_sampler_options(options));
+    const auto sampler_options = make_sampler_options(options);
+    auto sampler = symft::PreparedCircuitBatchSampler(
+        make_benchmark_input(options, sampler_options),
+        sampler_options);
     BenchResult result = make_result_shell(
         options,
         sampler.info(),
@@ -343,6 +392,9 @@ void print_result(const BenchResult& result) {
     std::cout << "file " << result.path << "\n";
     std::cout << "shots " << result.requested_shots << "\n";
     std::cout << "sampled_shots " << result.counts.shots << "\n";
+    std::cout << "active_components "
+              << (result.active_components ? "enabled" : "dense_fallback")
+              << "\n";
     std::cout << "detector_postselection " << (result.detector_postselection ? "enabled" : "disabled") << "\n";
     if (is_batch_sampler) {
         std::cout << "batch_size " << result.batch_size << "\n";

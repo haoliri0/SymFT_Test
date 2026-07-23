@@ -1,4 +1,5 @@
 #include "frontend/stim.hpp"
+#include "sampler/component_plan.hpp"
 
 #include <chrono>
 #include <iostream>
@@ -51,6 +52,25 @@ int main(int argc, char** argv) {
         std::cout << "detectors " << plan.ndetectors << "\n";
         std::cout << "instructions " << plan.instructions.size() << "\n";
         std::cout << "max_active_qubits " << plan.max_k << "\n";
+        if (plan.active_component_plan != nullptr) {
+            const auto& components = *plan.active_component_plan;
+            std::cout << "active_components "
+                      << (plan.use_active_components ? "enabled" : "dense_fallback")
+                      << "\n";
+            std::cout << "component_count " << components.component_count << "\n";
+            std::cout << "dense_peak_dimension "
+                      << components.dense_peak_dimension << "\n";
+            std::cout << "component_peak_live_dimension "
+                      << components.component_peak_live_dimension << "\n";
+            std::cout << "component_allocated_dimension "
+                      << components.component_allocated_dimension << "\n";
+            std::cout << "estimated_dense_vector_work "
+                      << static_cast<double>(components.estimated_dense_work)
+                      << "\n";
+            std::cout << "estimated_component_vector_work "
+                      << static_cast<double>(components.estimated_component_work)
+                      << "\n";
+        }
         std::cout << "pending_operations_before " << optimization.input_operations << "\n";
         std::cout << "pending_operations_after " << optimization.output_operations << "\n";
         std::cout << "fused_rotations " << optimization.fused_rotations << "\n";

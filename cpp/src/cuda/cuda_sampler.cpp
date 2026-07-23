@@ -52,6 +52,7 @@ CircuitSamplingInfo make_cuda_info(
     info.batch_size = 0;
     info.sample_chunk_shots = options.shots_per_launch;
     info.threads = 1;
+    info.active_components = false;
     info.detector_postselection = options.postselect_detectors;
     info.batch_mask_threshold_denominator = 0;
     return info;

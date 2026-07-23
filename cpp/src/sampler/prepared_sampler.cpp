@@ -205,6 +205,7 @@ CircuitSamplingInfo make_info(
     info.batch_size = batch_size;
     info.sample_chunk_shots = sample_chunk_shots;
     info.threads = threads;
+    info.active_components = program.use_active_components;
     info.detector_postselection = options.postselect_detectors;
     info.batch_mask_threshold_denominator =
         options.postselect_detectors ? options.batch_mask_threshold_denominator : 0;

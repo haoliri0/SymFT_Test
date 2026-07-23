@@ -11,6 +11,15 @@ namespace symft {
 struct PresampledExogenous;
 struct PackedPresampledExogenous;
 
+struct SingleShotActiveComponent {
+    int k = 0;
+    bool active = false;
+    std::vector<double> re;
+    std::vector<double> im;
+    std::vector<double> scratch_re;
+    std::vector<double> scratch_im;
+};
+
 struct FactoredExecutorState {
     int n = 0;
     int k = 0;
@@ -26,6 +35,8 @@ struct FactoredExecutorState {
     std::vector<std::uint64_t> assigned_words;
     std::vector<std::uint64_t> measurement_words;
     std::vector<std::uint64_t> detector_words;
+    bool active_components_enabled = false;
+    std::vector<SingleShotActiveComponent> active_components;
     std::uint64_t rng_state = 1;
 
     explicit FactoredExecutorState(const FactoredInstructionProgram& program, std::uint64_t seed = 1);

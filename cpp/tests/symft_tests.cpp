@@ -2,6 +2,7 @@
 #include "frontend/stim_prepared_sampler.hpp"
 #include "sampler/batch_internal.hpp"
 #include "sampler/batch_sampler.hpp"
+#include "sampler/component_plan.hpp"
 #include "sampler/exogenous.hpp"
 #include "sampler/single_shot.hpp"
 #include "simd/simd.hpp"
@@ -117,6 +118,86 @@ symft::ApplyPrecomputedActivePauliRotation high_pivot_rotation_instruction(
         sign_expr,
         symft::SymbolicBoolEvaluationPlan(sign_expr),
     };
+}
+
+symft::PromoteDormantRotation component_test_promotion(double angle) {
+    const symft::SymbolicBool sign(false);
+    return symft::PromoteDormantRotation{
+        angle,
+        sign,
+        symft::SymbolicBoolEvaluationPlan(sign),
+    };
+}
+
+symft::ApplyPrecomputedActivePauliRotation component_test_rotation(
+    const symft::PauliString& pauli,
+    double angle) {
+    return high_pivot_rotation_instruction(pauli, angle);
+}
+
+symft::MeasurePrecomputedActivePauli component_test_measurement(
+    const symft::PauliString& pauli,
+    int branch,
+    int record) {
+    const symft::SymbolicBool outcome = symft::symbolic_bool(branch);
+    return symft::MeasurePrecomputedActivePauli{
+        pauli,
+        symft::PrecomputedActivePauliMeasurementKernel(pauli),
+        branch,
+        outcome,
+        record,
+        std::nullopt,
+        symft::SymbolicBoolEvaluationPlan(outcome),
+    };
+}
+
+symft::FactoredInstructionProgram component_test_program() {
+    using namespace symft;
+    std::vector<FactoredInstruction> instructions;
+    instructions.emplace_back(
+        component_test_rotation(PauliString(0), 0.19));
+    instructions.emplace_back(component_test_promotion(0.17));
+    instructions.emplace_back(component_test_promotion(-0.29));
+    instructions.emplace_back(component_test_promotion(0.41));
+
+    PauliString merge_late(3);
+    merge_late.set_xbit(1);
+    merge_late.set_xbit(2);
+    instructions.emplace_back(component_test_rotation(merge_late, 0.23));
+
+    PauliString merge_early_into_late(3);
+    merge_early_into_late.set_xbit(0);
+    merge_early_into_late.set_xbit(1);
+    instructions.emplace_back(
+        component_test_rotation(merge_early_into_late, -0.31));
+    instructions.emplace_back(
+        component_test_measurement(merge_early_into_late, 1, 1));
+    const SymbolicBool no_symbolic_detector_sign(false);
+    instructions.emplace_back(RecordDetector{
+        no_symbolic_detector_sign,
+        {1},
+        1,
+        SymbolicBoolEvaluationPlan(no_symbolic_detector_sign),
+    });
+
+    // Global order after the first measurement is [q0, q2], while the merged
+    // component order is [q2, q0]. The global highest pivot (q2) is therefore
+    // local bit zero, exercising explicit non-highest local pivots.
+    PauliString reversed_single(2);
+    reversed_single.set_zbit(1);
+    instructions.emplace_back(
+        component_test_measurement(reversed_single, 2, 2));
+
+    PauliString final_x(1);
+    final_x.set_xbit(0);
+    instructions.emplace_back(
+        component_test_measurement(final_x, 3, 3));
+
+    return FactoredInstructionProgram(
+        8,
+        0,
+        std::move(instructions),
+        8);
 }
 
 void check_high_pivot_single_rotation_kernel(const symft::PauliString& pauli, double theta, int k) {
@@ -1595,6 +1676,190 @@ void test_presampled_exogenous() {
     require(mid_ones > 1000 && mid_ones < 1450, "packed mid-probability Bernoulli has plausible weight");
 }
 
+void test_active_component_factorization() {
+    using namespace symft;
+
+    auto base = component_test_program();
+    require(base.active_component_plan != nullptr, "component plan is available");
+    require(
+        !base.use_active_components,
+        "small component program conservatively keeps the dense default");
+    require(
+        base.active_component_plan->measurements.size() == 3,
+        "component plan records active measurements");
+    require(
+        base.active_component_plan->instruction_steps.front().kind ==
+            ActiveComponentStepKind::IgnoredGlobalPhase,
+        "component plan safely discards an unobservable k=0 global phase");
+    const auto& reordered_measurement =
+        base.active_component_plan->measurements.front().kernel;
+    require(
+        reordered_measurement.pivot == 0 &&
+            detail::highest_set_bit64(
+                reordered_measurement.action.xmask) == 2,
+        "component measurement preserves a non-highest remapped pivot");
+
+    auto dense = base;
+    dense.use_active_components = false;
+    auto component = base;
+    component.use_active_components = true;
+
+    const auto dense_single = sample_measurements(dense, 257, 0x314159, 31);
+    const auto component_single =
+        sample_measurements(component, 257, 0x314159, 31);
+    require(
+        dense_single == component_single,
+        "single-shot component sampling matches dense sampling");
+
+    const auto dense_batch =
+        sample_measurements_batch(dense, 257, 13, 0x271828);
+    const auto component_batch =
+        sample_measurements_batch(component, 257, 13, 0x271828);
+    require(
+        dense_batch == component_batch,
+        "basis-major batch component sampling matches dense sampling");
+
+    const int shots = 17;
+    const auto samples =
+        presample_exogenous_packed(dense, shots, 0x123456);
+    PresampledExpressionPlan expression_plan;
+    prepare_presampled_expression_plan(
+        expression_plan,
+        dense,
+        samples);
+    PresampledExpressionBlock expression_block;
+    evaluate_presampled_expression_block(
+        expression_block,
+        expression_plan,
+        samples);
+
+    BatchFactoredExecutorState dense_runtime(dense, shots, 0xabcdef);
+    dense_runtime.dense_shot_major_active = true;
+    reset_batch_executor(dense_runtime, dense, shots);
+    execute_batch_in_place(
+        dense_runtime,
+        dense,
+        expression_plan,
+        expression_block);
+
+    BatchFactoredExecutorState component_runtime(
+        component,
+        shots,
+        0xabcdef);
+    require(
+        component_runtime.active_components_enabled,
+        "forced component batch uses component storage");
+    component_runtime.dense_shot_major_active = true;
+    reset_batch_executor(component_runtime, component, shots);
+    execute_batch_in_place(
+        component_runtime,
+        component,
+        expression_plan,
+        expression_block);
+    require(
+        dense_runtime.measurement_words ==
+            component_runtime.measurement_words,
+        "shot-major presampled component sampling matches dense sampling");
+
+    BatchFactoredExecutorState dense_postselected(
+        dense,
+        shots,
+        0xfeedface);
+    dense_postselected.dense_shot_major_active = true;
+    dense_postselected.store_detector_records = false;
+    reset_batch_executor(dense_postselected, dense, shots);
+    BatchDetectorPostselectionScratch dense_postselection_scratch;
+    const auto dense_postselection =
+        execute_batch_postselected_in_place(
+            dense_postselected,
+            dense,
+            expression_plan,
+            expression_block,
+            0,
+            dense_postselection_scratch);
+
+    BatchFactoredExecutorState component_postselected(
+        component,
+        shots,
+        0xfeedface);
+    require(
+        component_postselected.active_components_enabled,
+        "component postselection starts with component storage");
+    component_postselected.dense_shot_major_active = true;
+    component_postselected.store_detector_records = false;
+    reset_batch_executor(
+        component_postselected,
+        component,
+        shots);
+    BatchDetectorPostselectionScratch component_postselection_scratch;
+    const auto component_postselection =
+        execute_batch_postselected_in_place(
+            component_postselected,
+            component,
+            expression_plan,
+            expression_block,
+            0,
+            component_postselection_scratch);
+    require(
+        dense_postselection.discarded ==
+                component_postselection.discarded &&
+            dense_postselection.accepted ==
+                component_postselection.accepted &&
+            dense_postselected.active_shots ==
+                component_postselected.active_shots,
+        "component batch postselection keeps the same survivors");
+    for (int record = 1; record <= dense.nrecords; ++record) {
+        for (int shot = 0;
+             shot < dense_postselected.active_shots;
+             ++shot) {
+            const std::size_t word = batch_shot_word(shot);
+            const bool dense_bit =
+                (dense_postselected.measurement_words[
+                     batch_record_offset(
+                         dense_postselected,
+                         record,
+                         word)] &
+                 batch_shot_mask(shot)) != 0;
+            const bool component_bit =
+                (component_postselected.measurement_words[
+                     batch_record_offset(
+                         component_postselected,
+                         record,
+                         word)] &
+                 batch_shot_mask(shot)) != 0;
+            require(
+                dense_bit == component_bit,
+                "component batch postselection preserves compacted records");
+        }
+    }
+
+    std::vector<FactoredInstruction> profitable_instructions;
+    for (int q = 0; q < 12; ++q) {
+        profitable_instructions.emplace_back(
+            component_test_promotion(0.03 * static_cast<double>(q + 1)));
+    }
+    for (int repeat = 0; repeat < 5; ++repeat) {
+        for (int q = 0; q < 12; ++q) {
+            PauliString local_z(12);
+            local_z.set_zbit(q);
+            profitable_instructions.emplace_back(
+                component_test_rotation(local_z, 0.07));
+        }
+    }
+    const FactoredInstructionProgram profitable(
+        12,
+        0,
+        std::move(profitable_instructions),
+        12);
+    require(
+        profitable.use_active_components,
+        "automatic selector enables a clearly profitable component program");
+    require(
+        profitable.active_component_plan->component_allocated_dimension <
+            profitable.active_component_plan->dense_peak_dimension,
+        "selected component program reduces allocated active dimension");
+}
+
 void test_batch_sampler() {
     using namespace symft;
     const auto parsed = parse_stim_text("X_ERROR(1) 0\nM 0\n");
@@ -1863,6 +2128,7 @@ int main() {
     test_extended_stim_frontend();
     test_t_gate_exact_rotation();
     test_presampled_exogenous();
+    test_active_component_factorization();
     test_batch_sampler();
     test_batch_postselection();
     test_detectors();

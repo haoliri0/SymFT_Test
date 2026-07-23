@@ -1,6 +1,7 @@
 #include "active_kernels.hpp"
 
 #include "sampler/exogenous.hpp"
+#include "sampler/component_plan.hpp"
 #include "sampler/random.hpp"
 #include "sampler/single_shot.hpp"
 #include "simd/simd.hpp"
@@ -597,6 +598,379 @@ void project_active_pauli_measurement(
     --runtime.k;
 }
 
+void execute_instruction(
+    FactoredExecutorState& runtime,
+    const ApplyPrecomputedActivePauliRotation& instruction);
+void execute_instruction(
+    FactoredExecutorState& runtime,
+    const PromoteDormantRotation& instruction);
+void execute_instruction(
+    FactoredExecutorState& runtime,
+    const RecordMeasurement& instruction);
+void execute_instruction(
+    FactoredExecutorState& runtime,
+    const RecordDetector& instruction);
+void execute_instruction(
+    FactoredExecutorState& runtime,
+    const MeasurePrecomputedActivePauli& instruction);
+void execute_instruction(
+    FactoredExecutorState& runtime,
+    const IntroduceDormantMeasurementBranch& instruction);
+
+void configure_single_shot_components(
+    FactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program) {
+    if (program.use_active_components &&
+        (program.active_component_plan == nullptr ||
+         program.active_component_plan->instruction_steps.size() !=
+             program.instructions.size())) {
+        fail("program does not contain an executable active component plan");
+    }
+    const bool enabled =
+        program.use_active_components &&
+        program.active_component_plan != nullptr;
+    runtime.active_components_enabled = enabled;
+    if (!enabled) {
+        runtime.active_components.clear();
+        ensure_runtime_active_capacity(runtime, program.max_k);
+        return;
+    }
+
+    const auto& plan = *program.active_component_plan;
+    if (plan.component_count !=
+        static_cast<int>(plan.component_max_k.size())) {
+        fail("active component plan has inconsistent component capacities");
+    }
+    runtime.active_components.resize(
+        static_cast<std::size_t>(plan.component_count));
+    for (int component = 0; component < plan.component_count; ++component) {
+        auto& buffer =
+            runtime.active_components[static_cast<std::size_t>(component)];
+        const std::size_t capacity = active_length(
+            plan.component_max_k[static_cast<std::size_t>(component)]);
+        buffer.re.resize(capacity, 0.0);
+        buffer.im.resize(capacity, 0.0);
+        buffer.scratch_re.resize(capacity, 0.0);
+        buffer.scratch_im.resize(capacity, 0.0);
+    }
+    std::vector<double>().swap(runtime.active_re);
+    std::vector<double>().swap(runtime.active_im);
+    std::vector<double>().swap(runtime.active_scratch_re);
+    std::vector<double>().swap(runtime.active_scratch_im);
+}
+
+void reset_single_shot_components(
+    FactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program) {
+    if (program.use_active_components &&
+        (program.active_component_plan == nullptr ||
+         program.active_component_plan->instruction_steps.size() !=
+             program.instructions.size())) {
+        fail("program does not contain an executable active component plan");
+    }
+    const bool should_enable =
+        program.use_active_components &&
+        program.active_component_plan != nullptr;
+    if (runtime.active_components_enabled != should_enable ||
+        (should_enable &&
+         runtime.active_components.size() !=
+             program.active_component_plan->component_max_k.size())) {
+        configure_single_shot_components(runtime, program);
+    }
+    if (!runtime.active_components_enabled) {
+        return;
+    }
+    const auto& plan = *program.active_component_plan;
+    for (auto& component : runtime.active_components) {
+        component.k = 0;
+        component.active = false;
+    }
+    if (plan.initial_components != program.initial_k) {
+        fail("active component plan has the wrong initial component count");
+    }
+    for (int component = 0; component < plan.initial_components; ++component) {
+        auto& buffer =
+            runtime.active_components[static_cast<std::size_t>(component)];
+        if (buffer.re.size() < 2 || buffer.im.size() < 2) {
+            fail("initial active component has insufficient storage");
+        }
+        buffer.k = 1;
+        buffer.active = true;
+        buffer.re[0] = 1.0;
+        buffer.im[0] = 0.0;
+        buffer.re[1] = 0.0;
+        buffer.im[1] = 0.0;
+    }
+}
+
+void merge_single_shot_components(
+    FactoredExecutorState& runtime,
+    const ActiveComponentPlan& plan,
+    std::uint32_t merge_offset,
+    std::uint16_t merge_count,
+    int expected_target) {
+    if (merge_count == 0 ||
+        static_cast<std::size_t>(merge_offset) + merge_count >
+            plan.merge_components.size()) {
+        fail("active component instruction has an invalid merge range");
+    }
+    const int target_id =
+        plan.merge_components[static_cast<std::size_t>(merge_offset)];
+    if (target_id != expected_target ||
+        target_id < 0 ||
+        target_id >= static_cast<int>(runtime.active_components.size())) {
+        fail("active component merge has an invalid target");
+    }
+    auto& target =
+        runtime.active_components[static_cast<std::size_t>(target_id)];
+    if (!target.active) {
+        fail("active component merge target is inactive");
+    }
+    for (std::uint16_t source_index = 1;
+         source_index < merge_count;
+         ++source_index) {
+        const int source_id = plan.merge_components[
+            static_cast<std::size_t>(merge_offset) + source_index];
+        if (source_id < 0 ||
+            source_id >= static_cast<int>(runtime.active_components.size()) ||
+            source_id == target_id) {
+            fail("active component merge has an invalid source");
+        }
+        auto& source =
+            runtime.active_components[static_cast<std::size_t>(source_id)];
+        if (!source.active) {
+            fail("active component merge source is inactive");
+        }
+        const std::size_t target_dim = active_length(target.k);
+        const std::size_t source_dim = active_length(source.k);
+        const int merged_k = target.k + source.k;
+        const std::size_t merged_dim = active_length(merged_k);
+        if (target.re.size() < merged_dim ||
+            target.im.size() < merged_dim) {
+            fail("active component merge target has insufficient storage");
+        }
+        for (std::size_t source_basis = source_dim;
+             source_basis-- > 0;) {
+            const double source_re = source.re[source_basis];
+            const double source_im = source.im[source_basis];
+            const std::size_t output_base = source_basis << target.k;
+            SYMFT_SINGLE_SIMD_LOOP
+            for (std::size_t target_basis = 0;
+                 target_basis < target_dim;
+                 ++target_basis) {
+                const double target_re = target.re[target_basis];
+                const double target_im = target.im[target_basis];
+                const std::size_t output = output_base + target_basis;
+                target.re[output] =
+                    target_re * source_re - target_im * source_im;
+                target.im[output] =
+                    target_re * source_im + target_im * source_re;
+            }
+        }
+        target.k = merged_k;
+        source.k = 0;
+        source.active = false;
+    }
+}
+
+class ScopedSingleShotComponent {
+  public:
+    ScopedSingleShotComponent(
+        FactoredExecutorState& runtime_,
+        SingleShotActiveComponent& component_)
+        : runtime(runtime_),
+          component(component_),
+          global_k(runtime_.k),
+          global_ndormant(runtime_.ndormant) {
+        if (!component.active) {
+            fail("cannot execute an instruction on an inactive component");
+        }
+        std::swap(runtime.active_re, component.re);
+        std::swap(runtime.active_im, component.im);
+        std::swap(runtime.active_scratch_re, component.scratch_re);
+        std::swap(runtime.active_scratch_im, component.scratch_im);
+        runtime.k = component.k;
+    }
+
+    ~ScopedSingleShotComponent() {
+        component.k = runtime.k;
+        std::swap(runtime.active_re, component.re);
+        std::swap(runtime.active_im, component.im);
+        std::swap(runtime.active_scratch_re, component.scratch_re);
+        std::swap(runtime.active_scratch_im, component.scratch_im);
+        runtime.k = global_k;
+        runtime.ndormant = global_ndormant;
+    }
+
+  private:
+    FactoredExecutorState& runtime;
+    SingleShotActiveComponent& component;
+    int global_k;
+    int global_ndormant;
+};
+
+void execute_component_rotation(
+    FactoredExecutorState& runtime,
+    const ActiveComponentPlan& plan,
+    const ActiveComponentRotationStep& step,
+    bool sign) {
+    merge_single_shot_components(
+        runtime,
+        plan,
+        step.merge_offset,
+        step.merge_count,
+        step.component);
+    auto& component =
+        runtime.active_components[static_cast<std::size_t>(step.component)];
+    ScopedSingleShotComponent scope(runtime, component);
+    rotate_pauli(runtime, step.kernel, sign);
+}
+
+void execute_component_promotion(
+    FactoredExecutorState& runtime,
+    const ActiveComponentPromotionStep& step,
+    double kernel_angle,
+    bool sign) {
+    if (runtime.ndormant <= 0 ||
+        step.component < 0 ||
+        step.component >= static_cast<int>(runtime.active_components.size())) {
+        fail("active component promotion is invalid");
+    }
+    auto& component =
+        runtime.active_components[static_cast<std::size_t>(step.component)];
+    if (component.active || component.re.size() < 2 ||
+        component.im.size() < 2) {
+        fail("active component promotion target is unavailable");
+    }
+    const double c = std::cos(kernel_angle);
+    const double s = std::sin(kernel_angle);
+    component.k = 1;
+    component.active = true;
+    component.re[0] = c;
+    component.im[0] = 0.0;
+    component.re[1] = 0.0;
+    component.im[1] = sign ? s : -s;
+    ++runtime.k;
+    --runtime.ndormant;
+}
+
+void execute_component_measurement(
+    FactoredExecutorState& runtime,
+    const ActiveComponentPlan& plan,
+    const ActiveComponentMeasurementStep& step,
+    int branch_condition) {
+    merge_single_shot_components(
+        runtime,
+        plan,
+        step.merge_offset,
+        step.merge_count,
+        step.component);
+    auto& component =
+        runtime.active_components[static_cast<std::size_t>(step.component)];
+    {
+        ScopedSingleShotComponent scope(runtime, component);
+        double prob_true =
+            step.kernel.is_diagonal
+                ? active_diagonal_measurement_branch_probability(
+                      runtime,
+                      step.kernel,
+                      true)
+                : active_measurement_branch_probability(
+                      runtime,
+                      step.kernel,
+                      true);
+        prob_true = std::clamp(prob_true, 0.0, 1.0);
+        const bool branch =
+            sample_bernoulli(runtime.rng_state, prob_true);
+        const double probability =
+            branch ? prob_true : 1.0 - prob_true;
+        assign_symbol(runtime, branch_condition, branch);
+        if (step.kernel.is_diagonal) {
+            project_diagonal_active_pauli_measurement(
+                runtime,
+                step.kernel,
+                branch,
+                probability);
+        } else {
+            project_active_pauli_measurement(
+                runtime,
+                step.kernel,
+                branch,
+                probability);
+        }
+    }
+    --runtime.k;
+    ++runtime.ndormant;
+    if (step.deactivate_after) {
+        if (component.k != 0) {
+            fail("active component measurement did not remove its last coordinate");
+        }
+        component.active = false;
+    }
+}
+
+void execute_component_instruction(
+    FactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    std::size_t instruction_index) {
+    const auto& plan = *program.active_component_plan;
+    const auto ref = plan.instruction_steps[instruction_index];
+    switch (ref.kind) {
+    case ActiveComponentStepKind::IgnoredGlobalPhase:
+        return;
+    case ActiveComponentStepKind::Rotation: {
+        const auto& instruction =
+            std::get<ApplyPrecomputedActivePauliRotation>(
+                program.instructions[instruction_index]);
+        const bool sign =
+            eval_symbolic_bool_unchecked(instruction.sign_plan, runtime);
+        execute_component_rotation(
+            runtime,
+            plan,
+            plan.rotations[ref.payload],
+            sign);
+        return;
+    }
+    case ActiveComponentStepKind::Promotion: {
+        const auto& instruction =
+            std::get<PromoteDormantRotation>(
+                program.instructions[instruction_index]);
+        const bool sign =
+            eval_symbolic_bool_unchecked(instruction.sign_plan, runtime);
+        execute_component_promotion(
+            runtime,
+            plan.promotions[ref.payload],
+            instruction.kernel_angle,
+            sign);
+        return;
+    }
+    case ActiveComponentStepKind::Measurement: {
+        const auto& instruction =
+            std::get<MeasurePrecomputedActivePauli>(
+                program.instructions[instruction_index]);
+        execute_component_measurement(
+            runtime,
+            plan,
+            plan.measurements[ref.payload],
+            instruction.branch);
+        const bool outcome =
+            eval_symbolic_bool_unchecked(instruction.outcome_plan, runtime);
+        write_measurement_record(
+            runtime,
+            instruction.record,
+            outcome,
+            instruction.record_condition);
+        return;
+    }
+    case ActiveComponentStepKind::None:
+        std::visit(
+            [&](const auto& inst) { execute_instruction(runtime, inst); },
+            program.instructions[instruction_index]);
+        return;
+    }
+    fail("unknown active component instruction kind");
+}
+
 void execute_instruction(FactoredExecutorState& runtime, const ApplyPrecomputedActivePauliRotation& instruction) {
     const bool sign = eval_symbolic_bool_unchecked(instruction.sign_plan, runtime);
     rotate_pauli(runtime, instruction.rotation_kernel, sign);
@@ -737,6 +1111,64 @@ void execute_instruction_presampled(
         instruction);
 }
 
+void execute_component_instruction_presampled(
+    FactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    const SingleShotExpressionEvaluator& evaluator,
+    std::size_t instruction_index) {
+    const auto& plan = *program.active_component_plan;
+    const auto ref = plan.instruction_steps[instruction_index];
+    switch (ref.kind) {
+    case ActiveComponentStepKind::IgnoredGlobalPhase:
+        return;
+    case ActiveComponentStepKind::Rotation: {
+        execute_component_rotation(
+            runtime,
+            plan,
+            plan.rotations[ref.payload],
+            evaluator.eval(instruction_index, runtime));
+        return;
+    }
+    case ActiveComponentStepKind::Promotion: {
+        const auto& instruction =
+            std::get<PromoteDormantRotation>(
+                program.instructions[instruction_index]);
+        execute_component_promotion(
+            runtime,
+            plan.promotions[ref.payload],
+            instruction.kernel_angle,
+            evaluator.eval(instruction_index, runtime));
+        return;
+    }
+    case ActiveComponentStepKind::Measurement: {
+        const auto& instruction =
+            std::get<MeasurePrecomputedActivePauli>(
+                program.instructions[instruction_index]);
+        execute_component_measurement(
+            runtime,
+            plan,
+            plan.measurements[ref.payload],
+            instruction.branch);
+        const bool outcome =
+            evaluator.eval(instruction_index, runtime);
+        write_measurement_record(
+            runtime,
+            instruction.record,
+            outcome,
+            instruction.record_condition);
+        return;
+    }
+    case ActiveComponentStepKind::None:
+        execute_instruction_presampled(
+            runtime,
+            program.instructions[instruction_index],
+            evaluator,
+            instruction_index);
+        return;
+    }
+    fail("unknown active component instruction kind");
+}
+
 template <typename Instruction>
 bool execute_instruction_postselected(FactoredExecutorState& runtime, const Instruction& instruction) {
     execute_instruction(runtime, instruction);
@@ -777,19 +1209,19 @@ FactoredExecutorState::FactoredExecutorState(const FactoredInstructionProgram& p
       nsymbols(program.nsymbols),
       nrecords(program.nrecords),
       ndetectors(program.ndetectors),
-      active_re(active_length(program.max_k), 0.0),
-      active_im(active_length(program.max_k), 0.0),
-      active_scratch_re(active_length(program.max_k), 0.0),
-      active_scratch_im(active_length(program.max_k), 0.0),
       value_words(symbol_word_count(program.nsymbols), 0),
       assigned_words(symbol_word_count(program.nsymbols), 0),
       measurement_words(symbol_word_count(program.nrecords), 0),
       detector_words(symbol_word_count(program.ndetectors), 0),
       rng_state(seed) {
-    const std::size_t dim = active_length(program.initial_k);
-    std::fill_n(active_re.data(), dim, 0.0);
-    std::fill_n(active_im.data(), dim, 0.0);
-    active_re[0] = 1.0;
+    configure_single_shot_components(*this, program);
+    reset_single_shot_components(*this, program);
+    if (!active_components_enabled) {
+        const std::size_t dim = active_length(program.initial_k);
+        std::fill_n(active_re.data(), dim, 0.0);
+        std::fill_n(active_im.data(), dim, 0.0);
+        active_re[0] = 1.0;
+    }
 }
 
 void reset_executor(
@@ -802,11 +1234,14 @@ void reset_executor(
     runtime.nsymbols = program.nsymbols;
     runtime.nrecords = program.nrecords;
     runtime.ndetectors = program.ndetectors;
-    ensure_runtime_active_capacity(runtime, program.max_k);
-    const std::size_t dim = active_length(program.initial_k);
-    std::fill_n(runtime.active_re.data(), dim, 0.0);
-    std::fill_n(runtime.active_im.data(), dim, 0.0);
-    runtime.active_re[0] = 1.0;
+    reset_single_shot_components(runtime, program);
+    if (!runtime.active_components_enabled) {
+        ensure_runtime_active_capacity(runtime, program.max_k);
+        const std::size_t dim = active_length(program.initial_k);
+        std::fill_n(runtime.active_re.data(), dim, 0.0);
+        std::fill_n(runtime.active_im.data(), dim, 0.0);
+        runtime.active_re[0] = 1.0;
+    }
     const std::size_t nwords = symbol_word_count(program.nsymbols);
     if (runtime.value_words.size() != nwords) {
         runtime.value_words.resize(nwords);
@@ -835,8 +1270,16 @@ void execute_in_place(FactoredExecutorState& runtime, const FactoredInstructionP
         fail("executor state does not match program");
     }
     sample_exogenous_symbols(runtime, program);
+    if (runtime.active_components_enabled) {
+        for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+            execute_component_instruction(runtime, program, idx);
+        }
+        return;
+    }
     for (const auto& instruction : program.instructions) {
-        std::visit([&](const auto& inst) { execute_instruction(runtime, inst); }, instruction);
+        std::visit(
+            [&](const auto& inst) { execute_instruction(runtime, inst); },
+            instruction);
     }
 }
 
@@ -852,8 +1295,16 @@ void execute_in_place(
         fail("presampled exogenous table does not match program");
     }
     assign_presampled_exogenous(runtime, samples, shot_index);
+    if (runtime.active_components_enabled) {
+        for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+            execute_component_instruction(runtime, program, idx);
+        }
+        return;
+    }
     for (const auto& instruction : program.instructions) {
-        std::visit([&](const auto& inst) { execute_instruction(runtime, inst); }, instruction);
+        std::visit(
+            [&](const auto& inst) { execute_instruction(runtime, inst); },
+            instruction);
     }
 }
 
@@ -873,6 +1324,16 @@ void execute_in_place(
         fail("single-shot presampled expression shot index is out of range");
     }
     SingleShotExpressionEvaluator evaluator{expression_plan, expression_block, shot_index};
+    if (runtime.active_components_enabled) {
+        for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+            execute_component_instruction_presampled(
+                runtime,
+                program,
+                evaluator,
+                idx);
+        }
+        return;
+    }
     for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
         execute_instruction_presampled(
             runtime,
@@ -892,6 +1353,9 @@ void assign_presampled_exogenous_in_place(
 void execute_instruction_in_place(
     FactoredExecutorState& runtime,
     const FactoredInstruction& instruction) {
+    if (runtime.active_components_enabled) {
+        fail("direct instruction execution is unavailable for a component executor");
+    }
     std::visit([&](const auto& inst) { execute_instruction(runtime, inst); }, instruction);
 }
 
@@ -904,12 +1368,31 @@ bool execute_postselected_in_place(
         fail("executor state does not match program");
     }
     assign_presampled_exogenous(runtime, samples, shot_index);
+    if (!runtime.active_components_enabled) {
+        for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+            const bool survived = std::visit(
+                [&](const auto& inst) {
+                    return execute_instruction_postselected(runtime, inst);
+                },
+                program.instructions[idx]);
+            if (!survived) {
+                return false;
+            }
+        }
+        return true;
+    }
     for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
-        const bool survived = std::visit(
-            [&](const auto& inst) {
-                return execute_instruction_postselected(runtime, inst);
-            },
-            program.instructions[idx]);
+        bool survived = true;
+        if (program.active_component_plan->instruction_steps[idx].kind !=
+                ActiveComponentStepKind::None) {
+            execute_component_instruction(runtime, program, idx);
+        } else {
+            survived = std::visit(
+                [&](const auto& inst) {
+                    return execute_instruction_postselected(runtime, inst);
+                },
+                program.instructions[idx]);
+        }
         if (!survived) {
             return false;
         }
@@ -933,12 +1416,43 @@ bool execute_postselected_in_place(
         fail("single-shot presampled expression shot index is out of range");
     }
     SingleShotExpressionEvaluator evaluator{expression_plan, expression_block, shot_index};
+    if (!runtime.active_components_enabled) {
+        for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+            const bool survived = std::visit(
+                [&](const auto& inst) {
+                    return execute_instruction_postselected(
+                        runtime,
+                        inst,
+                        evaluator,
+                        idx);
+                },
+                program.instructions[idx]);
+            if (!survived) {
+                return false;
+            }
+        }
+        return true;
+    }
     for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
-        const bool survived = std::visit(
-            [&](const auto& inst) {
-                return execute_instruction_postselected(runtime, inst, evaluator, idx);
-            },
-            program.instructions[idx]);
+        bool survived = true;
+        if (program.active_component_plan->instruction_steps[idx].kind !=
+                ActiveComponentStepKind::None) {
+            execute_component_instruction_presampled(
+                runtime,
+                program,
+                evaluator,
+                idx);
+        } else {
+            survived = std::visit(
+                [&](const auto& inst) {
+                    return execute_instruction_postselected(
+                        runtime,
+                        inst,
+                        evaluator,
+                        idx);
+                },
+                program.instructions[idx]);
+        }
         if (!survived) {
             return false;
         }

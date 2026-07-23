@@ -1,4 +1,5 @@
 #include "batch_internal.hpp"
+#include "sampler/component_plan.hpp"
 
 #include <algorithm>
 #include <array>
@@ -64,6 +65,494 @@ void execute_batch_instruction(BatchFactoredExecutorState& runtime, const Factor
 namespace {
 
 inline constexpr int kExpensivePureCompactionDenominator = 64;
+
+bool component_batch_bit_at(
+    const std::vector<std::uint64_t>& bits,
+    int shot) {
+    const std::size_t word = batch_shot_word(shot);
+    return word < bits.size() &&
+           (bits[word] & batch_shot_mask(shot)) != 0;
+}
+
+void configure_batch_components(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program) {
+    if (program.use_active_components &&
+        (program.active_component_plan == nullptr ||
+         program.active_component_plan->instruction_steps.size() !=
+             program.instructions.size())) {
+        fail("program does not contain an executable active component plan");
+    }
+    const bool enabled =
+        program.use_active_components &&
+        program.active_component_plan != nullptr;
+    runtime.active_components_enabled = enabled;
+    if (!enabled) {
+        runtime.active_components.clear();
+        return;
+    }
+    const auto& plan = *program.active_component_plan;
+    if (plan.component_count !=
+        static_cast<int>(plan.component_max_k.size())) {
+        fail("active component plan has inconsistent component capacities");
+    }
+    runtime.active_components.resize(
+        static_cast<std::size_t>(plan.component_count));
+    const std::size_t pitch =
+        static_cast<std::size_t>(runtime.active_pitch);
+    for (int component = 0; component < plan.component_count; ++component) {
+        auto& buffer =
+            runtime.active_components[static_cast<std::size_t>(component)];
+        const std::size_t capacity = active_length(
+            plan.component_max_k[static_cast<std::size_t>(component)]);
+        buffer.stride = capacity;
+        const std::size_t storage = capacity * pitch;
+        buffer.re.resize(storage, 0.0);
+        buffer.im.resize(storage, 0.0);
+        buffer.scratch_re.resize(storage, 0.0);
+        buffer.scratch_im.resize(storage, 0.0);
+    }
+    std::vector<double>().swap(runtime.active_re);
+    std::vector<double>().swap(runtime.active_im);
+    std::vector<double>().swap(runtime.scratch_re);
+    std::vector<double>().swap(runtime.scratch_im);
+}
+
+void reset_batch_components(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program) {
+    if (program.use_active_components &&
+        (program.active_component_plan == nullptr ||
+         program.active_component_plan->instruction_steps.size() !=
+             program.instructions.size())) {
+        fail("program does not contain an executable active component plan");
+    }
+    const bool should_enable =
+        program.use_active_components &&
+        program.active_component_plan != nullptr;
+    if (runtime.active_components_enabled != should_enable ||
+        (should_enable &&
+         runtime.active_components.size() !=
+             program.active_component_plan->component_max_k.size())) {
+        configure_batch_components(runtime, program);
+    }
+    if (!runtime.active_components_enabled) {
+        return;
+    }
+    const auto& plan = *program.active_component_plan;
+    for (auto& component : runtime.active_components) {
+        component.k = 0;
+        component.active = false;
+    }
+    if (plan.initial_components != program.initial_k) {
+        fail("active component plan has the wrong initial component count");
+    }
+    const std::size_t pitch =
+        static_cast<std::size_t>(runtime.active_pitch);
+    for (int component_id = 0;
+         component_id < plan.initial_components;
+         ++component_id) {
+        auto& component =
+            runtime.active_components[
+                static_cast<std::size_t>(component_id)];
+        if (component.stride < 2) {
+            fail("initial active component has insufficient storage");
+        }
+        component.k = 1;
+        component.active = true;
+        if (runtime.dense_shot_major_active) {
+            for (int shot = 0; shot < runtime.active_shots; ++shot) {
+                const std::size_t base =
+                    static_cast<std::size_t>(shot) * component.stride;
+                component.re[base] = 1.0;
+                component.im[base] = 0.0;
+                component.re[base + 1] = 0.0;
+                component.im[base + 1] = 0.0;
+            }
+        } else {
+            for (int shot = 0; shot < runtime.active_shots; ++shot) {
+                const std::size_t lane = static_cast<std::size_t>(shot);
+                component.re[lane] = 1.0;
+                component.im[lane] = 0.0;
+                component.re[pitch + lane] = 0.0;
+                component.im[pitch + lane] = 0.0;
+            }
+        }
+    }
+}
+
+void ensure_dense_batch_active_storage(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program) {
+    runtime.active_components_enabled = false;
+    runtime.active_components.clear();
+    const std::size_t max_dim = active_length(program.max_k);
+    runtime.active_stride = max_dim;
+    const std::size_t active_size =
+        max_dim * static_cast<std::size_t>(runtime.active_pitch);
+    runtime.active_re.resize(active_size, 0.0);
+    runtime.active_im.resize(active_size, 0.0);
+    runtime.scratch_re.resize(active_size, 0.0);
+    runtime.scratch_im.resize(active_size, 0.0);
+}
+
+void initialize_dense_batch_active(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program) {
+    const std::size_t dim = active_length(program.initial_k);
+    if (runtime.dense_shot_major_active) {
+        for (int shot = 0; shot < runtime.active_shots; ++shot) {
+            const std::size_t base =
+                static_cast<std::size_t>(shot) * runtime.active_stride;
+            std::fill_n(runtime.active_re.data() + base, dim, 0.0);
+            std::fill_n(runtime.active_im.data() + base, dim, 0.0);
+            runtime.active_re[base] = 1.0;
+        }
+        return;
+    }
+    const std::size_t pitch =
+        static_cast<std::size_t>(runtime.active_pitch);
+    for (std::size_t basis = 0; basis < dim; ++basis) {
+        const std::size_t base = basis * pitch;
+        std::fill_n(runtime.active_re.data() + base, pitch, 0.0);
+        std::fill_n(runtime.active_im.data() + base, pitch, 0.0);
+    }
+    for (int shot = 0; shot < runtime.active_shots; ++shot) {
+        runtime.active_re[static_cast<std::size_t>(shot)] = 1.0;
+    }
+}
+
+void merge_batch_components(
+    BatchFactoredExecutorState& runtime,
+    const ActiveComponentPlan& plan,
+    std::uint32_t merge_offset,
+    std::uint16_t merge_count,
+    int expected_target) {
+    if (merge_count == 0 ||
+        static_cast<std::size_t>(merge_offset) + merge_count >
+            plan.merge_components.size()) {
+        fail("active component instruction has an invalid merge range");
+    }
+    const int target_id =
+        plan.merge_components[static_cast<std::size_t>(merge_offset)];
+    if (target_id != expected_target ||
+        target_id < 0 ||
+        target_id >= static_cast<int>(runtime.active_components.size())) {
+        fail("active component merge has an invalid target");
+    }
+    auto& target =
+        runtime.active_components[static_cast<std::size_t>(target_id)];
+    if (!target.active) {
+        fail("active component merge target is inactive");
+    }
+    const std::size_t pitch =
+        static_cast<std::size_t>(runtime.active_pitch);
+    for (std::uint16_t source_index = 1;
+         source_index < merge_count;
+         ++source_index) {
+        const int source_id = plan.merge_components[
+            static_cast<std::size_t>(merge_offset) + source_index];
+        if (source_id < 0 ||
+            source_id >= static_cast<int>(runtime.active_components.size()) ||
+            source_id == target_id) {
+            fail("active component merge has an invalid source");
+        }
+        auto& source =
+            runtime.active_components[static_cast<std::size_t>(source_id)];
+        if (!source.active) {
+            fail("active component merge source is inactive");
+        }
+        const std::size_t target_dim = active_length(target.k);
+        const std::size_t source_dim = active_length(source.k);
+        const int merged_k = target.k + source.k;
+        const std::size_t merged_dim = active_length(merged_k);
+        if (target.stride < merged_dim) {
+            fail("active component merge target has insufficient storage");
+        }
+        if (runtime.dense_shot_major_active) {
+            for (int shot = 0; shot < runtime.active_shots; ++shot) {
+                const std::size_t target_shot =
+                    static_cast<std::size_t>(shot) * target.stride;
+                const std::size_t source_shot =
+                    static_cast<std::size_t>(shot) * source.stride;
+                for (std::size_t source_basis = source_dim;
+                     source_basis-- > 0;) {
+                    const double source_re =
+                        source.re[source_shot + source_basis];
+                    const double source_im =
+                        source.im[source_shot + source_basis];
+                    const std::size_t output_base =
+                        target_shot + (source_basis << target.k);
+                    SYMFT_SINGLE_SIMD_LOOP
+                    for (std::size_t target_basis = 0;
+                         target_basis < target_dim;
+                         ++target_basis) {
+                        const double target_re =
+                            target.re[target_shot + target_basis];
+                        const double target_im =
+                            target.im[target_shot + target_basis];
+                        const std::size_t output =
+                            output_base + target_basis;
+                        target.re[output] =
+                            target_re * source_re -
+                            target_im * source_im;
+                        target.im[output] =
+                            target_re * source_im +
+                            target_im * source_re;
+                    }
+                }
+            }
+        } else {
+            for (std::size_t source_basis = source_dim;
+                 source_basis-- > 0;) {
+                const std::size_t source_base = source_basis * pitch;
+                const std::size_t output_basis_base =
+                    source_basis << target.k;
+                for (std::size_t target_basis = 0;
+                     target_basis < target_dim;
+                     ++target_basis) {
+                    const std::size_t target_base =
+                        target_basis * pitch;
+                    const std::size_t output_base =
+                        (output_basis_base + target_basis) * pitch;
+                    SYMFT_BATCH_SIMD_LOOP
+                    for (int shot = 0;
+                         shot < runtime.active_shots;
+                         ++shot) {
+                        const std::size_t lane =
+                            static_cast<std::size_t>(shot);
+                        const double target_re =
+                            target.re[target_base + lane];
+                        const double target_im =
+                            target.im[target_base + lane];
+                        const double source_re =
+                            source.re[source_base + lane];
+                        const double source_im =
+                            source.im[source_base + lane];
+                        target.re[output_base + lane] =
+                            target_re * source_re -
+                            target_im * source_im;
+                        target.im[output_base + lane] =
+                            target_re * source_im +
+                            target_im * source_re;
+                    }
+                }
+            }
+        }
+        target.k = merged_k;
+        source.k = 0;
+        source.active = false;
+    }
+}
+
+class ScopedBatchComponent {
+  public:
+    ScopedBatchComponent(
+        BatchFactoredExecutorState& runtime_,
+        BatchActiveComponent& component_)
+        : runtime(runtime_),
+          component(component_),
+          global_k(runtime_.k),
+          global_ndormant(runtime_.ndormant),
+          global_stride(runtime_.active_stride) {
+        if (!component.active) {
+            fail("cannot execute an instruction on an inactive component");
+        }
+        std::swap(runtime.active_re, component.re);
+        std::swap(runtime.active_im, component.im);
+        std::swap(runtime.scratch_re, component.scratch_re);
+        std::swap(runtime.scratch_im, component.scratch_im);
+        runtime.k = component.k;
+        runtime.active_stride = component.stride;
+    }
+
+    ~ScopedBatchComponent() {
+        component.k = runtime.k;
+        component.stride = runtime.active_stride;
+        std::swap(runtime.active_re, component.re);
+        std::swap(runtime.active_im, component.im);
+        std::swap(runtime.scratch_re, component.scratch_re);
+        std::swap(runtime.scratch_im, component.scratch_im);
+        runtime.k = global_k;
+        runtime.ndormant = global_ndormant;
+        runtime.active_stride = global_stride;
+    }
+
+  private:
+    BatchFactoredExecutorState& runtime;
+    BatchActiveComponent& component;
+    int global_k;
+    int global_ndormant;
+    std::size_t global_stride;
+};
+
+void execute_batch_component_rotation(
+    BatchFactoredExecutorState& runtime,
+    const ActiveComponentPlan& plan,
+    const ActiveComponentRotationStep& step,
+    const std::vector<std::uint64_t>& sign_bits) {
+    merge_batch_components(
+        runtime,
+        plan,
+        step.merge_offset,
+        step.merge_count,
+        step.component);
+    auto& component =
+        runtime.active_components[static_cast<std::size_t>(step.component)];
+    ScopedBatchComponent scope(runtime, component);
+    rotate_pauli_batch(runtime, step.kernel, sign_bits);
+}
+
+void execute_batch_component_promotion(
+    BatchFactoredExecutorState& runtime,
+    const ActiveComponentPromotionStep& step,
+    double kernel_angle,
+    const std::vector<std::uint64_t>& sign_bits) {
+    if (runtime.ndormant <= 0 ||
+        step.component < 0 ||
+        step.component >= static_cast<int>(runtime.active_components.size())) {
+        fail("active component promotion is invalid");
+    }
+    auto& component =
+        runtime.active_components[static_cast<std::size_t>(step.component)];
+    if (component.active || component.stride < 2) {
+        fail("active component promotion target is unavailable");
+    }
+    const double c = std::cos(kernel_angle);
+    const double s = std::sin(kernel_angle);
+    component.k = 1;
+    component.active = true;
+    const std::size_t pitch =
+        static_cast<std::size_t>(runtime.active_pitch);
+    if (runtime.dense_shot_major_active) {
+        for (int shot = 0; shot < runtime.active_shots; ++shot) {
+            const std::size_t base =
+                static_cast<std::size_t>(shot) * component.stride;
+            component.re[base] = c;
+            component.im[base] = 0.0;
+            component.re[base + 1] = 0.0;
+            component.im[base + 1] =
+                component_batch_bit_at(sign_bits, shot) ? s : -s;
+        }
+    } else {
+        for (int shot = 0; shot < runtime.active_shots; ++shot) {
+            const std::size_t lane = static_cast<std::size_t>(shot);
+            component.re[lane] = c;
+            component.im[lane] = 0.0;
+            component.re[pitch + lane] = 0.0;
+            component.im[pitch + lane] =
+                component_batch_bit_at(sign_bits, shot) ? s : -s;
+        }
+    }
+    ++runtime.k;
+    --runtime.ndormant;
+}
+
+void execute_batch_component_measurement(
+    BatchFactoredExecutorState& runtime,
+    const ActiveComponentPlan& plan,
+    const ActiveComponentMeasurementStep& step,
+    int branch_condition) {
+    merge_batch_components(
+        runtime,
+        plan,
+        step.merge_offset,
+        step.merge_count,
+        step.component);
+    auto& component =
+        runtime.active_components[static_cast<std::size_t>(step.component)];
+    {
+        ScopedBatchComponent scope(runtime, component);
+        measure_precomputed_active_pauli_branch_batch(
+            runtime,
+            step.kernel,
+            branch_condition);
+    }
+    --runtime.k;
+    ++runtime.ndormant;
+    if (step.deactivate_after) {
+        if (component.k != 0) {
+            fail("active component measurement did not remove its last coordinate");
+        }
+        component.active = false;
+    }
+}
+
+void execute_batch_component_instruction(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    std::size_t instruction_index) {
+    const auto& plan = *program.active_component_plan;
+    const auto ref = plan.instruction_steps[instruction_index];
+    switch (ref.kind) {
+    case ActiveComponentStepKind::IgnoredGlobalPhase:
+        return;
+    case ActiveComponentStepKind::Rotation: {
+        const auto& instruction =
+            std::get<ApplyPrecomputedActivePauliRotation>(
+                program.instructions[instruction_index]);
+        eval_symbolic_bool_batch(
+            runtime.eval_scratch,
+            instruction.sign_plan,
+            runtime);
+        execute_batch_component_rotation(
+            runtime,
+            plan,
+            plan.rotations[ref.payload],
+            runtime.eval_scratch);
+        return;
+    }
+    case ActiveComponentStepKind::Promotion: {
+        const auto& instruction =
+            std::get<PromoteDormantRotation>(
+                program.instructions[instruction_index]);
+        eval_symbolic_bool_batch(
+            runtime.eval_scratch,
+            instruction.sign_plan,
+            runtime);
+        execute_batch_component_promotion(
+            runtime,
+            plan.promotions[ref.payload],
+            instruction.kernel_angle,
+            runtime.eval_scratch);
+        return;
+    }
+    case ActiveComponentStepKind::Measurement: {
+        const auto& instruction =
+            std::get<MeasurePrecomputedActivePauli>(
+                program.instructions[instruction_index]);
+        execute_batch_component_measurement(
+            runtime,
+            plan,
+            plan.measurements[ref.payload],
+            instruction.branch);
+        if (write_direct_branch_measurement_record(
+                runtime,
+                instruction.branch,
+                instruction.outcome_plan,
+                instruction.record,
+                instruction.record_condition)) {
+            return;
+        }
+        eval_symbolic_bool_batch(
+            runtime.eval_scratch,
+            instruction.outcome_plan,
+            runtime);
+        write_batch_measurement_record(
+            runtime,
+            instruction.record,
+            runtime.eval_scratch,
+            instruction.record_condition);
+        return;
+    }
+    case ActiveComponentStepKind::None:
+        execute_batch_instruction(
+            runtime,
+            program.instructions[instruction_index]);
+        return;
+    }
+    fail("unknown active component instruction kind");
+}
 
 std::uint64_t live_word_mask_for_shots(int shots, std::size_t word) {
     return low_bits_mask(shots - static_cast<int>(word << 6));
@@ -269,7 +758,8 @@ bool should_compact_dead_before_instruction(
     if (!instruction_is_pure_over_dead(instruction)) {
         return true;
     }
-    if (runtime.dense_shot_major_active) {
+    if (runtime.dense_shot_major_active &&
+        !runtime.active_components_enabled) {
         return false;
     }
     int denominator = std::max(1, options.mask_dead_shots_min_fraction_denominator);
@@ -577,6 +1067,51 @@ void compact_active_columns(
         ++first_moved;
     }
     if (first_moved == survivor_count) {
+        return;
+    }
+
+    if (runtime.active_components_enabled) {
+        const std::size_t pitch =
+            static_cast<std::size_t>(runtime.active_pitch);
+        for (auto& component : runtime.active_components) {
+            if (!component.active) {
+                continue;
+            }
+            const std::size_t dim = active_length(component.k);
+            if (runtime.dense_shot_major_active) {
+                for (int dst = first_moved; dst < survivor_count; ++dst) {
+                    const int src =
+                        live_sources[static_cast<std::size_t>(dst)];
+                    const std::size_t src_base =
+                        static_cast<std::size_t>(src) * component.stride;
+                    const std::size_t dst_base =
+                        static_cast<std::size_t>(dst) * component.stride;
+                    std::copy_n(
+                        component.re.data() + src_base,
+                        dim,
+                        component.re.data() + dst_base);
+                    std::copy_n(
+                        component.im.data() + src_base,
+                        dim,
+                        component.im.data() + dst_base);
+                }
+            } else {
+                for (std::size_t basis = 0; basis < dim; ++basis) {
+                    double* row_re =
+                        component.re.data() + basis * pitch;
+                    double* row_im =
+                        component.im.data() + basis * pitch;
+                    for (int dst = first_moved;
+                         dst < survivor_count;
+                         ++dst) {
+                        const int src =
+                            live_sources[static_cast<std::size_t>(dst)];
+                        row_re[dst] = row_re[src];
+                        row_im[dst] = row_im[src];
+                    }
+                }
+            }
+        }
         return;
     }
 
@@ -1197,6 +1732,80 @@ void execute_batch_instruction_presampled(
     write_batch_measurement_record(runtime, instruction.record, outcome_bits, instruction.record_condition);
 }
 
+void execute_batch_component_instruction_presampled(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    const BatchExpressionEvaluator& evaluator,
+    std::size_t instruction_index) {
+    const auto& plan = *program.active_component_plan;
+    const auto ref = plan.instruction_steps[instruction_index];
+    switch (ref.kind) {
+    case ActiveComponentStepKind::IgnoredGlobalPhase:
+        return;
+    case ActiveComponentStepKind::Rotation: {
+        const auto& sign_bits =
+            evaluator.eval(instruction_index, runtime);
+        execute_batch_component_rotation(
+            runtime,
+            plan,
+            plan.rotations[ref.payload],
+            sign_bits);
+        return;
+    }
+    case ActiveComponentStepKind::Promotion: {
+        const auto& instruction =
+            std::get<PromoteDormantRotation>(
+                program.instructions[instruction_index]);
+        const auto& sign_bits =
+            evaluator.eval(instruction_index, runtime);
+        execute_batch_component_promotion(
+            runtime,
+            plan.promotions[ref.payload],
+            instruction.kernel_angle,
+            sign_bits);
+        return;
+    }
+    case ActiveComponentStepKind::Measurement: {
+        const auto& instruction =
+            std::get<MeasurePrecomputedActivePauli>(
+                program.instructions[instruction_index]);
+        execute_batch_component_measurement(
+            runtime,
+            plan,
+            plan.measurements[ref.payload],
+            instruction.branch);
+        if (write_direct_branch_measurement_record(
+                runtime,
+                instruction.branch,
+                instruction.outcome_plan,
+                instruction.record,
+                instruction.record_condition)) {
+            return;
+        }
+        const auto& outcome_bits =
+            evaluator.eval(instruction_index, runtime);
+        write_batch_measurement_record(
+            runtime,
+            instruction.record,
+            outcome_bits,
+            instruction.record_condition);
+        return;
+    }
+    case ActiveComponentStepKind::None:
+        std::visit(
+            [&](const auto& inst) {
+                execute_batch_instruction_presampled(
+                    runtime,
+                    inst,
+                    evaluator,
+                    instruction_index);
+            },
+            program.instructions[instruction_index]);
+        return;
+    }
+    fail("unknown active component instruction kind");
+}
+
 template <typename Instruction>
 int execute_batch_instruction_postselected(
     BatchFactoredExecutorState& runtime,
@@ -1209,6 +1818,58 @@ int execute_batch_instruction_postselected(
         return mark_dead_from_detector_bits(runtime, runtime.eval_scratch, scratch);
     }
     return 0;
+}
+
+int execute_batch_component_instruction_postselected(
+    BatchFactoredExecutorState& runtime,
+    const FactoredInstructionProgram& program,
+    const BatchExpressionEvaluator& evaluator,
+    std::size_t instruction_index,
+    BatchDetectorPostselectionScratch& scratch) {
+    const auto& plan = *program.active_component_plan;
+    const auto ref = plan.instruction_steps[instruction_index];
+    if (ref.kind == ActiveComponentStepKind::IgnoredGlobalPhase) {
+        return 0;
+    }
+    if (ref.kind == ActiveComponentStepKind::Rotation) {
+        const auto& sign_bits =
+            evaluator.eval(instruction_index, runtime);
+        const auto& step = plan.rotations[ref.payload];
+        merge_batch_components(
+            runtime,
+            plan,
+            step.merge_offset,
+            step.merge_count,
+            step.component);
+        auto& component =
+            runtime.active_components[
+                static_cast<std::size_t>(step.component)];
+        ScopedBatchComponent scope(runtime, component);
+        rotate_shot_major_postselected(
+            runtime,
+            step.kernel,
+            sign_bits,
+            scratch);
+        return 0;
+    }
+    if (ref.kind != ActiveComponentStepKind::None) {
+        execute_batch_component_instruction_presampled(
+            runtime,
+            program,
+            evaluator,
+            instruction_index);
+        return 0;
+    }
+    return std::visit(
+        [&](const auto& inst) {
+            return execute_batch_instruction_postselected(
+                runtime,
+                inst,
+                evaluator,
+                instruction_index,
+                scratch);
+        },
+        program.instructions[instruction_index]);
 }
 
 void initialize_expression_workspace(
@@ -1308,7 +1969,8 @@ BatchDetectorPostselectionResult execute_batch_postselected_with_expressions(
                 break;
             }
         }
-        if (runtime.dense_shot_major_active) {
+        if (runtime.dense_shot_major_active &&
+            !runtime.active_components_enabled) {
             const std::size_t consumed = execute_shot_major_rotation_run(
                 runtime,
                 program,
@@ -1334,16 +1996,25 @@ BatchDetectorPostselectionResult execute_batch_postselected_with_expressions(
             }
             continue;
         }
-        discarded += std::visit(
-            [&](const auto& inst) {
-                return execute_batch_instruction_postselected(
-                    runtime,
-                    inst,
-                    evaluator,
-                    idx,
-                    scratch);
-            },
-            instruction);
+        if (runtime.active_components_enabled) {
+            discarded += execute_batch_component_instruction_postselected(
+                runtime,
+                program,
+                evaluator,
+                idx,
+                scratch);
+        } else {
+            discarded += std::visit(
+                [&](const auto& inst) {
+                    return execute_batch_instruction_postselected(
+                        runtime,
+                        inst,
+                        evaluator,
+                        idx,
+                        scratch);
+                },
+                instruction);
+        }
     }
     compact_dead_shots_if_needed(
         runtime,
@@ -1388,6 +2059,9 @@ void assign_presampled_exogenous_batch_in_place(
 void execute_batch_instruction_in_place(
     BatchFactoredExecutorState& runtime,
     const FactoredInstruction& instruction) {
+    if (runtime.active_components_enabled) {
+        fail("direct batch instruction execution is unavailable for a component executor");
+    }
     execute_batch_instruction(runtime, instruction);
 }
 
@@ -1419,20 +2093,9 @@ void reset_batch_executor(
     runtime.max_k = program.max_k;
     runtime.batch_words = batch_word_count(runtime.batches);
 
-    const std::size_t max_dim = active_length(program.max_k);
-    runtime.active_stride = max_dim;
-    const std::size_t active_size = max_dim * static_cast<std::size_t>(runtime.active_pitch);
-    if (runtime.active_re.size() < active_size) {
-        runtime.active_re.resize(active_size, 0.0);
-    }
-    if (runtime.active_im.size() < active_size) {
-        runtime.active_im.resize(active_size, 0.0);
-    }
-    if (runtime.scratch_re.size() < active_size) {
-        runtime.scratch_re.resize(active_size, 0.0);
-    }
-    if (runtime.scratch_im.size() < active_size) {
-        runtime.scratch_im.resize(active_size, 0.0);
+    reset_batch_components(runtime, program);
+    if (!runtime.active_components_enabled) {
+        ensure_dense_batch_active_storage(runtime, program);
     }
 
     const std::size_t symbol_size = static_cast<std::size_t>(program.nsymbols) * runtime.batch_words;
@@ -1477,28 +2140,8 @@ void reset_batch_executor(
         runtime.branch_invnorms.resize(static_cast<std::size_t>(runtime.active_pitch), 0.0);
     }
 
-    const std::size_t dim = active_length(program.initial_k);
-    if (runtime.dense_shot_major_active) {
-        for (int shot = 0; shot < runtime.active_shots; ++shot) {
-            const std::size_t base = static_cast<std::size_t>(shot) * runtime.active_stride;
-            std::fill_n(runtime.active_re.data() + base, dim, 0.0);
-            std::fill_n(runtime.active_im.data() + base, dim, 0.0);
-            if (dim > 0) {
-                runtime.active_re[base] = 1.0;
-            }
-        }
-    } else {
-        const std::size_t pitch = static_cast<std::size_t>(runtime.active_pitch);
-        for (std::size_t basis = 0; basis < dim; ++basis) {
-            const std::size_t base = basis * pitch;
-            std::fill_n(runtime.active_re.data() + base, pitch, 0.0);
-            std::fill_n(runtime.active_im.data() + base, pitch, 0.0);
-        }
-        if (dim > 0) {
-            for (int shot = 0; shot < runtime.active_shots; ++shot) {
-                runtime.active_re[static_cast<std::size_t>(shot)] = 1.0;
-            }
-        }
+    if (!runtime.active_components_enabled) {
+        initialize_dense_batch_active(runtime, program);
     }
 }
 
@@ -1510,6 +2153,12 @@ void execute_batch_in_place(BatchFactoredExecutorState& runtime, const FactoredI
         return;
     }
     sample_exogenous_symbols_batch(runtime, program);
+    if (runtime.active_components_enabled) {
+        for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+            execute_batch_component_instruction(runtime, program, idx);
+        }
+        return;
+    }
     for (const auto& instruction : program.instructions) {
         execute_batch_instruction(runtime, instruction);
     }
@@ -1526,6 +2175,12 @@ void execute_batch_in_place(
         return;
     }
     assign_presampled_exogenous_batch(runtime, samples);
+    if (runtime.active_components_enabled) {
+        for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+            execute_batch_component_instruction(runtime, program, idx);
+        }
+        return;
+    }
     for (const auto& instruction : program.instructions) {
         execute_batch_instruction(runtime, instruction);
     }
@@ -1543,6 +2198,12 @@ void execute_batch_in_place(
         return;
     }
     assign_presampled_exogenous_batch(runtime, samples, first_sample_shot);
+    if (runtime.active_components_enabled) {
+        for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+            execute_batch_component_instruction(runtime, program, idx);
+        }
+        return;
+    }
     for (const auto& instruction : program.instructions) {
         execute_batch_instruction(runtime, instruction);
     }
@@ -1570,6 +2231,16 @@ void execute_batch_in_place(
         0,
         first_sample_shot,
         runtime.eval_scratch};
+    if (runtime.active_components_enabled) {
+        for (std::size_t idx = 0; idx < program.instructions.size(); ++idx) {
+            execute_batch_component_instruction_presampled(
+                runtime,
+                program,
+                evaluator,
+                idx);
+        }
+        return;
+    }
     for (std::size_t idx = 0; idx < program.instructions.size();) {
         if (runtime.dense_shot_major_active) {
             const std::size_t consumed = execute_shot_major_rotation_run(
@@ -1585,7 +2256,11 @@ void execute_batch_in_place(
         const auto& instruction = program.instructions[idx];
         std::visit(
             [&](const auto& inst) {
-                execute_batch_instruction_presampled(runtime, inst, evaluator, idx);
+                execute_batch_instruction_presampled(
+                    runtime,
+                    inst,
+                    evaluator,
+                    idx);
             },
             instruction);
         ++idx;

@@ -47,6 +47,7 @@ struct CircuitSamplingInfo {
     int batch_size = 0;
     int sample_chunk_shots = 0;
     int threads = 1;
+    bool active_components = false;
     bool detector_postselection = false;
     int batch_mask_threshold_denominator = 0;
 };

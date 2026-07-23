@@ -70,19 +70,40 @@ PrecomputedActivePauliMeasurementKernel::PrecomputedActivePauliMeasurementKernel
     : PrecomputedActivePauliMeasurementKernel(ActivePauliAction(pauli)) {}
 
 PrecomputedActivePauliMeasurementKernel::PrecomputedActivePauliMeasurementKernel(const ActivePauliAction& action_) {
+    const int selected_pivot =
+        action_.xmask != 0
+            ? highest_set_bit64(action_.xmask)
+            : (action_.zmask != 0 ? highest_set_bit64(action_.zmask) : -1);
+    if (selected_pivot < 0) {
+        fail("cannot build an active measurement kernel for identity Pauli");
+    }
+    *this = PrecomputedActivePauliMeasurementKernel(action_, selected_pivot);
+}
+
+PrecomputedActivePauliMeasurementKernel::PrecomputedActivePauliMeasurementKernel(
+    const ActivePauliAction& action_,
+    int pivot_) {
     if (action_.nqubits <= 0) {
         fail("cannot build an active measurement kernel for k == 0");
     }
+    if (pivot_ < 0 || pivot_ >= action_.nqubits) {
+        fail("active measurement pivot is out of range");
+    }
     action = action_;
+    pivot = pivot_;
     out_dim = active_length(action.nqubits) >> 1;
     constexpr double inv_sqrt2 = 0.707106781186547524400844362104849039;
     nondiagonal_coefficient1_even = std::conj(action.even_phase) * inv_sqrt2;
     if (action_.xmask != 0) {
+        if ((action_.xmask & (std::uint64_t{1} << pivot)) == 0) {
+            fail("nondiagonal active measurement pivot must have an X component");
+        }
         is_diagonal = false;
-        pivot = highest_set_bit64(action.xmask);
     } else if (action_.zmask != 0) {
+        if ((action_.zmask & (std::uint64_t{1} << pivot)) == 0) {
+            fail("diagonal active measurement pivot must have a Z component");
+        }
         is_diagonal = true;
-        pivot = highest_set_bit64(action.zmask);
         const bool negative_phase = std::abs(action.even_phase.real() + 1.0) < 1e-12 &&
                                     std::abs(action.even_phase.imag()) < 1e-12;
         const bool positive_phase = std::abs(action.even_phase.real() - 1.0) < 1e-12 &&

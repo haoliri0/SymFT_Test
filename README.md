@@ -226,10 +226,24 @@ The C++ implementation provides:
 - scalar kernels and CMake-built AVX2/AVX-512 kernels with runtime dispatch;
 - an optional CUDA counts backend.
 
-The batch sampler stores each shot's dense active-state vector contiguously:
+For circuits with separable active stabilizer coordinates, the CPU samplers
+can store an exact product of smaller dense component vectors. Promotions
+create singleton components; an operation crossing components merges only
+those components before calling the existing dense kernel. A conservative
+post-planning cost model enables this path only when it predicts a material
+work reduction. Other circuits retain the original monolithic dense executor,
+with the backend choice hoisted outside the instruction loop.
+
+Within either a monolithic vector or one component, the batch sampler stores
+each shot contiguously as
 `active_re[shot * active_stride + basis]` and the corresponding imaginary
-array. The automatic batch size is limited by the prepared program's peak
-active width to control the active-state-vector cache footprint.
+array. The automatic batch size remains conservatively limited by the
+program's global peak active width. `symft_plan` reports the selected storage
+mode and its estimated dense/component dimensions and vector work. CUDA
+continues to use the monolithic dense active-state representation.
+For controlled CPU comparisons, `symft_rate_bench --active-components off`
+forces the dense path and `--active-components on` forces an available
+component plan; the default is `auto`.
 
 Inspect the active backends from Python:
 

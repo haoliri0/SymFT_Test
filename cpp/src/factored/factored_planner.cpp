@@ -1,4 +1,5 @@
 #include "factored/factored_internal.hpp"
+#include "sampler/component_plan.hpp"
 
 #include <algorithm>
 #include <optional>
@@ -832,6 +833,9 @@ FactoredInstructionProgram::FactoredInstructionProgram(
             sampled_bernoulli_probabilities.push_back(probability);
         }
     }
+    active_component_plan = build_active_component_plan(*this);
+    use_active_components =
+        active_component_plan != nullptr && active_component_plan->selected;
 }
 
 FactoredInstructionProgram factored_instruction_program(const PendingFactoredState& state) {
