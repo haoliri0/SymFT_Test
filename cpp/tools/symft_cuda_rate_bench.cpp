@@ -18,11 +18,13 @@ struct Options {
     std::uint64_t shots = 1000000ULL;
     int repeats = 1;
     int observable = 0;
-    int shots_per_launch = 1 << 20;
-    int threads_per_block = 0;
+    // Tuned default for MSC_d5. All three values remain independently
+    // overridable through the command line for other circuits or GPUs.
+    int shots_per_launch = 1 << 18;
+    int threads_per_block = 128;
     bool postselect_detectors = false;
-    bool sample_exogenous_on_device = true;
-    bool gpu_presample_expressions = false;
+    bool sample_exogenous_on_device = false;
+    bool gpu_presample_expressions = true;
     bool lazy_exogenous_on_device = false;
     bool gpu_on_demand_expressions = false;
     bool print_program_stats = false;
@@ -75,6 +77,8 @@ void print_usage(const char* argv0) {
         << "  --threads-per-block N\n"
         << "  --gpu-exogenous / --gpu-presample-expressions / --gpu-on-demand-expressions"
            " / --gpu-lazy-exogenous / --cpu-presample-exogenous\n"
+        << "  MSC_d5 default: --gpu-presample-expressions --threads-per-block 128"
+           " --shots-per-launch 262144\n"
         << "  --repeats N\n"
         << "  --observable N\n";
 }
