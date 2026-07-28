@@ -1,4 +1,3 @@
-#include "simd/batch_simd.hpp"
 #include "sampler/active.hpp"
 #include "sampler/active_internal.hpp"
 #include "sampler/batch_sampler.hpp"
@@ -289,7 +288,7 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "SymFT C++ batch active layout microbenchmark\n";
-        std::cout << "batch_backend " << symft::active_batch_backend() << "\n";
+        std::cout << "layout basis_major_interleaved\n";
         std::cout << "target_amplitude_shot_updates " << target_updates << "\n";
         std::cout << "repeats " << repeats << "\n";
 

@@ -2,10 +2,11 @@
 
 #include "sampler/active_internal.hpp"
 #include "sampler/batch_sampler.hpp"
+#include "sampler/contiguous_active.hpp"
 #include "sampler/exogenous.hpp"
 #include "sampler/presampled_expression.hpp"
 #include "sampler/random.hpp"
-#include "simd/batch_simd.hpp"
+#include "simd/batch_interleaved.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -224,12 +225,6 @@ void rotate_pauli_batch(
     BatchFactoredExecutorState& runtime,
     const PrecomputedActivePauliRotationKernel& kernel,
     const std::vector<std::uint64_t>& sign_bits);
-void rotate_contiguous_active(
-    double* re,
-    double* im,
-    std::size_t dim,
-    const PrecomputedActivePauliRotationKernel& kernel,
-    bool sign);
 void promote_first_dormant_rotation_batch(
     BatchFactoredExecutorState& runtime,
     double kernel_angle,

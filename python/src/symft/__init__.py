@@ -8,10 +8,9 @@ from ._native import (
     CompiledCountsSampler,
     CompiledMeasurementSampler,
     SymFTError,
-    active_batch_backend,
     active_cuda_backend,
-    active_simd_backend,
     cuda_enabled,
+    simd_backend,
 )
 
 __version__ = "0.1.0"
@@ -54,10 +53,9 @@ __all__ = [
     "CompiledMeasurementSampler",
     "SymFTError",
     "__version__",
-    "active_batch_backend",
     "active_cuda_backend",
-    "active_simd_backend",
     "cuda_enabled",
     "read_stim_file",
     "sample",
+    "simd_backend",
 ]

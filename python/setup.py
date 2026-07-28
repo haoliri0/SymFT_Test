@@ -9,6 +9,7 @@ import subprocess
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.sdist import sdist
+from setuptools._distutils.errors import CompileError, DistutilsExecError
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -27,6 +28,7 @@ ENABLE_CUDA = env_flag("SYMFT_PY_ENABLE_CUDA")
 CUDA_REAL_DOUBLE = env_flag("SYMFT_PY_CUDA_REAL_DOUBLE")
 CUDA_ARCH = os.environ.get("SYMFT_PY_CUDA_ARCH", "").strip()
 CUDA_NVCC_FLAGS = os.environ.get("SYMFT_PY_CUDA_NVCC_FLAGS", "").strip()
+ENABLE_NATIVE = env_flag("SYMFT_PY_NATIVE", default=True)
 
 
 def find_cuda_home():
@@ -123,7 +125,95 @@ class BuildExt(build_ext):
 
         self.include_dirs.append(numpy.get_include())
 
+    def _compiler_supports(self, flags):
+        if self.compiler.compiler_type != "unix":
+            return False
+
+        probe_dir = Path(self.build_temp) / "symft_flag_probes"
+        probe_dir.mkdir(parents=True, exist_ok=True)
+        probe_name = "_".join(flag.lstrip("-").replace("=", "_") for flag in flags)
+        probe_source = probe_dir / f"{probe_name}.cpp"
+        probe_source.write_text("int main() { return 0; }\n")
+        objects = []
+        try:
+            objects = self.compiler.compile(
+                [str(probe_source)],
+                output_dir=str(probe_dir),
+                extra_postargs=list(flags),
+            )
+        except (CompileError, DistutilsExecError, OSError):
+            return False
+        finally:
+            probe_source.unlink(missing_ok=True)
+            for obj in objects:
+                Path(obj).unlink(missing_ok=True)
+        return True
+
+    def _configure_cpu_simd(self):
+        source_flags = {}
+        enabled = []
+        machine = platform.machine().lower()
+        if machine not in {"x86_64", "amd64", "i386", "i686", "x86"}:
+            return source_flags, enabled
+
+        backends = [
+            (
+                "avx2",
+                ["-mavx2", "-mfma"],
+                "simd/simd_avx2.cpp",
+                "SYMFT_COMPILED_AVX2",
+            ),
+            (
+                "avx512",
+                ["-mavx512f", "-mavx512dq", "-mfma"],
+                "simd/simd_avx512.cpp",
+                "SYMFT_COMPILED_AVX512",
+            ),
+        ]
+        for name, flags, relative_source, macro in backends:
+            if not self._compiler_supports(flags):
+                self.announce(
+                    f"compiler does not support the SymFT {name} kernel flags; skipping it",
+                    level=2,
+                )
+                continue
+            source = cpp_source(relative_source)
+            source_flags[Path(source).name] = flags
+            for extension in self.extensions:
+                if source not in extension.sources:
+                    pending_optimizer = cpp_source("factored/pending_optimizer.cpp")
+                    insert_at = (
+                        extension.sources.index(pending_optimizer)
+                        if pending_optimizer in extension.sources
+                        else len(extension.sources)
+                    )
+                    extension.sources.insert(insert_at, source)
+                macros = list(extension.define_macros or [])
+                if not any(item[0] == macro for item in macros):
+                    macros.append((macro, "1"))
+                extension.define_macros = macros
+            enabled.append(name)
+
+        return source_flags, enabled
+
+    def _configure_native_cpu(self):
+        if not ENABLE_NATIVE or not self._compiler_supports(["-march=native"]):
+            return False
+        for extension in self.extensions:
+            compile_args = list(extension.extra_compile_args or [])
+            if "-march=native" not in compile_args:
+                compile_args.append("-march=native")
+            extension.extra_compile_args = compile_args
+
+            macros = list(extension.define_macros or [])
+            if not any(item[0] == "SYMFT_CPP_NATIVE_BUILD" for item in macros):
+                macros.append(("SYMFT_CPP_NATIVE_BUILD", "1"))
+            extension.define_macros = macros
+        return True
+
     def build_extensions(self):
+        native_cpu = self._configure_native_cpu()
+        simd_source_flags, enabled_simd = self._configure_cpu_simd()
         effective_cuda_arch_flags = []
         effective_cuda_arch_state = CUDA_ARCH
         if ENABLE_CUDA:
@@ -150,12 +240,15 @@ class BuildExt(build_ext):
             f"cuda={int(ENABLE_CUDA)};cuda_real_double={int(CUDA_REAL_DOUBLE)};"
             f"cuda_arch={effective_cuda_arch_state};"
             f"cuda_arch_flags={effective_cuda_arch_flags_state};"
-            f"cuda_nvcc_flags={CUDA_NVCC_FLAGS}"
+            f"cuda_nvcc_flags={CUDA_NVCC_FLAGS};"
+            f"cpu_native={int(native_cpu)};"
+            f"cpu_simd={','.join(enabled_simd)}"
         )
         marker = Path(self.build_temp) / "symft_build_state.txt"
         if not marker.exists() or marker.read_text() != state:
             self.force = True
 
+        nvcc = None
         if ENABLE_CUDA:
             cuda_home = CUDA_HOME or find_cuda_home()
             if cuda_home is None:
@@ -167,23 +260,26 @@ class BuildExt(build_ext):
             if ".cu" not in self.compiler.src_extensions:
                 self.compiler.src_extensions.append(".cu")
 
-            original_compile = self.compiler._compile
+        original_compile = self.compiler._compile
 
-            def compile_with_nvcc(obj, src, ext, cc_args, extra_postargs, pp_opts):
-                if src.endswith(".cu"):
-                    nvcc_args = [nvcc, "-c", src, "-o", obj, *cc_args]
-                    if platform.system() == "Windows":
-                        nvcc_args.extend(["-std=c++20", "-O2"])
-                    else:
-                        nvcc_args.extend(["-std=c++20", "-O3", "--compiler-options", "-fPIC"])
-                    nvcc_args.extend(effective_cuda_arch_flags)
-                    if CUDA_NVCC_FLAGS:
-                        nvcc_args.extend(shlex.split(CUDA_NVCC_FLAGS))
-                    self.spawn(nvcc_args)
+        def compile_with_backends(obj, src, ext, cc_args, extra_postargs, pp_opts):
+            if src.endswith(".cu"):
+                nvcc_args = [nvcc, "-c", src, "-o", obj, *cc_args]
+                if platform.system() == "Windows":
+                    nvcc_args.extend(["-std=c++20", "-O2"])
                 else:
-                    original_compile(obj, src, ext, cc_args, extra_postargs, pp_opts)
+                    nvcc_args.extend(["-std=c++20", "-O3", "--compiler-options", "-fPIC"])
+                nvcc_args.extend(effective_cuda_arch_flags)
+                if CUDA_NVCC_FLAGS:
+                    nvcc_args.extend(shlex.split(CUDA_NVCC_FLAGS))
+                self.spawn(nvcc_args)
+                return
 
-            self.compiler._compile = compile_with_nvcc
+            source_args = list(extra_postargs or [])
+            source_args.extend(simd_source_flags.get(Path(src).name, []))
+            original_compile(obj, src, ext, cc_args, source_args, pp_opts)
+
+        self.compiler._compile = compile_with_backends
 
         super().build_extensions()
         marker.parent.mkdir(parents=True, exist_ok=True)
@@ -208,6 +304,7 @@ sources = [
     cpp_source("core/frames.cpp"),
     cpp_source("circuit/circuit_lowering.cpp"),
     cpp_source("sampler/active_state.cpp"),
+    cpp_source("sampler/contiguous_active.cpp"),
     cpp_source("sampler/component_plan.cpp"),
     cpp_source("factored/factored_state.cpp"),
     cpp_source("factored/factored_planner.cpp"),
@@ -222,7 +319,7 @@ sources = [
     cpp_source("sampler/batch_active.cpp"),
     cpp_source("simd/simd_dispatch.cpp"),
     cpp_source("simd/simd_scalar.cpp"),
-    cpp_source("simd/batch_simd_scalar.cpp"),
+    cpp_source("simd/batch_interleaved.cpp"),
     cpp_source("factored/pending_optimizer.cpp"),
 ]
 

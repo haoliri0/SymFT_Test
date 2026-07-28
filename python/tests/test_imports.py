@@ -12,16 +12,17 @@ class ImportApiTest(unittest.TestCase):
         self.assertTrue(hasattr(symft, "SymFTError"))
         self.assertTrue(hasattr(symft, "read_stim_file"))
         self.assertTrue(hasattr(symft, "sample"))
+        self.assertTrue(hasattr(symft, "simd_backend"))
         self.assertTrue(hasattr(symft, "cuda_enabled"))
         self.assertTrue(hasattr(symft, "active_cuda_backend"))
+        self.assertFalse(hasattr(symft, "active_simd_backend"))
+        self.assertFalse(hasattr(symft, "active_batch_backend"))
 
     def test_backend_queries_return_strings(self):
-        self.assertIsInstance(symft.active_simd_backend(), str)
-        self.assertIsInstance(symft.active_batch_backend(), str)
+        self.assertIsInstance(symft.simd_backend(), str)
         self.assertIsInstance(symft.active_cuda_backend(), str)
         self.assertIsInstance(symft.cuda_enabled(), bool)
-        self.assertGreater(len(symft.active_simd_backend()), 0)
-        self.assertGreater(len(symft.active_batch_backend()), 0)
+        self.assertGreater(len(symft.simd_backend()), 0)
         self.assertGreater(len(symft.active_cuda_backend()), 0)
 
     def test_error_type_is_runtime_error(self):

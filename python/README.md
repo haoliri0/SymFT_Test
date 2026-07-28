@@ -66,6 +66,12 @@ python setup.py build_ext --inplace
 PYTHONPATH=src python -m unittest discover -s tests -v
 ```
 
+CPU source builds match the CMake default by enabling host-native optimization
+and separately compiled AVX2/AVX-512 kernels with runtime dispatch. Set
+`SYMFT_PY_NATIVE=0` when building a wheel that must run on CPUs other than the
+build host; the separately dispatched SIMD kernels remain available when the
+compiler supports them.
+
 CUDA support is opt-in so CPU-only environments keep building normally. To build
 the CUDA counts backend, install a CUDA toolkit with `nvcc` available and run:
 
@@ -88,16 +94,19 @@ Check the installation and backends:
 import symft
 
 print(symft.__version__)
-print(symft.active_simd_backend())
-print(symft.active_batch_backend())
+print(symft.simd_backend())
 print(symft.cuda_enabled())
 print(symft.active_cuda_backend())
 ```
 
-Backend names depend on the compilation target and runtime machine. Application
-logic should not depend on a particular backend name. `cuda_enabled()` reports
-whether the extension was compiled with CUDA support; it does not guarantee that
-a runtime CUDA device is present.
+Prepared CPU batches use the same contiguous dense-vector kernels as
+single-shot sampling. The selected CPU backend is reported by
+`simd_backend()`. Symbolic signs use 64-shot packed-word operations and longer
+word loops may also be compiler-vectorized; there is no separately selected
+symbolic-sign backend. Backend names depend on the compilation target and
+runtime machine. Application logic should not depend on a particular backend
+name. `cuda_enabled()` reports whether the extension was compiled with CUDA
+support; it does not guarantee that a runtime CUDA device is present.
 
 ## Quick Start
 
@@ -525,8 +534,7 @@ parameter by pi to obtain radians; this applies to every parameter of `U` and
 symft.__version__ -> str
 symft.read_stim_file(path) -> Circuit
 symft.sample(circuit, shots=1, **kwargs) -> numpy.ndarray
-symft.active_simd_backend() -> str
-symft.active_batch_backend() -> str
+symft.simd_backend() -> str
 symft.cuda_enabled() -> bool
 symft.active_cuda_backend() -> str
 ```
@@ -659,4 +667,4 @@ python setup.py sdist
 The Python directory depends on `../cpp/src`. The generated sdist copies that
 C++ source tree into the archive so it can be built independently from the
 source package. Compiler warnings such as "loop not vectorized" do not indicate
-a failed build; query the backend actually in use with `active_simd_backend()`.
+a failed build; query the backend actually in use with `simd_backend()`.

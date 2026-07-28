@@ -151,6 +151,7 @@ BenchResult run_fixture(
 
     const int batch_size = requested_batch_size > 0 ? requested_batch_size : symft::default_batch_count(program.max_k);
     symft::BatchFactoredExecutorState runtime(program, batch_size, 0x5eedULL);
+    runtime.dense_shot_major_active = true;
 
     for (int warmup = 0; warmup < warmup_blocks; ++warmup) {
         symft::reset_batch_executor(runtime, program, runtime.batches);
@@ -185,7 +186,7 @@ void print_header(int shots, int batch_size, int warmup_blocks) {
     std::cout << "shots=" << shots
               << " batch_size=" << (batch_size > 0 ? std::to_string(batch_size) : std::string("auto"))
               << " warmup_blocks=" << warmup_blocks
-              << " batch_backend=" << symft::active_batch_backend()
+              << " dense_backend=" << symft::active_batch_backend()
               << "\n";
     std::cout << std::left << std::setw(12) << "fixture"
               << std::right << std::setw(5) << "n"

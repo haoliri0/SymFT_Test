@@ -1232,6 +1232,12 @@ void test_d5_nondiagonal_measurement_simd_kernel() {
     }
 }
 
+void test_dense_backend_reporting() {
+    require(
+        symft::active_simd_backend() == symft::active_batch_backend(),
+        "single-shot and prepared batch report the shared dense-vector backend");
+}
+
 void test_active_h_rewrite_stays_virtual() {
     using namespace symft;
     FrameFactoredState state(2, 1);
@@ -2117,6 +2123,7 @@ int main() {
     test_high_pivot_rotation_kernels();
     test_high_pivot_measurement_kernels();
     test_d5_nondiagonal_measurement_simd_kernel();
+    test_dense_backend_reporting();
     test_active_h_rewrite_stays_virtual();
     test_dormant_measurement_tableau_reuse();
     test_dormant_measurement_sign_feeds_promotion();

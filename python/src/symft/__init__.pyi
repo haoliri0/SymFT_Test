@@ -8,10 +8,9 @@ from ._native import (
     CompiledMeasurementSampler as CompiledMeasurementSampler,
     PackedSamples as _PackedSamples,
     SymFTError as SymFTError,
-    active_batch_backend as active_batch_backend,
     active_cuda_backend as active_cuda_backend,
-    active_simd_backend as active_simd_backend,
     cuda_enabled as cuda_enabled,
+    simd_backend as simd_backend,
 )
 
 __version__: str

@@ -32,6 +32,7 @@ add_library(symft_cpp
     src/core/frames.cpp
     src/circuit/circuit_lowering.cpp
     src/sampler/active_state.cpp
+    src/sampler/contiguous_active.cpp
     src/sampler/component_plan.cpp
     src/factored/factored_state.cpp
     src/factored/factored_planner.cpp
@@ -49,7 +50,7 @@ add_library(symft_cpp
     src/sampler/batch_active.cpp
     src/simd/simd_dispatch.cpp
     src/simd/simd_scalar.cpp
-    src/simd/batch_simd_scalar.cpp
+    src/simd/batch_interleaved.cpp
 )
 
 if(SYMFT_CPP_ENABLE_CUDA)

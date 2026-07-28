@@ -245,18 +245,21 @@ For controlled CPU comparisons, `symft_rate_bench --active-components off`
 forces the dense path and `--active-components on` forces an available
 component plan; the default is `auto`.
 
-Inspect the active backends from Python:
+Inspect CPU SIMD and CUDA support from Python:
 
 ```python
-print(symft.active_simd_backend())
-print(symft.active_batch_backend())
+print(symft.simd_backend())
 print(symft.cuda_enabled())
 print(symft.active_cuda_backend())
 ```
 
-Backend names depend on the build and host. `cuda_enabled()` reports whether
-CUDA support was compiled into the extension; it does not guarantee that a
-compatible device is available at runtime.
+Prepared CPU batches store each shot as a contiguous dense vector and use the
+same runtime-dispatched kernels as single-shot sampling. The selected CPU
+backend is reported by `simd_backend()`. Symbolic signs are evaluated with
+64-shot packed words and may also be compiler-vectorized; they do not have a
+separate runtime backend label. Backend names depend on the build and host.
+`cuda_enabled()` reports whether CUDA support was compiled into the extension;
+it does not guarantee that a compatible device is available at runtime.
 
 ### Optional CUDA Python build
 

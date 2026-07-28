@@ -53,8 +53,7 @@ def main():
         parser.exit(1, f"symft error: {exc}\n")
 
     print(circuit)
-    print("simd_backend", symft.active_simd_backend())
-    print("batch_backend", symft.active_batch_backend())
+    print("simd_backend", symft.simd_backend())
     print("cuda_enabled", symft.cuda_enabled())
     print("cuda_backend", symft.active_cuda_backend())
     print(sampler.info)

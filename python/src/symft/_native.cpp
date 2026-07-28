@@ -1220,17 +1220,9 @@ PyObject* CompiledCountsSampler_get_preprocessing_timing(PyCompiledCountsSampler
     return timing_to_dict(CompiledCountsSampler_preprocessing_timing_ref(self));
 }
 
-PyObject* module_active_simd_backend(PyObject*, PyObject*) {
+PyObject* module_simd_backend(PyObject*, PyObject*) {
     try {
         return PyUnicode_FromString(symft::active_simd_backend().c_str());
-    } catch (...) {
-        return set_cpp_exception_null();
-    }
-}
-
-PyObject* module_active_batch_backend(PyObject*, PyObject*) {
-    try {
-        return PyUnicode_FromString(symft::active_batch_backend());
     } catch (...) {
         return set_cpp_exception_null();
     }
@@ -1428,16 +1420,10 @@ PyGetSetDef CompiledCountsSampler_getsets[] = {
 
 PyMethodDef module_methods[] = {
     {
-        "active_simd_backend",
-        reinterpret_cast<PyCFunction>(module_active_simd_backend),
+        "simd_backend",
+        reinterpret_cast<PyCFunction>(module_simd_backend),
         METH_NOARGS,
-        "Return the active-vector SIMD backend selected by the C++ runtime.",
-    },
-    {
-        "active_batch_backend",
-        reinterpret_cast<PyCFunction>(module_active_batch_backend),
-        METH_NOARGS,
-        "Return the batch active-vector backend selected by the C++ runtime.",
+        "Return the CPU SIMD backend selected by the C++ runtime.",
     },
     {
         "cuda_enabled",

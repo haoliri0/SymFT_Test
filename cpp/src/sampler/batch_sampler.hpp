@@ -129,6 +129,8 @@ BatchDetectorPostselectionResult execute_batch_postselected_in_place(
     int first_sample_shot,
     BatchDetectorPostselectionScratch& scratch,
     const BatchDetectorPostselectionOptions& options = {});
+// Compatibility query for the prepared batch sampler's dense-vector backend.
+// Prepared batches use the same runtime-dispatched kernels as single-shot.
 const char* active_batch_backend();
 std::vector<std::vector<std::uint64_t>> sample_measurements_batch(
     const FactoredInstructionProgram& program,

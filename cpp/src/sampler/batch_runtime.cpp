@@ -1,5 +1,6 @@
 #include "batch_internal.hpp"
 #include "sampler/component_plan.hpp"
+#include "simd/simd.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1534,7 +1535,7 @@ std::size_t execute_shot_major_rotation_run(
         double* im = batch_active_im_for_shot(runtime, shot);
         for (std::size_t run_offset = 0; run_offset < run_len; ++run_offset) {
             const auto& rotation = *rotations[run_offset];
-            rotate_contiguous_active(
+            detail::rotate_contiguous_active(
                 re,
                 im,
                 dim,
@@ -1562,7 +1563,7 @@ void rotate_shot_major_postselected(
         if (postselected_shot_is_dead(scratch, shot)) {
             continue;
         }
-        rotate_contiguous_active(
+        detail::rotate_contiguous_active(
             batch_active_re_for_shot(runtime, shot),
             batch_active_im_for_shot(runtime, shot),
             dim,
@@ -1595,17 +1596,12 @@ void promote_first_dormant_rotation_shot_major_postselected(
             continue;
         }
         const double q = packed_bit_at(sign_bits, shot) ? s : -s;
-        double* re = batch_active_re_for_shot(runtime, shot);
-        double* im = batch_active_im_for_shot(runtime, shot);
-        SYMFT_SINGLE_SIMD_LOOP
-        for (std::size_t basis = 0; basis < dim; ++basis) {
-            const double r = re[basis];
-            const double i = im[basis];
-            re[basis] = c * r;
-            im[basis] = c * i;
-            re[dim + basis] = -q * i;
-            im[dim + basis] = q * r;
-        }
+        detail::promote_contiguous_active(
+            batch_active_re_for_shot(runtime, shot),
+            batch_active_im_for_shot(runtime, shot),
+            dim,
+            c,
+            q);
     }
     ++runtime.k;
     --runtime.ndormant;
@@ -2040,7 +2036,7 @@ int default_batch_count(int max_k) {
 }
 
 const char* active_batch_backend() {
-    return batch_simd::scalar_table().name;
+    return simd::dispatch_name();
 }
 
 void assign_presampled_exogenous_batch_in_place(

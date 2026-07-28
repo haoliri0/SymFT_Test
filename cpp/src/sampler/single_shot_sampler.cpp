@@ -1,10 +1,10 @@
 #include "active_kernels.hpp"
 
+#include "sampler/contiguous_active.hpp"
 #include "sampler/exogenous.hpp"
 #include "sampler/component_plan.hpp"
 #include "sampler/random.hpp"
 #include "sampler/single_shot.hpp"
-#include "simd/simd.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -443,15 +443,12 @@ void promote_first_dormant_rotation(FactoredExecutorState& runtime, double kerne
     }
     const double c = std::cos(kernel_angle);
     const double s = std::sin(kernel_angle);
-    SYMFT_SINGLE_SIMD_LOOP
-    for (std::size_t basis = 0; basis < dim; ++basis) {
-        const double r = runtime.active_re[basis];
-        const double i = runtime.active_im[basis];
-        runtime.active_re[basis] = c * r;
-        runtime.active_im[basis] = c * i;
-        runtime.active_re[dim + basis] = s * i;
-        runtime.active_im[dim + basis] = -s * r;
-    }
+    promote_contiguous_active(
+        runtime.active_re.data(),
+        runtime.active_im.data(),
+        dim,
+        c,
+        -s);
     ++runtime.k;
     --runtime.ndormant;
 }
@@ -460,91 +457,34 @@ void rotate_pauli(FactoredExecutorState& runtime, const PrecomputedActivePauliRo
     if (kernel.action.nqubits != runtime.k) {
         fail("rotation kernel dimension does not match active state");
     }
-    const double c = kernel.cos_kernel_angle;
-    double* active_re = runtime.active_re.data();
-    double* active_im = runtime.active_im.data();
-    const std::size_t dim = runtime_active_dim(runtime);
-    if (kernel.is_diagonal) {
-        SYMFT_SINGLE_SIMD_LOOP
-        for (std::size_t basis = 0; basis < dim; ++basis) {
-            const Complex coefficient = compact_rotation_coefficient(kernel, basis, sign);
-            const double fr = c + coefficient.real();
-            const double fi = coefficient.imag();
-            const double r = active_re[basis];
-            const double i = active_im[basis];
-            active_re[basis] = fr * r - fi * i;
-            active_im[basis] = fr * i + fi * r;
-        }
-        return;
-    }
-    const std::size_t npairs = kernel.pair_count;
-    if (kernel.uniform_imag_pairs) {
-        const Complex coefficient = compact_rotation_coefficient(kernel, 0, sign);
-        if (npairs < kSimdPairRotationThreshold) {
-            rotate_uniform_imag_pairs_soa_inline(active_re, active_im, dim, kernel.action.xmask, kernel.pair_bit, c, coefficient.imag());
-        } else {
-            simd::dispatch_table().rotate_uniform_imag_pairs_soa(
-                active_re,
-                active_im,
-                dim,
-                kernel.action.xmask,
-                kernel.pair_bit,
-                c,
-                coefficient.imag());
-        }
-        return;
-    }
-    SYMFT_SINGLE_SIMD_LOOP
-    for (std::size_t idx = 0; idx < npairs; ++idx) {
-        const std::size_t left = insert_zero_bit(idx, static_cast<int>(kernel.pair_bit));
-        const std::size_t right = left ^ static_cast<std::size_t>(kernel.action.xmask);
-        const bool left_odd = active_action_phase_odd(kernel.action, left);
-        const double left_direction = sign != left_odd ? -1.0 : 1.0;
-        const double right_direction = kernel.action.xz_overlap_odd ? -left_direction : left_direction;
-        const double left_re = left_direction * kernel.minus_even_coefficient.real();
-        const double left_im = left_direction * kernel.minus_even_coefficient.imag();
-        const double right_re = right_direction * kernel.minus_even_coefficient.real();
-        const double right_im = right_direction * kernel.minus_even_coefficient.imag();
-        const double r0 = active_re[left];
-        const double i0 = active_im[left];
-        const double r1 = active_re[right];
-        const double i1 = active_im[right];
-        active_re[left] = c * r0 + right_re * r1 - right_im * i1;
-        active_im[left] = c * i0 + right_re * i1 + right_im * r1;
-        active_re[right] = c * r1 + left_re * r0 - left_im * i0;
-        active_im[right] = c * i1 + left_re * i0 + left_im * r0;
-    }
+    rotate_contiguous_active(
+        runtime.active_re.data(),
+        runtime.active_im.data(),
+        runtime_active_dim(runtime),
+        kernel,
+        sign);
 }
 
 double active_diagonal_measurement_branch_probability(
     const FactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
     bool branch) {
-    double probability = 0.0;
-    SYMFT_SINGLE_SIMD_LOOP
-    for (std::size_t idx = 0; idx < kernel.out_dim; ++idx) {
-        const std::size_t source = compact_diagonal_measurement_source(kernel, idx, branch);
-        const double r = runtime.active_re[source];
-        const double i = runtime.active_im[source];
-        probability += r * r + i * i;
-    }
-    return std::clamp(probability, 0.0, 1.0);
+    return diagonal_probability_contiguous(
+        runtime.active_re.data(),
+        runtime.active_im.data(),
+        kernel,
+        branch);
 }
 
 double active_measurement_branch_probability(
     const FactoredExecutorState& runtime,
     const PrecomputedActivePauliMeasurementKernel& kernel,
     bool branch) {
-    const double probability = simd::dispatch_table().measure_nondiagonal_probability_soa(
+    return nondiagonal_probability_contiguous(
         runtime.active_re.data(),
         runtime.active_im.data(),
-        kernel.out_dim << 1,
-        kernel.action.xmask,
-        kernel.action.zmask,
-        static_cast<unsigned>(kernel.pivot),
-        kernel.nondiagonal_coefficient1_even,
+        kernel,
         branch);
-    return std::clamp(probability, 0.0, 1.0);
 }
 
 void project_diagonal_active_pauli_measurement(
@@ -556,12 +496,12 @@ void project_diagonal_active_pauli_measurement(
         fail("sampled an impossible active measurement branch");
     }
     const double invnorm = 1.0 / std::sqrt(probability);
-    SYMFT_SINGLE_SIMD_LOOP
-    for (std::size_t idx = 0; idx < kernel.out_dim; ++idx) {
-        const std::size_t source = compact_diagonal_measurement_source(kernel, idx, branch);
-        runtime.active_re[idx] = runtime.active_re[source] * invnorm;
-        runtime.active_im[idx] = runtime.active_im[source] * invnorm;
-    }
+    project_diagonal_contiguous(
+        runtime.active_re.data(),
+        runtime.active_im.data(),
+        kernel,
+        branch,
+        invnorm);
     --runtime.k;
 }
 
@@ -581,20 +521,14 @@ void project_active_pauli_measurement(
     if (runtime.active_scratch_im.size() < out_dim) {
         runtime.active_scratch_im.resize(out_dim, 0.0);
     }
-    simd::dispatch_table().project_nondiagonal_soa(
+    project_nondiagonal_contiguous(
         runtime.active_re.data(),
         runtime.active_im.data(),
         runtime.active_scratch_re.data(),
         runtime.active_scratch_im.data(),
-        out_dim << 1,
-        kernel.action.xmask,
-        kernel.action.zmask,
-        static_cast<unsigned>(kernel.pivot),
-        kernel.nondiagonal_coefficient1_even,
+        kernel,
         branch,
         invnorm);
-    std::copy_n(runtime.active_scratch_re.data(), out_dim, runtime.active_re.data());
-    std::copy_n(runtime.active_scratch_im.data(), out_dim, runtime.active_im.data());
     --runtime.k;
 }
 
