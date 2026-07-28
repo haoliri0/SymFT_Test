@@ -13,9 +13,24 @@ namespace symft::cuda {
 namespace {
 
 void check_cuda(cudaError_t status, const char* what) {
-    if (status != cudaSuccess) {
-        throw Error(std::string(what) + ": " + cudaGetErrorString(status));
+    if (status == cudaSuccess) {
+        return;
     }
+
+    const char* raw_message = cudaGetErrorString(status);
+    std::string message = std::string(what) + ": " + (raw_message == nullptr ? "unknown CUDA error" : raw_message);
+    if (raw_message != nullptr) {
+        const std::string detail(raw_message);
+        if (detail.find("unsupported toolchain") != std::string::npos ||
+            detail.find("unsupported PTX") != std::string::npos) {
+            message +=
+                ". Rebuild the CUDA extension for this GPU architecture, for example "
+                "SYMFT_PY_ENABLE_CUDA=1 SYMFT_PY_CUDA_ARCH=sm_XX "
+                "python setup.py build_ext --inplace, or use a CUDA toolkit supported "
+                "by the installed NVIDIA driver";
+        }
+    }
+    throw Error(message);
 }
 
 std::uint64_t host_mix_u64(std::uint64_t z) {

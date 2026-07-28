@@ -75,10 +75,12 @@ SYMFT_PY_ENABLE_CUDA=1 python setup.py build_ext --inplace
 
 `CUDA_HOME` or `CUDA_PATH` may be set explicitly when `nvcc` is not on `PATH`.
 Set `SYMFT_PY_CUDA_REAL_DOUBLE=1` as well to compile CUDA active-state arithmetic
-in double precision. If the CUDA toolkit is newer than the installed driver, set
-`SYMFT_PY_CUDA_ARCH`, for example `SYMFT_PY_CUDA_ARCH=sm_120`, so NVCC emits
-device-specific code instead of relying on PTX JIT. Extra NVCC flags can be
-passed with `SYMFT_PY_CUDA_NVCC_FLAGS`.
+in double precision. The CUDA build tries to detect the local GPU architecture
+with `nvidia-smi` and emits device-specific code, avoiding PTX JIT on machines
+whose driver is older than the CUDA toolkit. If auto-detection is unavailable,
+set `SYMFT_PY_CUDA_ARCH` yourself, for example `SYMFT_PY_CUDA_ARCH=sm_89` for
+compute capability 8.9. Extra NVCC flags can be passed with
+`SYMFT_PY_CUDA_NVCC_FLAGS`.
 
 Check the installation and backends:
 

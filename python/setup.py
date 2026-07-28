@@ -1,8 +1,10 @@
 from pathlib import Path
 import os
 import platform
+import re
 import shlex
 import shutil
+import subprocess
 
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
@@ -52,6 +54,65 @@ def cuda_nvcc(cuda_home):
     return found or str(candidate)
 
 
+
+def _cuda_arch_digits(value):
+    value = value.strip().lower()
+    if not value:
+        return None
+    if value.startswith("sm_"):
+        value = value[3:]
+    elif value.startswith("compute_"):
+        value = value[8:]
+    value = value.replace(".", "")
+    if value.isdigit():
+        return value
+    return None
+
+
+def _cuda_arch_entries(value):
+    return [entry for entry in re.split(r"[\s,;]+", value.strip()) if entry]
+
+
+def cuda_arch_flags(value):
+    flags = []
+    for entry in _cuda_arch_entries(value):
+        digits = _cuda_arch_digits(entry)
+        if digits is None:
+            flags.append(f"-arch={entry}")
+        else:
+            flags.append(f"-gencode=arch=compute_{digits},code=sm_{digits}")
+    return flags
+
+
+def detect_native_cuda_arches():
+    nvidia_smi = shutil.which("nvidia-smi")
+    if not nvidia_smi:
+        return []
+    try:
+        result = subprocess.run(
+            [
+                nvidia_smi,
+                "--query-gpu=compute_cap",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+
+    arches = []
+    for line in result.stdout.splitlines():
+        match = re.search(r"(\d+)\.(\d+)", line)
+        if match:
+            arches.append(f"{match.group(1)}{match.group(2)}")
+    return sorted(set(arches))
+
 CUDA_HOME = find_cuda_home() if ENABLE_CUDA else None
 
 
@@ -63,9 +124,33 @@ class BuildExt(build_ext):
         self.include_dirs.append(numpy.get_include())
 
     def build_extensions(self):
+        effective_cuda_arch_flags = []
+        effective_cuda_arch_state = CUDA_ARCH
+        if ENABLE_CUDA:
+            if CUDA_ARCH:
+                effective_cuda_arch_flags = cuda_arch_flags(CUDA_ARCH)
+            else:
+                native_arches = detect_native_cuda_arches()
+                if native_arches:
+                    effective_cuda_arch_state = ",".join(f"sm_{arch}" for arch in native_arches)
+                    effective_cuda_arch_flags = cuda_arch_flags(effective_cuda_arch_state)
+                    self.announce(
+                        "detected CUDA architecture(s): " + effective_cuda_arch_state,
+                        level=3,
+                    )
+                else:
+                    self.announce(
+                        "could not detect CUDA architecture; set SYMFT_PY_CUDA_ARCH=sm_XX "
+                        "to avoid relying on PTX JIT",
+                        level=2,
+                    )
+
+        effective_cuda_arch_flags_state = " ".join(effective_cuda_arch_flags)
         state = (
             f"cuda={int(ENABLE_CUDA)};cuda_real_double={int(CUDA_REAL_DOUBLE)};"
-            f"cuda_arch={CUDA_ARCH};cuda_nvcc_flags={CUDA_NVCC_FLAGS}"
+            f"cuda_arch={effective_cuda_arch_state};"
+            f"cuda_arch_flags={effective_cuda_arch_flags_state};"
+            f"cuda_nvcc_flags={CUDA_NVCC_FLAGS}"
         )
         marker = Path(self.build_temp) / "symft_build_state.txt"
         if not marker.exists() or marker.read_text() != state:
@@ -91,8 +176,7 @@ class BuildExt(build_ext):
                         nvcc_args.extend(["-std=c++20", "-O2"])
                     else:
                         nvcc_args.extend(["-std=c++20", "-O3", "--compiler-options", "-fPIC"])
-                    if CUDA_ARCH:
-                        nvcc_args.append(f"-arch={CUDA_ARCH}")
+                    nvcc_args.extend(effective_cuda_arch_flags)
                     if CUDA_NVCC_FLAGS:
                         nvcc_args.extend(shlex.split(CUDA_NVCC_FLAGS))
                     self.spawn(nvcc_args)

@@ -15,8 +15,12 @@ option(SYMFT_CPP_ENABLE_AVX512 "Build AVX512 active kernels when the compiler su
 option(SYMFT_CPP_NATIVE "Build host-vectorized kernels with -march=native" ON)
 option(SYMFT_CPP_ENABLE_CUDA "Build CUDA SymFT sampler" OFF)
 option(SYMFT_CPP_CUDA_REAL_DOUBLE "Build CUDA sampler active-state arithmetic with double precision" OFF)
+set(SYMFT_CPP_CUDA_ARCH "" CACHE STRING "CUDA architectures for CMAKE_CUDA_ARCHITECTURES, e.g. 89, 90, or 120")
 
 if(SYMFT_CPP_ENABLE_CUDA)
+    if(SYMFT_CPP_CUDA_ARCH)
+        set(CMAKE_CUDA_ARCHITECTURES "${SYMFT_CPP_CUDA_ARCH}" CACHE STRING "CUDA architectures" FORCE)
+    endif()
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
 endif()
