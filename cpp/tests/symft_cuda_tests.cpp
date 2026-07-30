@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -25,7 +26,7 @@ enum class CudaMode {
 };
 
 std::string write_temp_stim(const std::string& name, const std::string& text) {
-    const std::string path = "/tmp/" + name;
+    const std::string path = (std::filesystem::temp_directory_path() / name).string();
     std::ofstream out(path);
     out << text;
     return path;

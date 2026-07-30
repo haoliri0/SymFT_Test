@@ -108,11 +108,10 @@ coherent `d=7` case is included.
 ## Environment
 
 Use a Python environment in which `stim`, `clifft`, `tsim`, and `symft` can all
-be imported. In the current workspace, that environment is
-`../Temp/.venv` relative to the repository root. The CPU harness forces the
-relevant thread-pool environment variables to one before importing the
-simulators. The GPU harness additionally requires CUDA-enabled JAX for Tsim and
-a CUDA-enabled SymFT Python build.
+be imported. Activate that environment before running the commands below. The
+CPU harness forces the relevant thread-pool environment variables to one before
+importing the simulators. The GPU harness additionally requires CUDA-enabled
+JAX for Tsim and a CUDA-enabled SymFT Python build.
 
 Both scripts use only relative default paths: a relative `--config` path is
 resolved from the directory containing the script, and `circuit_dir` and
@@ -128,14 +127,14 @@ checks SymFT's active thread count.
 From the repository root:
 
 ```bash
-../Temp/.venv/bin/python benchmark/benchmark.py --list
-../Temp/.venv/bin/python benchmark/benchmark.py --cpu 42
+python benchmark/benchmark.py --list
+python benchmark/benchmark.py --cpu 42
 ```
 
 Run one case or override the configured duration and repeat count:
 
 ```bash
-../Temp/.venv/bin/python benchmark/benchmark.py \
+python benchmark/benchmark.py \
   --cpu 42 \
   --only '^coherent_d5_r1__symft$' \
   --seconds 60 \
@@ -157,14 +156,14 @@ exposed through `CUDA_VISIBLE_DEVICES`.
 From the repository root:
 
 ```bash
-../Temp/.venv/bin/python benchmark/GPU_benchmark.py --list
-../Temp/.venv/bin/python benchmark/GPU_benchmark.py --gpu 0
+python benchmark/GPU_benchmark.py --list
+python benchmark/GPU_benchmark.py --gpu 0
 ```
 
 For a single SymFT GPU case:
 
 ```bash
-../Temp/.venv/bin/python benchmark/GPU_benchmark.py \
+python benchmark/GPU_benchmark.py \
   --gpu 0 \
   --only '^coherent_d5_r1__symft$' \
   --seconds 60 \

@@ -1,107 +1,78 @@
 # SymFT
 
-SymFT is an exact, high-throughput simulator for noisy adaptive Clifford-dominated circuits.
-It supports Pauli rotations, stochastic Pauli noise, mid-circuit Pauli measurements, measurement-record-controlled Pauli feedback, detectors, observables, and postselection through a Stim-style circuit frontend.
+SymFT is an exact, high-throughput Python/C++ simulator for noisy, adaptive Clifford-dominated quantum circuits.
+It accepts a Stim-style circuit format extended with non-Clifford Pauli rotations and supports stochastic Pauli noise, mid-circuit measurements, measurement-record-controlled feedback, detectors, observables, and postselection.
 
-SymFT is the second-generation successor to SOFT. 
-It replaces per-shot sparse generalized-stabilizer evolution with symbolic Clifford–Pauli frame factorization shared across shots and adaptive stabilizer-coordinate planning.
-The implementation provides C++20 CPU and CUDA GPU backends and a typed Python package.
+SymFT is the second-generation successor to [SOFT](https://github.com/haoliri0/SOFT).
+It replaces SOFT's independent per-shot circuit evolution with a shared symbolic Clifford–Pauli frame and a compiled stabilizer-coordinate sampling plan.
+The implementation provides single-core and multithreaded CPU sampling, runtime-dispatched SIMD kernels, an optional CUDA backend, and a typed Python API.
 
-- [Draft paper: *SymFT: Universal Fault-Tolerant Quantum Circuit Simulation via Symbolic Clifford–Pauli Frames and Stabilizer Coordinates*]()
-- [Detailed Python interface documentation](python/README.md)
+- [Python interface guide](python/README.md)
+- [Benchmark circuits and methodology](benchmark/README.md)
 
-## How SymFT works
+## From SOFT to SymFT
 
-SymFT combines symbolic Clifford–Pauli frame factorization with adaptive stabilizer-coordinate planning.
+SOFT evolves a private generalized-stabilizer tableau, sparse coefficient map, and noise history for every shot.
+SymFT replaces this per-shot evolution with three design features:
 
-### 1. Symbolic Clifford–Pauli frame factorization
+- **Symbolic Clifford–Pauli frame factorization.**
+  SymFT pulls Pauli rotations and measurement projectors through a symbolic Clifford-Pauli frame.
+  Shot-dependent Pauli noise and feedback remain as symbolic signs, so their effects can be
+  evaluated without replaying the Clifford circuit for every shot.
+- **Adaptive stabilizer-coordinate planning.**
+  A shared tableau defines the basis, while a dynamically sized dense vector stores only the active non-stabilizer degrees of freedom.
+  SymFT resolves basis changes once and emits direct multi-coordinate sampling instructions, avoiding per-shot tableau updates and Clifford localization.
+- **Compile once, sample many times.**
+  Preprocessing emits a compact sampling instruction stream that can be reused across shots.
+  Sampling evaluates symbolic signs, updates active coefficients and measurement records, and accumulates detector and observable results without revisiting the original
+  circuit or reconstructing the planning stabilizer tableau.
 
-For each noise assignment and measurement record, SymFT factorizes the branch operator, up to global phase, into a concrete Clifford frame, a symbolic Pauli frame, and an ordered sequence of pulled-back Pauli rotations and measurement projectors.
-The residual Clifford and Pauli frames are unitary, so they do not affect the branch probability.
+## Performance
 
-Clifford gates, Pauli noise, and Pauli feedback therefore do not have to be replayed for every shot.
-Clifford conjugation is resolved once, while noise and feedback remain as affine symbolic signs on the pulled-back rotations and projectors.
+The following results are taken from the current
+[benchmark suite](benchmark/README.md). They report attempted shots per second
+through the public sampling paths, not isolated kernel rates. CPU measurements
+use one pinned core of an Intel Xeon Gold 5218R and complex FP64 arithmetic.
+Each entry is the arithmetic mean of two sampling-only runs of approximately
+60 seconds; compilation and planning are excluded.
 
-### 2. Adaptive stabilizer coordinates
+For pure-Clifford circuits, the most relevant baseline is
+[Stim](https://github.com/quantumlib/Stim). For magic-state cultivation (MSC),
+the most relevant CPU baseline is
+[Clifft](https://github.com/unitaryfoundation/clifft).
 
-Before coordinate planning, a conservative commutation-aware pass fuses same-axis Pauli rotations through intervening commuting operations.
-Within a detector-delimited segment that produced a fusion, it also moves commuting measurements earlier to shorten active-coordinate lifetimes.
-In segments without a fusion, measurement motion is limited to reaching a matching Pauli rotation, which can then collapse to a branch phase instead of merely changing the schedule.
-Detector positions are kept as hard barriers, preserving record order and detector/postselection timing.
+| Regime | Circuit | Baseline | SymFT | Speedup |
+| --- | --- | ---: | ---: | ---: |
+| Pure Clifford | Surface code `d=7, r=7` | Stim: 816.93k | **2.06M** | **2.52×** |
+| Pure Clifford | Surface code `d=9, r=9` | Stim: 350.34k | **899.20k** | **2.56×** |
+| MSC | `d=3` cultivation | Clifft: 502.3k | **1.762M** | **3.51×** |
+| MSC | `d=5` cultivation | Clifft: 42.67k | **107.35k** | **2.52×** |
 
-A one-time planner tracks a shared stabilizer–destabilizer tableau that defines the stabilizer-coordinate basis.
-Some coordinates are active and the rest are dormant.
-A dynamically sized dense active-state vector stores one coefficient for each active-basis state, so its size is controlled by the active width rather than directly by the number of physical qubits.
+The pure-Clifford circuits do not use detector postselection. The MSC circuits
+postselect all detectors and contain the injection and cultivation stages, but
+not the subsequent Clifford-only escape stage. The throughput suffixes `M` and
+`k` denote `10^6` and `10^3` shots/s.
 
-Dormant components are handled through tableau updates and symbolic Pauli corrections.
-Active components become specialized diagonal or paired-amplitude instructions.
-A planned instruction stores only compact Pauli masks, phase, pivot, and angle.
-A non-Clifford rotation can promote a dormant coordinate, while an active measurement can move a coordinate to the dormant set.
-SymFT executes multi-coordinate Pauli operations directly and does not add a runtime Clifford-localization pass over the dense active-state vector.
+The GPU results on an NVIDIA GeForce RTX 4090 also include [Tsim](https://github.com/QuEraComputing/tsim):
 
-### 3. Compile once, sample many times
+| Circuit | SOFT FP64 | Tsim CUDA | SymFT CUDA FP64 | SymFT vs SOFT |
+| --- | ---: | ---: | ---: | ---: |
+| MSC `d=3` | 331.50k | 26.93k | **68.04M** | **205×** |
+| MSC `d=5` | 5.03k | DNC | **2.61M** | **518×** |
 
-The sampler executes only the emitted instruction stream.
-It samples independent symbols, evaluates causal affine expressions, updates the dense active-state vector, projects active measurements, records outcomes, and accumulates detector and observable parities.
-It does not revisit the original circuit, update Pauli frames, conjugate Pauli strings, or reconstruct the planning tableau.
+SOFT and SymFT use FP64. Tsim's effective CUDA path retains FP32 and complex64
+intermediates despite JAX x64 mode, so its result is not a precision-matched
+comparison. DNC means compilation did not finish within 300 seconds.
 
-The method avoids a full physical state vector. 
-Its dominant exponential cost is controlled by the peak active width rather than the number of physical qubits, although the worst case remains exponential.
+The compared tools expose different output forms, so these numbers compare the
+tested public sampling paths rather than identical-width output kernels. See
+the [benchmark documentation](benchmark/README.md) for the circuits,
+configuration, hardware details, and measurement protocol.
 
-## Results reported in the draft
+## Installation
 
-The draft reports attempted-shot throughput, including noise generation,
-quantum sampling, detector and observable evaluation, result readback, and
-detector postselection where applicable. Parsing and one-time preprocessing are
-excluded. CPU results use one pinned physical core; GPU results use a saturated
-NVIDIA GeForce RTX 4090. Each reported rate is the median of seven repetitions.
-
-| Workload | SymFT | Comparison | Speedup |
-| --- | ---: | ---: | ---: |
-| 118-qubit pure-Clifford QEC, CPU FP64 | 2.032 million shots/s | Stim: 748,700 shots/s | 2.715× |
-| Distance-3 cultivation, CPU FP64 | 1.881 million shots/s | Clifft FP64: 454,600 shots/s | 4.138× |
-| Distance-5 cultivation, CPU FP64 | 167,300 shots/s | Clifft FP64: 56,480 shots/s | 2.961× |
-| Distance-3 cultivation, CPU | 1.881 million shots/s | Tsim native: 41.0 shots/s | 45,876× |
-| Distance-3 cultivation, GPU FP32 | 81.72 million shots/s | Tsim native: 23,200 shots/s | 3,522× |
-| Distance-3 cultivation, GPU FP64 | 68.59 million shots/s | SOFT FP64: 336,600 shots/s | 203.8× |
-| Distance-5 cultivation, GPU FP64 | 2.777 million shots/s | SOFT FP64: 7,172 shots/s | 387.3× |
-
-These are public-interface comparisons, not kernel-only comparisons. Output
-contracts differ between implementations, and the Tsim native lane uses lower
-precision than SymFT's CPU FP64 lane. Tsim did not complete distance-5
-preprocessing within the draft's cutoff. See the paper for the full protocol,
-hardware details, precision lanes, output contracts, and outcome checks.
-
-## Supported circuit model
-
-The frontend accepts a substantial Stim-style subset:
-
-- Clifford gates, including single-qubit axis variants, controlled Pauli
-  gates, `SWAP`, `ISWAP`, and `SQRT_XX`/`SQRT_YY`/`SQRT_ZZ` variants;
-- non-Clifford gates and rotations including `T`, `T_DAG`, `R_X`/`R_Y`/`R_Z`,
-  `R_XX`/`R_YY`/`R_ZZ`, `R_PAULI`, `U`/`U3`, and `SPP`/`SPP_DAG`;
-- `M`/`MX`/`MY`, reset and measure-reset operations, `MPP`,
-  `MXX`/`MYY`/`MZZ`, inverted measurement targets, and `MPAD`;
-- `X_ERROR`/`Y_ERROR`/`Z_ERROR`, depolarizing and Pauli channels up to three
-  qubits, correlated-error chains, heralded erasure, and heralded Pauli noise;
-- measurement-record-controlled Pauli feedback;
-- `REPEAT`, coordinates, `DETECTOR`, and `OBSERVABLE_INCLUDE`.
-
-This is not a drop-in parser for the complete Stim language. In particular,
-sweep-controlled operations are rejected. Unsupported instructions or invalid
-target and parameter combinations raise an error with source-line context.
-Following Clifft, rotation angles are specified in half-turns. Multiply an
-angle parameter by $\pi$ to obtain radians.
-
-## Python installation
-
-Requirements:
-
-- Python 3.9 or newer;
-- NumPy 1.20 or newer;
-- a C++20 compiler.
-
-From the repository root:
+The Python package requires Python 3.9 or newer, NumPy 1.20 or newer, and a
+C++20 compiler. From the repository root:
 
 ```bash
 python3 -m venv .venv
@@ -110,12 +81,20 @@ python -m pip install --upgrade pip
 python -m pip install -e ./python
 ```
 
-The Python build compiles the C++ sources directly; CMake is not required for
-the extension.
+The extension compiles the C++ sources directly; CMake is not required for the
+Python build.
 
-## Python quick start
+To include the optional CUDA counts backend, install a CUDA toolkit with
+`nvcc` and run:
 
-Construct a circuit from text and return per-shot measurement records:
+```bash
+SYMFT_PY_ENABLE_CUDA=1 python -m pip install -e ./python
+```
+
+See the [Python interface guide](python/README.md#cuda-counts-backend) for CUDA
+architecture, precision, and execution-mode options.
+
+## Quick start
 
 ```python
 import symft
@@ -127,160 +106,34 @@ M 0
 OBSERVABLE_INCLUDE(0) rec[-1]
 """)
 
-samples = circuit.sample(shots=1_000, seed=123, batch=True)
-print(samples.shape)  # (1000, 1)
-print(samples.dtype)  # bool
-```
+sampler = circuit.compile_counts_sampler(batch=True, observable=0)
+result = sampler.sample(shots=100_000, stream_id=42)
 
-Load a `.stim` file:
-
-```python
-circuit = symft.Circuit(path="benchmark/circuit/msc_d3_inject_cultivate_p1e-3.stim")
-# Equivalent:
-circuit = symft.read_stim_file("benchmark/circuit/msc_d3_inject_cultivate_p1e-3.stim")
-```
-
-Compile a reusable sampler when the same circuit will be sampled repeatedly:
-
-```python
-sampler = circuit.compile_sampler(batch=True)
-
-first = sampler.sample(shots=10_000, seed=1)
-second = sampler.sample(shots=10_000, seed=2)
-
-print(sampler.max_active_qubits)
-```
-
-`sample` returns a two-dimensional `numpy.bool_` array with shape
-`(shots, num_measurements)`. With `bit_packed=True`, it instead returns
-`numpy.uint8` with shape `(shots, ceil(num_measurements / 8))`; record zero is
-the least-significant bit of byte zero.
-
-## Detectors and logical-error counts
-
-Use `sample_detectors` when every detector bit is needed:
-
-```python
-detectors = circuit.sample_detectors(shots=1_000, seed=1)
-print(detectors.shape)  # (1000, circuit.num_detectors)
-```
-
-Use `sample_counts` for high-throughput aggregation without materializing all
-per-shot records:
-
-```python
-result = circuit.sample_counts(
-    shots=1_000_000,
-    seed=1,
-    observable=0,
-    batch=True,
-    threads=4,
-    postselect_detectors=True,
-)
-
-print(result["discard_rate"])
 print(result["logical_error_rate"])
-print(result["active_threads"])
 print(result["timing"])
 ```
 
-A shot is discarded if any detector fires. The selected
-`OBSERVABLE_INCLUDE` records are combined by parity, and an accepted shot with
-observable parity one is counted as a logical error. Consequently,
-`accepted + discarded == shots`, `discard_rate == discarded / shots`, and
-`logical_error_rate == logical_errors / accepted`. A rate is `nan` when its
-denominator is zero.
+Use `Circuit.sample` when full measurement records are needed,
+`Circuit.sample_detectors` for detector records, and `Circuit.sample_counts`
+or a compiled counts sampler for high-throughput aggregate statistics.
 
-For repeated counts jobs, reuse the prepared program and worker storage:
+## Supported circuit model
 
-```python
-sampler = circuit.compile_counts_sampler(
-    batch=True,
-    observable=0,
-    postselect_detectors=True,
-    threads=4,
-)
+The frontend supports:
 
-run_a = sampler.sample(shots=1_000_000, stream_id=10)
-run_b = sampler.sample(shots=1_000_000, stream_id=11)
-print(sampler.info)
-```
+- Clifford gates and Pauli-product operations;
+- `T`, `T_DAG`, arbitrary-axis Pauli rotations, and `U`/`U3`;
+- stochastic Pauli channels and correlated errors;
+- Pauli measurements, resets, and measurement-record-controlled feedback;
+- repeat blocks, detectors, observables, and detector postselection.
 
-An explicit `seed` or `stream_id` makes a given execution path reproducible.
-Single-shot and batch paths use different random-number partitioning, so they
-should be compared statistically rather than expected to produce identical
-bit streams.
+The format is a substantial Stim-style subset with non-Clifford extensions,
+not a drop-in parser for every Stim instruction. Following Clifft's convention,
+a rotation parameter `alpha` represents `alpha * pi` radians; for example,
+`R_Z(0.02)` rotates by `0.02 * pi`.
 
-The complete API, metadata schema, batching controls, error behavior, and type
-signatures are documented in the [Python interface guide](python/README.md).
-The installed package also includes `py.typed` and `.pyi` files.
-
-## Execution backends
-
-The C++ implementation provides:
-
-- a single-shot CPU sampler;
-- a batch CPU sampler with packed symbol, measurement, and detector columns;
-- multithreaded chunk execution for batch counts;
-- exact early detector postselection and live-shot compaction;
-- scalar kernels and CMake-built AVX2/AVX-512 kernels with runtime dispatch;
-- an optional CUDA counts backend.
-
-For circuits with separable active stabilizer coordinates, the CPU samplers
-can store an exact product of smaller dense component vectors. Promotions
-create singleton components; an operation crossing components merges only
-those components before calling the existing dense kernel. A conservative
-post-planning cost model enables this path only when it predicts a material
-work reduction. Other circuits retain the original monolithic dense executor,
-with the backend choice hoisted outside the instruction loop.
-
-Within either a monolithic vector or one component, the batch sampler stores
-each shot contiguously as
-`active_re[shot * active_stride + basis]` and the corresponding imaginary
-array. The automatic batch size remains conservatively limited by the
-program's global peak active width. `symft_plan` reports the selected storage
-mode and its estimated dense/component dimensions and vector work. CUDA
-continues to use the monolithic dense active-state representation.
-For controlled CPU comparisons, `symft_rate_bench --active-components off`
-forces the dense path and `--active-components on` forces an available
-component plan; the default is `auto`.
-
-Inspect CPU SIMD and CUDA support from Python:
-
-```python
-print(symft.simd_backend())
-print(symft.cuda_enabled())
-print(symft.active_cuda_backend())
-```
-
-Prepared CPU batches store each shot as a contiguous dense vector and use the
-same runtime-dispatched kernels as single-shot sampling. The selected CPU
-backend is reported by `simd_backend()`. Symbolic signs are evaluated with
-64-shot packed words and may also be compiler-vectorized; they do not have a
-separate runtime backend label. Backend names depend on the build and host.
-`cuda_enabled()` reports whether CUDA support was compiled into the extension;
-it does not guarantee that a compatible device is available at runtime.
-
-### Optional CUDA Python build
-
-With a CUDA toolkit and `nvcc` available:
-
-```bash
-SYMFT_PY_ENABLE_CUDA=1 python -m pip install -e ./python
-```
-
-Then select the CUDA counts sampler with `cuda=True`:
-
-```python
-result = circuit.sample_counts(shots=1_000_000, cuda=True)
-sampler = circuit.compile_counts_sampler(cuda=True)
-```
-
-Set `CUDA_HOME` or `CUDA_PATH` when the toolkit is not discoverable. Optional
-build controls include `SYMFT_PY_CUDA_ARCH`, `SYMFT_PY_CUDA_NVCC_FLAGS`, and
-`SYMFT_PY_CUDA_REAL_DOUBLE=1`. See the
-[Python interface guide](python/README.md#cuda-counts-backend) for CUDA
-execution modes.
+See the [Python interface guide](python/README.md) for the complete operation
+list, API reference, result schemas, and error behavior.
 
 ## C++ build
 
@@ -376,3 +229,13 @@ benchmark/          Stim fixtures and benchmark inputs
 cpp/tests/          C++ correctness tests
 python/tests/       Python interface tests
 ```
+
+## AI Acknowledgement
+
+The project authors used ChatGPT Pro (GPT-5.5/5.6) and OpenAI Codex for implementation, exploratory coding, preliminary literature searches, and documentation editing.
+The project authors reviewed and verified the resulting code, tests, benchmark results, and documentation, and take full responsibility for the contents of this repository.
+
+## License
+
+SymFT is licensed under the [Apache License 2.0](LICENSE).
+The Clifft-derived benchmark inputs retain their original attribution and are accompanied by a separate [Apache-2.0 license](benchmark/LICENSE-Clifft-paper).

@@ -13,6 +13,7 @@
 #include <complex>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -1982,7 +1983,8 @@ void test_detectors() {
 
 void test_prepared_circuit_sampler_reuse() {
     using namespace symft;
-    const std::string path = "/tmp/symft_prepared_sampler_test.stim";
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "symft_prepared_sampler_test.stim").string();
     {
         std::ofstream out(path);
         out << "M 0\nOBSERVABLE_INCLUDE(0) rec[-1]\n";
@@ -2021,7 +2023,8 @@ void test_prepared_circuit_sampler_reuse() {
 void test_prepared_sampler_multithreading() {
     using namespace symft;
 
-    const std::string random_path = "/tmp/symft_threaded_single_sampler_test.stim";
+    const std::string random_path =
+        (std::filesystem::temp_directory_path() / "symft_threaded_single_sampler_test.stim").string();
     {
         std::ofstream out(random_path);
         out << "X_ERROR(0.25) 0\n"

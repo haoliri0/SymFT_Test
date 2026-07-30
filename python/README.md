@@ -1,9 +1,7 @@
 # SymFT Python Interface
 
 The SymFT Python interface exposes the C++ implementation of the exact
-simulator described in the
-[draft paper](../main.pdf), *SymFT: Universal Fault-Tolerant Quantum Circuit
-Simulation via Symbolic Clifford–Pauli Frames and Stabilizer Coordinates*.
+simulator described in the [project overview](../README.md).
 It compiles noisy adaptive Clifford-plus-Pauli-rotation circuits into the
 paper's planned sampling instruction stream and reuses that plan across shots.
 It supports:
