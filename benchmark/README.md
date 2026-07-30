@@ -1,48 +1,64 @@
-# SymFT benchmark circuits
+# SymFT benchmarks
 
-This directory contains circuit inputs for the paper's near-Clifford and
-pure-Clifford result sections.  The corpus is intentionally limited to circuit
-generation and metadata; it does not contain timing results or hardware claims.
+This directory contains the circuit inputs and compact Python benchmark
+harnesses used for the paper's near-Clifford and pure-Clifford results.
+[`circuit/manifest.json`](circuit/manifest.json) records metadata for the
+original generated circuit corpus; the executable CPU and GPU workload lists
+are defined by [`config.json`](config.json) and
+[`GPU_config.json`](GPU_config.json), respectively.
 
-The machine-readable inventory is [`circuit/manifest.json`](circuit/manifest.json).
-All circuits use physical error rate `p = 1e-3`.
+The circuit files are checked-in benchmark inputs. This directory does not
+provide a circuit-regeneration script.
+
+## Files
+
+| Path | Purpose |
+| --- | --- |
+| [`circuit/`](circuit/) | Versioned Stim and extended Stim-like circuit inputs |
+| [`config.json`](config.json) | CPU cases, per-call shot counts, logical CPU, duration, repeats, seed, and output path |
+| [`benchmark.py`](benchmark.py) | Sequential single-logical-CPU benchmark for Stim, Clifft, Tsim, and SymFT |
+| [`GPU_config.json`](GPU_config.json) | GPU cases, per-call shot counts, GPU selection, and per-circuit SymFT CUDA tuning |
+| [`GPU_benchmark.py`](GPU_benchmark.py) | Sequential GPU benchmark for Tsim and SymFT |
+| [`LICENSE-Clifft-paper`](LICENSE-Clifft-paper) | License for the vendored Clifft-derived inputs |
 
 ## Important: two circuit dialects
 
 The `.stim` suffix describes the text format, not universal compatibility with
 Stim.
 
-- `pure_surface_*` are genuine Stim circuits.  They contain only Clifford
+- `pure_surface_*` are genuine Stim circuits. They contain only Clifford
   operations, Pauli noise, measurements, detectors, and observables.  Use these
   for SymFT/Stim/Clifft/Tsim comparisons.
-- `msc_*`, `msc_proxy_*`, and `coherent_surface_*` use the extended
-  SymFT/Clifft Stim-like dialect.  They contain `T`, `T_DAG`, or `R_Z`, so **Stim
-  cannot parse or sample them**.  Use these for near-Clifford simulators only.
+- `msc_*`, `MSC_circuit_*`, `coherent_surface_*`, and `distillation.stim` use
+  the extended SymFT/Clifft/Tsim Stim-like dialect. They contain operations such
+  as `T`, `T_DAG`, `R_X`, or `R_Z`, so **Stim cannot parse or sample them**.
+  Use these for near-Clifford simulators only.
 
 SymFT and Clifft specify rotation angles in half-turns.  Therefore
 `R_Z(0.02)` means an angle of `0.02*pi` radians.
 
 ## Circuit matrix
 
-| Family | Configurations | Intended comparison | Status |
+| Family | Configurations | CPU tools | GPU tools |
 | --- | --- | --- | --- |
-| Magic-state cultivation | `d=3`, `d=5` | SymFT, SOFT, Clifft, Tsim; CPU/GPU | Canonical Clifft inject+cultivate circuits |
-| MSC performance proxy | `d=7` | SymFT/other extended-dialect tools; FP64 only | Unverified performance workload |
-| Coherent surface code | `(d,r)=(3,1),(3,3),(5,1),(5,5)` | SymFT, Clifft, Tsim; not Stim | Stim scaffold with coherent `R_Z` noise transform |
-| Pure-Clifford surface code | `(d,r)=(7,7),(9,9)` | SymFT, Stim, Clifft, Tsim | Generated and validated by Stim |
+| Magic-state cultivation | `d=3`, `d=5` | Tsim, Clifft, SymFT | Tsim, SymFT |
+| MSC distance-7 workload | `d=7` | Clifft, SymFT | Not configured |
+| Coherent surface code | `(d,r)=(3,1),(3,3),(5,1),(5,5)` | Tsim, Clifft, SymFT | Tsim, SymFT |
+| Magic-state distillation | 85-qubit `[17,1,5]` workload | Tsim, Clifft, SymFT | Tsim, SymFT |
+| Pure-Clifford surface code | `(d,r)=(7,7),(9,9)` | Stim, Clifft, Tsim, SymFT | Tsim, SymFT |
 
-The same circuit should be used for CPU and GPU runs.  Precision is a backend
-setting, not a circuit property.  The proposed result matrix should include
-both FP32 and FP64 for `d=3`, but only FP64 for the `d=5` and `d=7` MSC cases;
-FP32 is not expected to provide adequate numerical accuracy there.
+The same circuit file is used for CPU and GPU runs. Precision is a backend
+setting, not a circuit property. The current harnesses use FP64/JAX x64 for
+the near-Clifford comparisons.
 
 ## Magic-state-cultivation provenance
 
 `msc_d3_inject_cultivate_p1e-3.stim` and
 `msc_d5_inject_cultivate_p1e-3.stim` are byte-for-byte copies of Clifft's
 published `cultivation_d3.stim` and `cultivation_d5.stim` at commit
-`db7dc9f13a2c2854690e92390c779048a1ac1400`.  Their SHA-256 hashes are pinned in
-the generator.  Clifft's construction is based on Gidney, Shutty, and Jones'
+`db7dc9f13a2c2854690e92390c779048a1ac1400`. Their SHA-256 hashes are recorded
+in [`circuit/manifest.json`](circuit/manifest.json). Clifft's construction is
+based on Gidney, Shutty, and Jones'
 magic-state-cultivation code at commit
 `871e68ff6df2f75190b1bfd6351459d1b5a037e3`.
 
@@ -89,29 +105,94 @@ Reset and measurement flip errors remain stochastic.  The `d=5,r=5` case is
 already extremely expensive for exact near-Clifford simulation, so no
 coherent `d=7` case is included.
 
-## Regeneration and checks
+## Environment
 
-Run from the repository root using the local environment:
+Use a Python environment in which `stim`, `clifft`, `tsim`, and `symft` can all
+be imported. In the current workspace, that environment is
+`../Temp/.venv` relative to the repository root. The CPU harness forces the
+relevant thread-pool environment variables to one before importing the
+simulators. The GPU harness additionally requires CUDA-enabled JAX for Tsim and
+a CUDA-enabled SymFT Python build.
+
+Both scripts use only relative default paths: a relative `--config` path is
+resolved from the directory containing the script, and `circuit_dir` and
+`report` are then resolved from the directory containing that configuration
+file.
+
+## CPU benchmark
+
+[`benchmark.py`](benchmark.py) runs every selected case sequentially and pins
+the process to one logical CPU. It also sets Clifft and SymFT to one thread and
+checks SymFT's active thread count.
+
+From the repository root:
 
 ```bash
-.venv/bin/python benchmark/generate_circuits.py
+../Temp/.venv/bin/python benchmark/benchmark.py --list
+../Temp/.venv/bin/python benchmark/benchmark.py --cpu 42
 ```
 
-This deterministically regenerates all pure-Clifford and coherent-noise files,
-checks the pinned canonical MSC inputs, and refreshes the manifest.  The MSC
-files are vendored because Stim cannot generate or parse their non-Clifford
-instructions.
-
-For a read-only freshness check suitable for CI:
+Run one case or override the configured duration and repeat count:
 
 ```bash
-.venv/bin/python benchmark/generate_circuits.py --check
+../Temp/.venv/bin/python benchmark/benchmark.py \
+  --cpu 42 \
+  --only '^coherent_d5_r1__symft$' \
+  --seconds 60 \
+  --repeats 2
 ```
 
-The generator parses every pure-Clifford output with Stim and constructs its
-detector error model.  Extended-dialect files must additionally be parsed or
-compiled with SymFT/Clifft; passing the pure Stim validation does not validate
-the non-Clifford semantics.
+The `--only` value is a regular expression matched against
+`<circuit-id>__<tool>`. Command-line values override the corresponding entries
+under `run` in [`config.json`](config.json). Results are written to the
+configured `report` path, which is `performance.md` by default.
+
+## GPU benchmark
+
+[`GPU_benchmark.py`](GPU_benchmark.py) benchmarks Tsim and SymFT only; SOFT is
+intentionally not included. Each case runs in a fresh child process so its GPU
+memory is released before the next case. The selected physical device is
+exposed through `CUDA_VISIBLE_DEVICES`.
+
+From the repository root:
+
+```bash
+../Temp/.venv/bin/python benchmark/GPU_benchmark.py --list
+../Temp/.venv/bin/python benchmark/GPU_benchmark.py --gpu 0
+```
+
+For a single SymFT GPU case:
+
+```bash
+../Temp/.venv/bin/python benchmark/GPU_benchmark.py \
+  --gpu 0 \
+  --only '^coherent_d5_r1__symft$' \
+  --seconds 60 \
+  --repeats 2
+```
+
+[`GPU_config.json`](GPU_config.json) also supplies SymFT's CUDA mode,
+`threads_per_block`, and `shots_per_launch` for each circuit. Results are
+written incrementally to `GPU_performance.md` by default.
+
+## Shot counts and timing
+
+The shot-count sections specify the number of shots passed to one public Python
+API call:
+
+- `stim_batch` for Stim;
+- `tsim_call` for Tsim;
+- `clifft_call` for Clifft;
+- `symft_call` for SymFT.
+
+For each repeat, the harness keeps making calls of that fixed size until the
+sum of measured sampling time reaches `sample_seconds`. Consequently, a repeat
+can exceed the target duration by the time of its final API call. Compilation,
+sampler construction, and warmup are performed before the measured loop and
+reported separately. Throughput is attempted shots divided by measured sample
+time; the final value is the arithmetic mean across repeats.
+
+## SymFT planning check
 
 To verify SymFT parsing and planning without allocating an active-state vector
 or sampling any shots, build and run the dedicated planner tool:
@@ -128,42 +209,6 @@ left-swaps, and peak resident memory. Use this tool—not `symft_bench` with zer
 shots—for large-width preprocessing checks, because benchmark executors
 allocate active state storage independently of the requested shot count.
 
-## Single-threaded Tsim rate harness
-
-`tsim_rate_bench.py` benchmarks Tsim's public detector sampler on its CPU
-backend while forcing Eigen, BLAS, OpenMP, and related library thread counts to
-one. It reports parsing, sampler construction, and fixed-shape JAX warmup
-separately from the measured repetitions. The `sample_s_*` timings include
-Tsim's full Boolean detector/observable output materialization and the
-host-side reduction to the same discarded, accepted, and logical-error counts
-reported by `symft_rate_bench`.
-
-For the paper's distance-three cultivation configuration:
-
-```bash
-.venv/bin/python benchmark/tsim_rate_bench.py \
-    --circuit benchmark/circuit/msc_d3_inject_cultivate_p1e-3.stim \
-    --shots 128 \
-    --batch-size 128 \
-    --warmups 1 \
-    --repeats 7 \
-    --postselect-detectors \
-    --cpu-affinity 0
-```
-
-Omit `--cpu-affinity` when logical CPU 0 is unavailable, or select a CPU from
-the process's allowed affinity set. `sample_shots_per_s` follows
-`symft_rate_bench` and uses the mean repetition time;
-`sample_shots_per_s_median` is the seven-repetition paper metric. The reported
-process-CPU/wall-time ratio should remain near one for a valid single-thread
-run.
-
-Tsim 0.1.4 does not expose in-sampler detector postselection. Consequently,
-`--postselect-detectors` performs the rejection/count reduction on the
-materialized output inside the timed region; it does not let Tsim skip rejected
-shots. The script labels this as `postselection_implementation
-host_output_reduction`.
-
 ## Benchmarking notes
 
 - Keep compilation/preprocessing time separate from steady-state sampling
@@ -172,8 +217,8 @@ host_output_reduction`.
 - Report attempted shots/s and, when postselecting, survivor rate separately.
 - Record simulator commit, compiler flags, thread affinity, CPU/GPU model, and
   FP32/FP64 mode with every result.
-- Treat the `d=7` MSC proxy label and correctness limitation as part of every
-  table or figure caption that includes it.
+- Treat any proxy or otherwise unverified workload label and correctness
+  limitation as part of every table or figure caption that includes it.
 
 ## References and license
 

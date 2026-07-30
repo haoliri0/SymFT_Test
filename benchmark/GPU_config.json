@@ -5,7 +5,7 @@
     "repeats": 2,
     "compile_timeout_seconds": 300,
     "seed": 20260723,
-    "circuit_dir": "../SymFT/benchmark/circuit",
+    "circuit_dir": "circuit",
     "report": "GPU_performance.md"
   },
   "shots": {
